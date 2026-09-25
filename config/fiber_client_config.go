@@ -1,4 +1,6 @@
-// fiber_client_config.go covers the fiber.client.* section of config.yaml.
+package config
+
+// The fiber.client.* section of config.yaml.
 //
 // Keys in this section, with their environment-variable spellings:
 //
@@ -14,10 +16,8 @@
 //		FIBER_CLIENT_INSECURE
 //
 // Five keys, and that is the whole section — NewClientConfig below reads
-// exactly these. See doc.go for how the environment spelling is derived and
-// which tests hold it up.
-
-package config
+// exactly these. The environment spelling holds only for a Viper built by
+// NewViper; see the package documentation.
 
 import (
 	"errors"

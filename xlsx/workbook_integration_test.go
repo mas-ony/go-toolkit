@@ -2,7 +2,7 @@
 
 package xlsx
 
-// Integration tests for xlsx.
+// Integration tests for workbook.go.
 //
 // The unit suite already writes real workbooks and reads them back, so
 // "integration" here is not about using a real file. It is about the three
@@ -22,10 +22,10 @@ package xlsx
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/xuri/excelize/v2"
 )
@@ -58,6 +58,53 @@ func openWorkbook(t *testing.T, path string, layout Layout) *File {
 	}
 	t.Cleanup(func() { _ = w.Close() })
 	return w
+}
+
+// ----------------------------------------------------------------------------
+// Hyperlinks
+// ----------------------------------------------------------------------------
+
+// linkedWorkbook writes a workbook into dir whose column A holds one link
+// per target, alternating between the two storage forms Hyperlink reads —
+// a real hyperlink in the sheet's relationships, and a HYPERLINK() formula
+// with a literal path — so every test here covers both.
+func linkedWorkbook(t *testing.T, dir string, targets ...string) string {
+	t.Helper()
+	f := excelize.NewFile()
+	t.Cleanup(func() { _ = f.Close() })
+
+	for i, target := range targets {
+		cell := fmt.Sprintf("A%d", i+1)
+		var err error
+		if i%2 == 0 {
+			if err = f.SetCellValue(itSheet, cell, "open"); err == nil {
+				err = f.SetCellHyperLink(itSheet, cell, target,
+					"External")
+			}
+		} else {
+			err = f.SetCellFormula(itSheet, cell,
+				fmt.Sprintf(`HYPERLINK(%q,"open")`, target))
+		}
+		if err != nil {
+			t.Fatalf("writing the link in %s: %v", cell, err)
+		}
+	}
+	path := filepath.Join(dir, "book.xlsx")
+	if err := f.SaveAs(path); err != nil {
+		t.Fatalf("SaveAs: %v", err)
+	}
+	return path
+}
+
+// writeTarget creates a file a link can point at.
+func writeTarget(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // ----------------------------------------------------------------------------
@@ -128,30 +175,60 @@ func TestIntegrationDate1904IsReadFromTheWorkbook(t *testing.T) {
 	}
 }
 
-// The failure this guards against, stated as a comparison: reading a
-// 1904 workbook with the 1900 epoch is not an error, it is a date four
-// years out. If the two ever agree, the epoch has stopped being consulted
-// and every Mac-authored workbook is being read wrong.
-func TestIntegrationTheWrongEpochIsSilentlyWrong(t *testing.T) {
-	const serial = "35000"
+// ----------------------------------------------------------------------------
+// Raw cell values
+// ----------------------------------------------------------------------------
 
-	right, err := Date(serial, true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	wrong, err := Date(serial, false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if right.Time.Equal(wrong.Time) {
-		t.Fatal("both epochs produced the same date; the flag is " +
-			"being ignored")
+// Open calls RawCellValue "the load-bearing option", and until this test
+// nothing noticed if it were turned off.
+//
+// The difference only shows on a cell carrying a number FORMAT. Without
+// the option excelize applies that format and hands back what the sheet
+// DISPLAYS — "10/28/95", or whatever the author's locale renders — instead
+// of the serial underneath. Date cannot resolve a formatted string of that
+// shape, and the whole date path would start failing on workbooks that
+// look perfectly ordinary in Excel.
+//
+// A plain unformatted number cannot show this: formatted and raw are the
+// same string there, which is why every other test in the package passes
+// either way.
+func TestIntegrationRawCellValueBypassesTheNumberFormat(t *testing.T) {
+	const serial = 35000
+
+	path := writeWorkbook(t, "formatted.xlsx",
+		func(t *testing.T, f *excelize.File) {
+			// 14 is Excel's built-in short date format.
+			style, err := f.NewStyle(&excelize.Style{NumFmt: 14})
+			if err != nil {
+				t.Fatalf("NewStyle: %v", err)
+			}
+			if err := f.SetCellValue(
+				itSheet, "A1", serial); err != nil {
+				t.Fatalf("SetCellValue: %v", err)
+			}
+			if err := f.SetCellStyle(
+				itSheet, "A1", "A1", style); err != nil {
+				t.Fatalf("SetCellStyle: %v", err)
+			}
+		})
+
+	w := openWorkbook(t, path, Layout{
+		Sheet: itSheet, HeaderRow: 1, FirstRow: 1})
+
+	got := w.Cell(1, "A")
+	if got != "35000" {
+		t.Fatalf("A1 = %q, want the raw serial 35000 — the cell's "+
+			"number format was applied, which is what RawCellValue "+
+			"exists to prevent", got)
 	}
 
-	gap := right.Time.Sub(wrong.Time)
-	// Four years and a day, two of which are leap years in this span.
-	if want := 1462 * 24 * time.Hour; gap != want {
-		t.Errorf("the epochs differ by %v, want %v", gap, want)
+	// And the consequence: the raw serial is what Date can resolve.
+	d, err := Date(got, w.Date1904())
+	if err != nil {
+		t.Fatalf("Date(%q): %v", got, err)
+	}
+	if have := d.Time.Format("2006-01-02"); have != "1995-10-28" {
+		t.Errorf("serial read as %s, want 1995-10-28", have)
 	}
 }
 
@@ -354,55 +431,87 @@ func TestIntegrationGridReadsAreSafeForConcurrentUse(t *testing.T) {
 	}
 }
 
-// Open calls RawCellValue "the load-bearing option", and until this test
-// nothing noticed if it were turned off.
+// A relative link is stored relative to the WORKBOOK, so it has to resolve
+// there whatever the process's working directory is — including after the
+// workbook was opened by a relative path and the process has moved on.
 //
-// The difference only shows on a cell carrying a number FORMAT. Without
-// the option excelize applies that format and hands back what the sheet
-// DISPLAYS — "10/28/95", or whatever the author's locale renders — instead
-// of the serial underneath. Date cannot resolve a formatted string of that
-// shape, and the whole date path would start failing on workbooks that
-// look perfectly ordinary in Excel.
-//
-// A plain unformatted number cannot show this: formatted and raw are the
-// same string there, which is why every other test in the package passes
-// either way.
-func TestIntegrationRawCellValueBypassesTheNumberFormat(t *testing.T) {
-	const serial = 35000
+// That last case is what the filepath.Abs in Open is for, and nothing else
+// holds it in place. Without it Dir keeps the relative directory, and every
+// link silently re-anchors to wherever the process happens to be when Link
+// is called: a link that reads as broken on a machine where the file is
+// sitting right next to the workbook.
+func TestIntegrationLinksResolveAgainstTheWorkbookNotTheProcess(t *testing.T) {
+	root := t.TempDir()
+	books := filepath.Join(root, "books")
+	elsewhere := filepath.Join(root, "elsewhere")
+	writeTarget(t, filepath.Join(books, "scans", "1.pdf"), "first")
+	writeTarget(t, filepath.Join(books, "scans", "2.pdf"), "second")
+	if err := os.MkdirAll(elsewhere, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	linkedWorkbook(t, books, "scans/1.pdf", "scans/2.pdf")
 
-	path := writeWorkbook(t, "formatted.xlsx",
-		func(t *testing.T, f *excelize.File) {
-			// 14 is Excel's built-in short date format.
-			style, err := f.NewStyle(&excelize.Style{NumFmt: 14})
-			if err != nil {
-				t.Fatalf("NewStyle: %v", err)
-			}
-			if err := f.SetCellValue(
-				itSheet, "A1", serial); err != nil {
-				t.Fatalf("SetCellValue: %v", err)
-			}
-			if err := f.SetCellStyle(
-				itSheet, "A1", "A1", style); err != nil {
-				t.Fatalf("SetCellStyle: %v", err)
-			}
-		})
+	// Open by a RELATIVE path, then move away before resolving anything.
+	t.Chdir(books)
+	w := openWorkbook(t, "book.xlsx",
+		Layout{Sheet: itSheet, HeaderRow: 1, FirstRow: 1})
+	t.Chdir(elsewhere)
 
-	w := openWorkbook(t, path, Layout{
-		Sheet: itSheet, HeaderRow: 1, FirstRow: 1})
-
-	got := w.Cell(1, "A")
-	if got != "35000" {
-		t.Fatalf("A1 = %q, want the raw serial 35000 — the cell's "+
-			"number format was applied, which is what RawCellValue "+
-			"exists to prevent", got)
+	// The premise: resolved against the process, the target is not there.
+	if _, err := os.Stat(filepath.Join("scans", "1.pdf")); err == nil {
+		t.Fatal("the target also exists relative to the working " +
+			"directory, so this test would prove nothing")
 	}
 
-	// And the consequence: the raw serial is what Date can resolve.
-	d, err := Date(got, w.Date1904())
+	for row, want := range map[int]string{1: "first", 2: "second"} {
+		lt, err := w.Link(row, "A")
+		if err != nil {
+			t.Fatalf("row %d: Link: %v", row, err)
+		}
+		if lt.Foreign {
+			t.Errorf("row %d: a relative target was marked foreign", row)
+		}
+		got, err := os.ReadFile(lt.Path)
+		if err != nil {
+			t.Errorf("row %d resolved to %s, which does not open from "+
+				"another directory: %v", row, lt.Path, err)
+			continue
+		}
+		if string(got) != want {
+			t.Errorf("row %d opened %q, want %q", row, got, want)
+		}
+	}
+}
+
+// Foreign describes the SHAPE of a target — absolute or not — and is not a
+// containment check. A relative target can climb out of the workbook's
+// directory with Foreign false, and Link resolves it to the real file
+// there. doc.go says so; this pins it, so that tightening it later is a
+// decision rather than an accident. What actually limits what a link may
+// name is the extension gate applied when the file is read.
+func TestIntegrationARelativeLinkCanLeaveTheWorkbookDirectory(t *testing.T) {
+	root := t.TempDir()
+	books := filepath.Join(root, "books")
+	outside := filepath.Join(root, "outside.pdf")
+	writeTarget(t, outside, "outside")
+	if err := os.MkdirAll(books, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := linkedWorkbook(t, books, "../outside.pdf")
+
+	w := openWorkbook(t, path,
+		Layout{Sheet: itSheet, HeaderRow: 1, FirstRow: 1})
+	lt, err := w.Link(1, "A")
 	if err != nil {
-		t.Fatalf("Date(%q): %v", got, err)
+		t.Fatalf("Link: %v", err)
 	}
-	if have := d.Time.Format("2006-01-02"); have != "1995-10-28" {
-		t.Errorf("serial read as %s, want 1995-10-28", have)
+	if lt.Foreign {
+		t.Error("a relative target was marked foreign")
+	}
+	if filepath.Clean(lt.Path) != outside {
+		t.Errorf("resolved to %s, want %s", lt.Path, outside)
+	}
+	if _, err := os.Stat(lt.Path); err != nil {
+		t.Errorf("the resolved path does not exist: %v", err)
 	}
 }

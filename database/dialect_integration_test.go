@@ -8,8 +8,14 @@ package database
 // Each test runs once per engine whose DSN is set and skips when neither
 // is:
 //
-//	DB_TEST_MYSQL_DSN      user:pass@tcp(host:3306)/scratch
-//	DB_TEST_SQLSERVER_DSN  sqlserver://user:pass@host?database=scratch
+//	DB_TEST_MYSQL_DSN
+//		user:pass@tcp(host:3306)/scratch?parseTime=true&loc=Asia%2FJakarta
+//	DB_TEST_SQLSERVER_DSN
+//		sqlserver://user:pass@host?database=scratch&timezone=Asia%2FJakarta
+//
+// The zone parameters are for the datetime package, which reads the same
+// variables and needs them; this suite passes with or without them. See
+// the package documentation.
 //
 //	go test -tags integration -run Integration ./database
 //

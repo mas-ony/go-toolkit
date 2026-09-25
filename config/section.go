@@ -1,13 +1,13 @@
-// section.go holds the machinery every section in this package shares and
-// no single section owns: the interface a section satisfies, the list entry
-// that pairs a section with the key prefix its keys are nested behind, the
-// presence tracking that lets an application load only the sections it
-// uses, and the placeholder that stands in for the ones it does not.
+package config
+
+// The machinery every section shares and no single section owns: the
+// interface a section satisfies, the list entry pairing a section with the
+// key prefix its keys are nested behind, the presence tracking that lets a
+// service load only the sections it uses, the placeholder standing in for
+// the ones it does not, and the Viper constructor all of it assumes.
 //
 // The per-section files are the authoritative list of ONE section's keys
 // apiece. Nothing about a particular section belongs here.
-
-package config
 
 import (
 	"fmt"
@@ -16,6 +16,31 @@ import (
 
 	"github.com/spf13/viper"
 )
+
+// NewViper returns a Viper instance configured the way every section in
+// this package assumes.
+//
+// Two settings, and each is what one half of the documented contract rests
+// on. The key replacer turns a dotted key into its environment spelling —
+// app.reports_base_url becomes APP_REPORTS_BASE_URL — and AutomaticEnv makes
+// an environment variable of that name override the file.
+//
+// A caller that builds its own instance with viper.New() loses both, and
+// what it loses is invisible: every documented variable is ignored, the
+// file's value or a zero stands in for it, and nothing reports that the
+// override was never wired. That is why the configuration lives here rather
+// than being left for each application to reproduce.
+//
+// Reading the file is left to the caller — SetConfigFile, then ReadInConfig
+// — because where configuration lives is a deployment decision. AllowEmptyEnv
+// is left at its default of off, so an exported-but-empty variable does not
+// blank a value the file supplies; SuppliedSections relies on that too.
+func NewViper() *viper.Viper {
+	v := viper.New()
+	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
+	v.AutomaticEnv()
+	return v
+}
 
 // SectionConfig is what every configuration section implements, and
 // requiring both halves in one interface is what lets an application

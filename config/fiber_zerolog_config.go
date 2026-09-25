@@ -1,4 +1,6 @@
-// fiber_zerolog_config.go covers the fiber.zerolog.* section of config.yaml.
+package config
+
+// The fiber.zerolog.* section of config.yaml.
 //
 // Keys in this section, with their environment-variable spellings:
 //
@@ -14,10 +16,8 @@
 //		FIBER_ZEROLOG_LEVELS
 //
 // Five keys, and that is the whole section — NewZerologConfig below reads
-// exactly these. See doc.go for how the environment spelling is derived and
-// which tests hold it up.
-
-package config
+// exactly these. The environment spelling holds only for a Viper built by
+// NewViper; see the package documentation.
 
 import (
 	"errors"
@@ -45,23 +45,23 @@ const zerologClassCount = 3
 // ZerologConfig wraps fiberzerolog.Config so it participates in the standard
 // Validate/String lifecycle used by all other sub-configs.
 //
-// The middleware is registered OUTERMOST in router.New, so it wraps requestid,
+// The middleware belongs OUTERMOST in the stack, so it wraps requestid,
 // recover, and limiter middleware inside those. That is so every request is
 // logged, including ones that later panic: fiberrecover sits inside it and
 // converts a panic into a returned error, which surfaces as the value of this
 // middleware's c.Next() and so still gets a log line with a status attached.
 //
 // Only the OUTERMOST position matters to this file. Which of the others
-// follow, and whether there are three of them or four, is router.New's
+// follow, and whether there are three of them or four, is the application's
 // argument to make.
 //
 // Reversing the two is not a crash and that is the hazard. This middleware
 // does `chainErr := c.Next()` with no defer, so a panic recovered OUTSIDE it
 // unwinds straight past that call and the request is missing from the log
 // entirely — no error, no warning, just a request that was served and never
-// recorded. router.New carries the full argument; the point to preserve here
-// is that anything registered BEFORE this one produces requests that never
-// appear in the log, and nothing anywhere reports that.
+// recorded. the application carries the full argument; the point to preserve
+// here is that anything registered BEFORE this one produces requests that
+// never appear in the log, and nothing anywhere reports that.
 //
 // It calls the app's ErrorHandler itself, which is what puts a status on the
 // line.
@@ -74,12 +74,12 @@ const zerologClassCount = 3
 //     or panicking request is logged as the 500 the client actually received.
 //     Were the error merely returned and handled a layer out, this middleware
 //     would read the status first and log a 200 for a request that failed.
-//   - router.New's errorHandler therefore runs INSIDE this middleware, not
-//     above it, so its "unhandled error" line is written BEFORE the request
-//     line — and, for a panic, after stackTraceHandler's. Three lines,
-//     innermost first, tied together by the request id.
+//   - the application's error handler therefore runs INSIDE this middleware,
+//     not above it, so its "unhandled error" line is written BEFORE the
+//     request line — and, for a panic, after the stack-trace handler's. Three
+//     lines, innermost first, tied together by the request id.
 //   - Because nil is returned, the error does not reach Fiber's own handling
-//     and errorHandler is not called twice. Registering this middleware
+//     and the error handler is not called twice. Registering this middleware
 //     elsewhere does not change that either: Fiber would then make the one
 //     call instead.
 type ZerologConfig struct {
@@ -202,7 +202,7 @@ func parseLevel(name string) (zerolog.Level, error) {
 // silent — the middleware reads a short list as an instruction to clamp — so
 // the error accompanying each skip is the whole mechanism, and Validate must
 // report it. A ZerologConfig with a non-empty levelErrs never reaches
-// router.New.
+// the application.
 func parseLevels(v *viper.Viper, key string) ([]zerolog.Level, []error) {
 	raw := splitList(v, key)
 	if raw == nil {
@@ -371,7 +371,7 @@ func NewZerologConfig(v *viper.Viper) *ZerologConfig {
 			//   ua            — User-Agent request header
 			//   latency       — total request processing duration, formatted
 			//   requestId     — value of the X-Request-ID RESPONSE header, set
-			//                   by the requestid middleware, which router.New
+			//                   by the requestid middleware, which the application
 			//                   registers between this one and recover. The
 			//                   header name is read from a CONSTANT here, not
 			//                   from fiber.requestid.header, so renaming that
@@ -450,8 +450,8 @@ func NewZerologConfig(v *viper.Viper) *ZerologConfig {
 			// too.
 			//
 			// It is a single switch, and only because two sites outside the
-			// middleware cooperate: router.New's errorHandler and
-			// stackTraceHandler write their own request-id field and take its
+			// middleware cooperate: the application's error handler and
+			// the stack-trace handler write their own request-id field and take its
 			// name from RequestIDField below. A literal at either site makes
 			// this a half-switch — a query for request_id finds the
 			// middleware's line for a failed request but not the error or
@@ -495,7 +495,7 @@ func NewZerologConfig(v *viper.Viper) *ZerologConfig {
 			// is worse: len(Messages)-1 is -1, the middleware indexes
 			// Messages[-1] without a guard, and the FIRST request panics.
 			// Whether that ends the process or returns a 500 depends only on
-			// where router.New puts this middleware relative to recover, which
+			// where the application puts this middleware relative to recover, which
 			// is not a distinction worth relying on. Validate makes it
 			// unreachable.
 			//
@@ -567,7 +567,7 @@ func NewZerologConfig(v *viper.Viper) *ZerologConfig {
 //
 // The returned value is a shallow copy: Fields still shares its backing array
 // with the stored config. Safe only because nothing writes to it — the same
-// assumption router.New makes when it copies cfg.Fiber.Config.
+// assumption the application makes when it copies cfg.Fiber.Config.
 //
 // log is taken BY VALUE and the address of that local copy is stored, so the
 // middleware holds a snapshot. A caller that later reassigns its own logger
@@ -579,7 +579,8 @@ func NewZerologConfig(v *viper.Viper) *ZerologConfig {
 // formats and no error anywhere.
 //
 // Panics if c or c.Config is nil, like every other promoted-field access on
-// this type. Validate rejects both at startup, well before router.New runs.
+// this type. Validate rejects both at startup, well before the application
+// runs.
 func (c *ZerologConfig) WithLogger(log zerolog.Logger) fiberzerolog.Config {
 	out := *c.Config
 	out.Logger = &log
@@ -592,14 +593,14 @@ func (c *ZerologConfig) WithLogger(log zerolog.Logger) fiberzerolog.Config {
 //
 // It exists so that FieldsSnakeCase has exactly one meaning across the
 // service. The middleware renames its own field from a table of constants when
-// the flag is set, but router.New writes the same id on two more lines —
-// errorHandler's and stackTraceHandler's — and those are ordinary zerolog
-// calls that no middleware setting can reach. Spelling the name as a literal
-// at those two sites makes the flag a half-switch: flipping it renames the
-// request line and leaves the two lines EXPLAINING a failed request under the
-// other key, so a query for request_id finds the 500 and not the stack trace
-// behind it. Both handlers take their key from this method, so the three move
-// together or not at all.
+// the flag is set, but the application writes the same id on two more lines —
+// the error handler's and the stack-trace handler's — and those are ordinary
+// zerolog calls that no middleware setting can reach. Spelling the name as a
+// literal at those two sites makes the flag a half-switch: flipping it renames
+// the request line and leaves the two lines EXPLAINING a failed request under
+// the other key, so a query for request_id finds the 500 and not the stack
+// trace behind it. Both handlers take their key from this method, so the three
+// move together or not at all.
 //
 // The two spellings are the middleware's own, not a general camelCase-to-snake
 // conversion — fiberzerolog switches on a fixed set of seven fields and
@@ -611,7 +612,8 @@ func (c *ZerologConfig) WithLogger(log zerolog.Logger) fiberzerolog.Config {
 // TestSnakeCaseRenamesEveryRequestIDField covers it instead.
 //
 // Panics if c or c.Config is nil, like every other promoted-field access on
-// this type. Validate rejects both at startup, well before router.New runs.
+// this type. Validate rejects both at startup, well before the application
+// runs.
 func (c *ZerologConfig) RequestIDField() string {
 	if c.FieldsSnakeCase {
 		return "request_id"
@@ -640,10 +642,10 @@ func (c *ZerologConfig) RequestIDField() string {
 //     silently ignores names it does not recognise.
 //   - Logger. It is nil here by design and stays nil for the life of the
 //     process; WithLogger supplies it to a copy at the point of use. Whether
-//     router.New actually makes that call is equally unchecked and equally
-//     invisible from here — skipping it is not a crash, it substitutes the
-//     middleware's own package-level stderr logger and splits the service's
-//     output across two formats.
+//     the application actually makes that call is equally unchecked and
+//     equally invisible from here — skipping it is not a crash, it substitutes
+//     the middleware's own package-level stderr logger and splits the
+//     service's output across two formats.
 //   - The ABSENCE of Messages or Levels. Either may be nil, and nil is the one
 //     value configDefault replaces — with {"Server error", "Client error",
 //     "Success"} at Error/Warn/Info, which are also the values a file

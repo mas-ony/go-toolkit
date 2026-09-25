@@ -129,15 +129,24 @@
 // the layout resolution, caption folding, the header check, row selection,
 // and every conversion in value.go and link.go against a real file.
 //
-// xlsx_integration_test.go covers what that suite does not reach, and each
-// of the three is a silent-wrong-answer case rather than an error case:
+// workbook_integration_test.go covers what that suite does not reach. Each
+// case produces a WRONG ANSWER rather than an error, which is why each is
+// worth a real file:
 //
 //   - The 1904 epoch, end to end, against a workbook carrying the
 //     property. A wrong epoch produces dates that are all plausible.
 //
+//   - Raw cell values: a cell carrying a date number format must still read
+//     as its serial. With the format applied, Date cannot resolve it.
+//
 //   - The missing cached values above, reproduced by writing a formula and
 //     not calculating it, so the documented behaviour is pinned rather
 //     than described.
+//
+//   - Hyperlinks that resolve against the workbook's directory even after
+//     the process has moved to another one, and a relative link that
+//     climbs out of that directory, which is the non-boundary described
+//     above.
 //
 //   - Concurrent readers under the race detector, against the claim in the
 //     section above.

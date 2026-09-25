@@ -1,4 +1,6 @@
-// fiber_limiter_config.go covers the fiber.limiter.* section of config.yaml.
+package config
+
+// The fiber.limiter.* section of config.yaml.
 //
 // Keys in this section, with their environment-variable spellings:
 //
@@ -18,10 +20,8 @@
 //		FIBER_LIMITER_STRATEGY
 //
 // Seven keys, and that is the whole section — NewLimiterConfig below reads
-// exactly these. See doc.go for how the environment spelling is derived and
-// which tests hold it up.
-
-package config
+// exactly these. The environment spelling holds only for a Viper built by
+// NewViper; see the package documentation.
 
 import (
 	"errors"
@@ -48,7 +48,7 @@ const (
 // LimiterConfig wraps limiter.Config so it participates in the standard
 // Validate/String lifecycle used by all other sub-configs.
 //
-// The middleware is registered FOURTH in router.New — inside zerolog, inside
+// The middleware belongs FOURTH in the stack — inside zerolog, inside
 // requestid, inside recover — and every one of those three is load-bearing:
 //
 //   - Inside zerolog, so a rejected request still produces a log line. A 429
@@ -174,9 +174,9 @@ const (
 //     has exactly one error return and it is unreachable by construction (see
 //     DisableValueRedaction below); on the storage path every get and set can
 //     fail and the handler returns that error, so a backend blip becomes a 500
-//     through errorHandler on every request the middleware sees. Next is nil,
-//     so that includes /readyz — a dependency outage would not degrade the
-//     service, it would take the replica out of rotation. A wrapper that
+//     through the error handler on every request the middleware sees. Next is
+//     nil, so that includes /readyz — a dependency outage would not degrade
+//     the service, it would take the replica out of rotation. A wrapper that
 //     swallows read and write errors is what restores fail-open, and it should
 //     exist before the backend does.
 //   - It cannot make the count EXACT. fiber.Storage is get/set with no INCR
@@ -366,7 +366,7 @@ func NewLimiterConfig(v *viper.Viper) *LimiterConfig {
 			// setting.
 			//
 			// It becomes live the moment a shared Storage is assigned, and
-			// those strings are RETURNED as errors, so they reach errorHandler
+			// those strings are RETURNED as errors, so they reach the error handler
 			// and are logged in full. Set it true only then, only when
 			// cleartext keys are needed to debug that backend, and only when
 			// the log pipeline is allowed to carry client IPs.
@@ -501,15 +501,15 @@ func NewLimiterConfig(v *viper.Viper) *LimiterConfig {
 //   - Storage against fiber.listen.enable_prefork. The interaction is real and
 //     documented on the type, but the multiplier is the host's core count,
 //     which this process cannot know at config time.
-//   - WHERE router.New registers the middleware. That it registers it at all
-//     is settled — the checks below guard a limiter that is actually running —
-//     but the POSITION is not visible from here, and position is what decides
-//     whether a 429 reaches the request log and carries an id. Registered
-//     outside zerolog it answers rejections that never appear in the log;
-//     outside recover it loses the decrement on a panicking request. Both are
-//     absences rather than errors, so nothing reports them. The invariant is
-//     argued at the registration site and on the type above; this method
-//     cannot see either.
+//   - WHERE the application registers the middleware. That it registers it at
+//     all is settled — the checks below guard a limiter that is actually
+//     running — but the POSITION is not visible from here, and position is
+//     what decides whether a 429 reaches the request log and carries an id.
+//     Registered outside zerolog it answers rejections that never appear in
+//     the log; outside recover it loses the decrement on a panicking request.
+//     Both are absences rather than errors, so nothing reports them. The
+//     invariant is argued at the registration site and on the type above; this
+//     method cannot see either.
 //
 // Every check appends rather than returning early, so one restart surfaces
 // every fiber.limiter.* problem at once.
@@ -555,11 +555,11 @@ func (c *LimiterConfig) Validate() error {
 	// misspelled, and the key can be right while the INSTALLED handler is not
 	// the one it names.
 	//
-	// The second case is not hypothetical paranoia — it is the same shape as
-	// the MaxFunc trap on the constructor. What it CANNOT catch is an override
-	// applied after this method runs: router.New copies the struct long after
-	// config load, so a LimiterMiddleware assigned there is invisible here, in
-	// exactly the way a MaxFunc assigned there is. This check binds the key to
+	// The second case is not hypothetical paranoia — it is the same shape as the
+	// MaxFunc trap on the constructor. What it CANNOT catch is an override
+	// applied after this method runs: the application copies the struct long
+	// after config load, so a LimiterMiddleware assigned there is invisible here,
+	// in exactly the way a MaxFunc assigned there is. This check binds the key to
 	// the handler at CONSTRUCTION time — it catches a hand-built config and a
 	// future edit that updates one of the two and not the other, and it says
 	// nothing about what the registration site does afterwards.

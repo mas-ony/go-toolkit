@@ -3,6 +3,7 @@ package xlsx
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 // The separator rules in Decimal are the subtlest logic here and the easiest
@@ -319,5 +320,35 @@ func TestTrimNormalisesNonBreakingSpace(t *testing.T) {
 	}
 	if got := Trim("\u00a035.002\u00a0"); got != "35.002" {
 		t.Errorf("Trim = %q, want 35.002", got)
+	}
+}
+
+// The two date systems count from different days — 1899-12-30 and
+// 1904-01-01 — which are 1462 days apart, so every serial lands exactly
+// that far apart under the two. Pinning the gap rather than one date is
+// what shows the flag is being honoured at all: a Date that ignored it
+// would still produce a plausible date for either setting.
+//
+// This needs no workbook, which is why it is a unit test; the integration
+// suite checks the other half, that Open reads the flag from the file.
+func TestTheEpochsAreAFixedDistanceApart(t *testing.T) {
+	const serial = "35000"
+
+	right, err := Date(serial, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrong, err := Date(serial, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if right.Time.Equal(wrong.Time) {
+		t.Fatal("both epochs produced the same date; the flag is " +
+			"being ignored")
+	}
+
+	gap := right.Time.Sub(wrong.Time)
+	if want := 1462 * 24 * time.Hour; gap != want {
+		t.Errorf("the epochs differ by %v, want %v", gap, want)
 	}
 }

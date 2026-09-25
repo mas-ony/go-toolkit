@@ -1,4 +1,6 @@
-// fiber_session_config.go covers the fiber.session.* section of config.yaml.
+package config
+
+// The fiber.session.* section of config.yaml.
 //
 // Keys in this section, with their environment-variable spellings:
 //
@@ -20,10 +22,8 @@
 //		FIBER_SESSION_IDLE_TIMEOUT
 //
 // Eight keys, and that is the whole section — NewSessionConfig below reads
-// exactly these. See doc.go for how the environment spelling is derived and
-// which tests hold it up.
-
-package config
+// exactly these. The environment spelling holds only for a Viper built by
+// NewViper; see the package documentation.
 
 import (
 	"errors"
@@ -129,8 +129,8 @@ func containsFold(list []string, s string) bool {
 // Next is never consulted so the middleware never skips, a nil ErrorHandler
 // makes handleSessionError fall back to logging and a 500, and a nil
 // KeyGenerator becomes utils.SecureToken. Changing any of the six means
-// editing this file or installing the value on a copy at router.New's call
-// site, the way RecoverConfig.WithStackTraceHandler does.
+// editing this file or installing the value on a copy at the application's
+// call site, the way RecoverConfig.WithStackTraceHandler does.
 func NewSessionConfig(v *viper.Viper) *SessionConfig {
 	return &SessionConfig{
 		Config: &session.Config{
@@ -211,7 +211,7 @@ func NewSessionConfig(v *viper.Viper) *SessionConfig {
 			// Must be non-zero AND must not exceed AbsoluteTimeout. The second
 			// half is not a style rule: configDefault PANICS on
 			// AbsoluteTimeout > 0 && AbsoluteTimeout < IdleTimeout, and
-			// router.New calls session.New during startup, so the pairing
+			// the application calls session.New during startup, so the pairing
 			// takes the process down with a runtime panic instead of a config
 			// error. Validate catches it first.
 			IdleTimeout: v.GetDuration("fiber.session.idle_timeout"),
@@ -267,7 +267,7 @@ func (c *SessionConfig) Validate() error {
 	}
 
 	// Checked here rather than left to the middleware because the middleware's
-	// answer is a panic. session.configDefault runs on the value router.New
+	// answer is a panic. session.configDefault runs on the value the application
 	// passes to session.New, and an AbsoluteTimeout below IdleTimeout takes
 	// the process down at startup with "[session] AbsoluteTimeout must be
 	// greater than or equal to IdleTimeout" — a message that names neither
@@ -282,7 +282,7 @@ func (c *SessionConfig) Validate() error {
 	// absolute_timeout: 10m with idle_timeout absent would panic on 10m < 30m
 	// and this check would not see it. What makes that unreachable is the
 	// separate "idle_timeout is required" error above: validate fails, New
-	// returns an error, and router.New never runs. The conjunct is there so
+	// returns an error, and the application never runs. The conjunct is there so
 	// this error does not fire alongside that one describing a 30m the
 	// operator never wrote — not because the pairing is harmless.
 	if c.AbsoluteTimeout > 0 && c.IdleTimeout > 0 &&
@@ -355,7 +355,7 @@ func (c *SessionConfig) Validate() error {
 // grounds RequestIDConfig.String derives its Generator line — that method's
 // comment carries the argument in full.
 //
-// The exposure here is identical: router.New hands *cfg.Session.Config to
+// The exposure here is identical: the application hands *cfg.Session.Config to
 // session.New by value, so an Extractor assigned onto that copy — the shape
 // RecoverConfig.WithStackTraceHandler and ZerologConfig.WithLogger both use
 // deliberately — would leave this line naming "session_id" while the cookie is

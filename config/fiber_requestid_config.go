@@ -1,5 +1,6 @@
-// fiber_requestid_config.go covers the fiber.requestid.* section of
-// config.yaml.
+package config
+
+// The fiber.requestid.* section of config.yaml.
 //
 // Keys in this section, with their environment-variable spellings:
 //
@@ -7,10 +8,8 @@
 //		FIBER_REQUESTID_HEADER
 //
 // One key, and that is the whole section — NewRequestIDConfig below reads
-// exactly that one. See doc.go for how the environment spelling is derived and
-// which tests hold it up.
-
-package config
+// exactly that one. The environment spelling holds only for a Viper built by
+// NewViper; see the package documentation.
 
 import (
 	"errors"
@@ -55,7 +54,7 @@ const DefaultRequestIDHeader = fiber.HeaderXRequestID
 // RequestIDConfig wraps requestid.Config so it participates in the standard
 // Validate/String lifecycle used by all other sub-configs.
 //
-// The middleware is registered SECOND in router.New — inside zerolog, outside
+// The middleware belongs SECOND in the stack — inside zerolog, outside
 // recover — and every one of those two is load-bearing:
 //
 //   - Inside zerolog, because the "requestId" log field is read from the
@@ -64,12 +63,12 @@ const DefaultRequestIDHeader = fiber.HeaderXRequestID
 //     outermost (so a request that panics is still logged) would be broken for
 //     nothing.
 //   - Outside recover, so a recovered panic still has an id to log. Both
-//     stackTraceHandler and errorHandler read it back with
+//     the stack-trace handler and the error handler read it back with
 //     requestid.FromContext(c), and that id is what ties the 500 a client saw
 //     to the two log lines that explain it.
 //
-// router.New carries the full argument; the point to preserve here is that the
-// id has to exist before anything that might fail runs.
+// the application carries the full argument; the point to preserve here is
+// that the id has to exist before anything that might fail runs.
 //
 // # Where the id is readable, which is narrower than it looks
 //
@@ -77,10 +76,11 @@ const DefaultRequestIDHeader = fiber.HeaderXRequestID
 // two things conditionally: it ALWAYS writes c.Locals, and it copies the value
 // into the request context ONLY when fiber.pass_locals_to_context is true —
 // and false is the setting that keeps it out. So requestid.FromContext(c)
-// resolves anywhere a fiber.Ctx is in hand, which covers both of router.New's
-// handlers, and a service or repository holding a plain context.Context sees
-// nothing at all. Threading the id into that layer means flipping that key or
-// passing it explicitly; there is no fiber.requestid.* setting for it.
+// resolves anywhere a fiber.Ctx is in hand, which covers both of the
+// application's handlers, and a service or repository holding a plain
+// context.Context sees nothing at all. Threading the id into that layer means
+// flipping that key or passing it explicitly; there is no fiber.requestid.*
+// setting for it.
 type RequestIDConfig struct {
 	// Embedded as a POINTER, so both the wrapper and the embedded struct can
 	// be nil independently — hence the two-part nil check in Validate.
@@ -203,8 +203,8 @@ func NewRequestIDConfig(v *viper.Viper) *RequestIDConfig {
 //     configDefault substitutes utils.SecureToken for the nil Generator, and
 //     never consults a nil Next. Neither can be expressed in YAML. "Nil here"
 //     is all this method can speak to, and the distinction matters for
-//     Generator. router.New hands *cfg.RequestID.Config to requestid.New by
-//     value, so a Generator assigned onto that copy — the shape
+//     Generator. the application hands *cfg.RequestID.Config to requestid.New
+//     by value, so a Generator assigned onto that copy — the shape
 //     RecoverConfig.WithStackTraceHandler and ZerologConfig.WithLogger both
 //     use deliberately — would be invisible from here, exactly as a
 //     LimiterMiddleware assigned at the registration site is invisible to
@@ -263,7 +263,7 @@ func (c *RequestIDConfig) Validate() error {
 // # Generator is DERIVED, not asserted
 //
 // A literal "Generator=utils.SecureToken" would be true on the current wiring:
-// the field is nil here, router.New passes *cfg.RequestID.Config through
+// the field is nil here, the application passes *cfg.RequestID.Config through
 // unmodified, and configDefault substitutes utils.SecureToken for the nil. But
 // it would be true by coincidence of a call site this file cannot see, not by
 // construction — the same shape as RecoverConfig.WithStackTraceHandler and

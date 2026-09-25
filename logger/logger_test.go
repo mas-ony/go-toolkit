@@ -183,7 +183,7 @@ func TestNonDevelopmentEmitsStructuredJSON(t *testing.T) {
 			t.Parallel()
 
 			out := emit(env, func(l zerolog.Logger) {
-				l.Info().Str("service", "sertifikat").Msg("started")
+				l.Info().Str("service", "billing").Msg("started")
 			})
 
 			line := strings.TrimSpace(out)
@@ -201,8 +201,8 @@ func TestNonDevelopmentEmitsStructuredJSON(t *testing.T) {
 			if got := entry["message"]; got != "started" {
 				t.Errorf("message: got %v, want \"started\"", got)
 			}
-			if got := entry["service"]; got != "sertifikat" {
-				t.Errorf("service: got %v, want \"sertifikat\"", got)
+			if got := entry["service"]; got != "billing" {
+				t.Errorf("service: got %v, want \"billing\"", got)
 			}
 			if _, ok := entry["caller"]; ok {
 				t.Error("caller is present; it must be omitted outside dev")
@@ -368,7 +368,7 @@ func TestChildLoggerInheritsLevelAndWriter(t *testing.T) {
 	t.Parallel()
 
 	out := emit(config.EnvProduction, func(l zerolog.Logger) {
-		child := l.With().Str("service", "sertifikat").Logger()
+		child := l.With().Str("service", "billing").Logger()
 		child.Debug().Msg("suppressed")
 		child.Info().Msg("emitted")
 	})
@@ -385,7 +385,7 @@ func TestChildLoggerInheritsLevelAndWriter(t *testing.T) {
 	if err := json.Unmarshal([]byte(lines[0]), &entry); err != nil {
 		t.Fatalf("output is not valid JSON: %v", err)
 	}
-	if entry["service"] != "sertifikat" {
+	if entry["service"] != "billing" {
 		t.Errorf("service tag missing from the child's output: %v", entry)
 	}
 	if entry["message"] != "emitted" {

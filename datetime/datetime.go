@@ -175,7 +175,7 @@ func (d *Datetime) UnmarshalJSON(b []byte) error {
 // JSON body is never affected; every other decoder is. Query, form and path
 // binding in a typical web framework goes through a schema decoder that
 // looks for encoding.TextUnmarshaler, so without this method a "2024-03-15"
-// that parses in a request body would fail as ?tgl=2024-03-15 — the same
+// that parses in a request body would fail as ?date=2024-03-15 — the same
 // string, accepted in one place and rejected in another, with nothing in
 // either error saying why.
 //

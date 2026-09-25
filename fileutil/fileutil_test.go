@@ -274,22 +274,22 @@ func TestPathContainsHostileNames(t *testing.T) {
 		"dir/ scan.pdf",
 	}
 
-	for _, nama := range hostile {
-		t.Run(nama, func(t *testing.T) {
+	for _, supplied := range hostile {
+		t.Run(supplied, func(t *testing.T) {
 			t.Parallel()
 
-			p := Path(uploadDir, testID, nama)
+			p := Path(uploadDir, testID, supplied)
 			if got := filepath.Dir(p); got != recordDir {
 				t.Errorf(
 					"Path(%q) resolved into %q, want %q",
-					nama, got, recordDir)
+					supplied, got, recordDir)
 			}
 			if p == recordDir {
-				t.Errorf("Path(%q) resolved to the directory itself", nama)
+				t.Errorf("Path(%q) resolved to the directory itself", supplied)
 			}
 			prefix := recordDir + string(filepath.Separator)
 			if !strings.HasPrefix(filepath.Clean(p), prefix) {
-				t.Errorf("Path(%q) = %q escaped %q", nama, p, recordDir)
+				t.Errorf("Path(%q) = %q escaped %q", supplied, p, recordDir)
 			}
 		})
 	}
@@ -317,19 +317,19 @@ func TestPathFindsWhatWriteStored(t *testing.T) {
 		"",
 	}
 
-	for _, nama := range names {
-		t.Run(strings.ReplaceAll(nama, "\x00", "<NUL>"), func(t *testing.T) {
+	for _, supplied := range names {
+		t.Run(strings.ReplaceAll(supplied, "\x00", "<NUL>"), func(t *testing.T) {
 			t.Parallel()
 
 			uploadDir := t.TempDir()
-			stored, err := Write(uploadDir, testID, nama, []byte("x"))
+			stored, err := Write(uploadDir, testID, supplied, []byte("x"))
 			if err != nil {
-				t.Fatalf("Write(%q): %v", nama, err)
+				t.Fatalf("Write(%q): %v", supplied, err)
 			}
 			if _, err := Stat(uploadDir, testID, stored); err != nil {
 				t.Fatalf(
 					"Write(%q) returned %q, which Path cannot resolve: %v",
-					nama, stored, err)
+					supplied, stored, err)
 			}
 			if _, err := Read(uploadDir, testID, stored); err != nil {
 				t.Errorf("Read(%q): %v", stored, err)
@@ -619,7 +619,7 @@ func TestWritePermissions(t *testing.T) {
 //
 //	0700  <uploadDir>          <- the level a leaf-only chmod misses
 //	0755  <uploadDir>/<id>
-//	0644  <uploadDir>/<id>/<nama>
+//	0644  <uploadDir>/<id>/<supplied>
 //
 // A traversal blocked at the top is indistinguishable, from the HTTP process's
 // side, from one blocked at the bottom: the file is unreadable either way.
@@ -769,15 +769,15 @@ func TestCopyUniqueSuffixesBeforeTheExtension(t *testing.T) {
 	t.Parallel()
 
 	uploadDir := t.TempDir()
-	_, err := Write(uploadDir, testID, "surat.docx", []byte("v1"))
+	_, err := Write(uploadDir, testID, "letter.docx", []byte("v1"))
 	if err != nil {
 		t.Fatalf("Write: %v", err)
 	}
 
-	want := []string{"surat (2).docx", "surat (3).docx", "surat (4).docx"}
+	want := []string{"letter (2).docx", "letter (3).docx", "letter (4).docx"}
 	for _, expected := range want {
 		name, n, err := CopyUnique(
-			uploadDir, testID, "surat.docx", "surat.docx")
+			uploadDir, testID, "letter.docx", "letter.docx")
 		if err != nil {
 			t.Fatalf("CopyUnique: %v", err)
 		}
@@ -796,7 +796,7 @@ func TestCopyUniqueSuffixesBeforeTheExtension(t *testing.T) {
 
 	// The source is untouched. This is the difference from Write, and the
 	// reason CopyUnique exists rather than a second call to it.
-	if got, err := Read(uploadDir, testID, "surat.docx"); err != nil {
+	if got, err := Read(uploadDir, testID, "letter.docx"); err != nil {
 		t.Errorf("the source file is gone: %v", err)
 	} else if string(got) != "v1" {
 		t.Errorf("the source was overwritten: got %q", got)
@@ -809,17 +809,17 @@ func TestCopyUniqueTakesTheDesiredNameWhenFree(t *testing.T) {
 	t.Parallel()
 
 	uploadDir := t.TempDir()
-	_, err := Write(uploadDir, testID, "surat.docx", []byte("v1"))
+	_, err := Write(uploadDir, testID, "letter.docx", []byte("v1"))
 	if err != nil {
 		t.Fatalf("Write: %v", err)
 	}
 
-	name, _, err := CopyUnique(uploadDir, testID, "surat.docx", "salinan.docx")
+	name, _, err := CopyUnique(uploadDir, testID, "letter.docx", "backup.docx")
 	if err != nil {
 		t.Fatalf("CopyUnique: %v", err)
 	}
-	if name != "salinan.docx" {
-		t.Errorf("name: got %q, want %q", name, "salinan.docx")
+	if name != "backup.docx" {
+		t.Errorf("name: got %q, want %q", name, "backup.docx")
 	}
 }
 
@@ -909,7 +909,7 @@ func TestCopyUniqueIsAtomicUnderConcurrency(t *testing.T) {
 	t.Parallel()
 
 	uploadDir := t.TempDir()
-	_, err := Write(uploadDir, testID, "surat.docx", []byte("v1"))
+	_, err := Write(uploadDir, testID, "letter.docx", []byte("v1"))
 	if err != nil {
 		t.Fatalf("Write: %v", err)
 	}
@@ -926,7 +926,7 @@ func TestCopyUniqueIsAtomicUnderConcurrency(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			name, _, err := CopyUnique(
-				uploadDir, testID, "surat.docx", "surat.docx")
+				uploadDir, testID, "letter.docx", "letter.docx")
 			mu.Lock()
 			defer mu.Unlock()
 			if err != nil {
@@ -977,16 +977,16 @@ func TestCopyUniqueRefusesASuffixOverTheNameCap(t *testing.T) {
 
 	uploadDir := t.TempDir()
 	// Exactly the cap: 16 bytes of stem plus ".pdf".
-	nama := strings.Repeat("a", MaxNameLen-4) + ".pdf"
-	if NameTooLong(nama) {
-		t.Fatalf("fixture is wrong: %q is already over the cap", nama)
+	supplied := strings.Repeat("a", MaxNameLen-4) + ".pdf"
+	if NameTooLong(supplied) {
+		t.Fatalf("fixture is wrong: %q is already over the cap", supplied)
 	}
-	if _, err := Write(uploadDir, testID, nama, []byte("v1")); err != nil {
+	if _, err := Write(uploadDir, testID, supplied, []byte("v1")); err != nil {
 		t.Fatalf("Write: %v", err)
 	}
 
 	// The desired name is free, so no suffix is inserted and the copy fits.
-	first, _, err := CopyUnique(uploadDir, testID, nama, "salinan.pdf")
+	first, _, err := CopyUnique(uploadDir, testID, supplied, "backup.pdf")
 	if err != nil {
 		t.Fatalf("CopyUnique under the cap: %v", err)
 	}
@@ -995,7 +995,7 @@ func TestCopyUniqueRefusesASuffixOverTheNameCap(t *testing.T) {
 	}
 
 	// The desired name is taken, so the loop reaches " (2)" and overflows.
-	name, n, err := CopyUnique(uploadDir, testID, nama, nama)
+	name, n, err := CopyUnique(uploadDir, testID, supplied, supplied)
 	if err == nil {
 		t.Fatalf(
 			"CopyUnique returned %q, which is %d bytes against a %d-byte "+
@@ -1120,7 +1120,7 @@ func TestRemove(t *testing.T) {
 
 		// The guard keys on SUBSTITUTION, not on the resulting name, so an
 		// upload that really was called FallbackName stays removable. A guard
-		// written as `SafeName(nama) == FallbackName` alone would strand
+		// written as `SafeName(supplied) == FallbackName` alone would strand
 		// these files on disk forever, and nothing in the caller would report
 		// it.
 		uploadDir := t.TempDir()
@@ -1157,19 +1157,19 @@ func TestRemoveFiles(t *testing.T) {
 	t.Parallel()
 
 	uploadDir := t.TempDir()
-	for _, nama := range []string{"a.pdf", "b.pdf", "c.pdf"} {
-		if _, err := Write(uploadDir, testID, nama, []byte("x")); err != nil {
-			t.Fatalf("Write(%q): %v", nama, err)
+	for _, supplied := range []string{"a.pdf", "b.pdf", "c.pdf"} {
+		if _, err := Write(uploadDir, testID, supplied, []byte("x")); err != nil {
+			t.Fatalf("Write(%q): %v", supplied, err)
 		}
 	}
 
 	a, b := "a.pdf", "b.pdf"
 	RemoveFiles(uploadDir, testID, []*string{&a, nil, &b, nil})
 
-	for _, nama := range []string{"a.pdf", "b.pdf"} {
-		_, err := os.Stat(Path(uploadDir, testID, nama))
+	for _, supplied := range []string{"a.pdf", "b.pdf"} {
+		_, err := os.Stat(Path(uploadDir, testID, supplied))
 		if !errors.Is(err, fs.ErrNotExist) {
-			t.Errorf("%q survived RemoveFiles", nama)
+			t.Errorf("%q survived RemoveFiles", supplied)
 		}
 	}
 	if _, err := os.Stat(Path(uploadDir, testID, "c.pdf")); err != nil {
@@ -1237,11 +1237,11 @@ func TestDetectContentType(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name string
-		nama string
-		data []byte
-		want string
-		why  string
+		name     string
+		supplied string
+		data     []byte
+		want     string
+		why      string
 	}{
 		// The sniff is recognised and allowed, so it is trusted.
 		{"pdf", "scan.pdf", pdfBytes, "application/pdf", "sniffed, allowed"},
@@ -1319,10 +1319,10 @@ func TestDetectContentType(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if got := DetectContentType(tc.nama, tc.data); got != tc.want {
+			if got := DetectContentType(tc.supplied, tc.data); got != tc.want {
 				t.Errorf(
 					"DetectContentType(%q, %d bytes): got %q, want %q (%s)",
-					tc.nama,
+					tc.supplied,
 					len(tc.data),
 					got,
 					tc.want,
@@ -1343,12 +1343,12 @@ func TestDetectContentTypeNeverReturnsEmpty(t *testing.T) {
 	}
 	names := []string{"", "scan", "scan.pdf", "scan.exe", ".pdf", "scan."}
 
-	for _, nama := range names {
+	for _, supplied := range names {
 		for _, data := range corpus {
-			if got := DetectContentType(nama, data); got == "" {
+			if got := DetectContentType(supplied, data); got == "" {
 				t.Errorf(
 					"DetectContentType(%q, %d bytes) returned an empty string",
-					nama, len(data))
+					supplied, len(data))
 			}
 		}
 	}
@@ -1437,8 +1437,8 @@ func TestHasAllowedExt(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		nama string
-		want bool
+		supplied string
+		want     bool
 	}{
 		{"scan.pdf", true},
 		{"scan.PDF", true},
@@ -1459,12 +1459,12 @@ func TestHasAllowedExt(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		t.Run(tc.nama, func(t *testing.T) {
+		t.Run(tc.supplied, func(t *testing.T) {
 			t.Parallel()
-			if got := HasAllowedExt(tc.nama); got != tc.want {
+			if got := HasAllowedExt(tc.supplied); got != tc.want {
 				t.Errorf(
 					"HasAllowedExt(%q): got %t, want %t",
-					tc.nama,
+					tc.supplied,
 					got,
 					tc.want)
 			}
@@ -1531,9 +1531,9 @@ func TestRegisterExtsNormalisesTheKey(t *testing.T) {
 		"":      "ignored",
 	})
 
-	for _, nama := range []string{"a.heic", "a.HEIC", "a.avif", "a.svg"} {
-		if !HasAllowedExt(nama) {
-			t.Errorf("HasAllowedExt(%q) is false after registration", nama)
+	for _, supplied := range []string{"a.heic", "a.HEIC", "a.avif", "a.svg"} {
+		if !HasAllowedExt(supplied) {
+			t.Errorf("HasAllowedExt(%q) is false after registration", supplied)
 		}
 	}
 	if slices.Contains(AllowedExts(), ".") {
@@ -1586,18 +1586,18 @@ func TestRegisterExtsNormalisesTheContentType(t *testing.T) {
 			"image/heic")
 	}
 
-	for _, nama := range []string{"a.foo", "a.bar"} {
-		if HasAllowedExt(nama) {
+	for _, supplied := range []string{"a.foo", "a.bar"} {
+		if HasAllowedExt(supplied) {
 			t.Errorf(
 				"HasAllowedExt(%q) is true — an entry with no content type "+
 					"must not be registered",
-				nama)
+				supplied)
 		}
-		if got := DetectContentType(nama, tiffBytes); got == "" {
+		if got := DetectContentType(supplied, tiffBytes); got == "" {
 			t.Errorf(
 				"DetectContentType(%q) returned the empty string, which the "+
 					"doc promises it never does",
-				nama)
+				supplied)
 		}
 	}
 }
@@ -1663,17 +1663,17 @@ func TestContainerExceptionRefinesAZipSniff(t *testing.T) {
 
 	RegisterExts(OfficeExts)
 
-	cases := []struct{ nama, want string }{
-		{"surat.docx", OfficeExts[".docx"]},
+	cases := []struct{ supplied, want string }{
+		{"letter.docx", OfficeExts[".docx"]},
 		{"data.xlsx", OfficeExts[".xlsx"]},
 		{"slide.pptx", OfficeExts[".pptx"]},
-		{"surat.odt", OfficeExts[".odt"]},
+		{"letter.odt", OfficeExts[".odt"]},
 	}
 	for _, c := range cases {
-		if got := DetectContentType(c.nama, zipBytes); got != c.want {
+		if got := DetectContentType(c.supplied, zipBytes); got != c.want {
 			t.Errorf(
 				"DetectContentType(%q, zip): got %q, want %q",
-				c.nama, got, c.want)
+				c.supplied, got, c.want)
 		}
 	}
 }
@@ -1692,19 +1692,19 @@ func TestContainerExceptionIsKeyedOnTheFormat(t *testing.T) {
 
 	const generic = "application/octet-stream"
 	cases := []struct {
-		nama string
-		data []byte
-		why  string
+		supplied string
+		data     []byte
+		why      string
 	}{
 		{"scan.pdf", zipBytes, "a pdf is not a zip-backed format"},
-		{"surat.docx", htmlBytes, "text/html is not the docx container"},
-		{"surat.doc", htmlBytes, "legacy office formats have no container"},
+		{"letter.docx", htmlBytes, "text/html is not the docx container"},
+		{"letter.doc", htmlBytes, "legacy office formats have no container"},
 	}
 	for _, c := range cases {
-		if got := DetectContentType(c.nama, c.data); got != generic {
+		if got := DetectContentType(c.supplied, c.data); got != generic {
 			t.Errorf(
 				"DetectContentType(%q): got %q, want %q (%s)",
-				c.nama, got, generic, c.why)
+				c.supplied, got, generic, c.why)
 		}
 	}
 }
@@ -1745,7 +1745,7 @@ func TestRegisteringAnArchiveTypeDefeatsTheException(t *testing.T) {
 	RegisterExt(".zip", "application/zip")
 
 	const zip = "application/zip"
-	if got := DetectContentType("surat.docx", zipBytes); got != zip {
+	if got := DetectContentType("letter.docx", zipBytes); got != zip {
 		t.Errorf(
 			"DetectContentType: got %q, want %q — an accepted sniff wins",
 			got, zip)
@@ -1768,20 +1768,20 @@ func TestNameTooLongMeasuresBytes(t *testing.T) {
 
 	// Ω is two bytes in UTF-8, so half the cap plus one rune is one byte over
 	// the limit while remaining well under it by rune count.
-	nama := strings.Repeat("Ω", MaxNameLen/2+1)
-	if runes := len([]rune(nama)); runes > MaxNameLen {
+	supplied := strings.Repeat("Ω", MaxNameLen/2+1)
+	if runes := len([]rune(supplied)); runes > MaxNameLen {
 		t.Fatalf("fixture is wrong: %d runes already exceeds the cap", runes)
 	}
-	if len(nama) <= MaxNameLen {
+	if len(supplied) <= MaxNameLen {
 		t.Fatalf(
 			"fixture is wrong: %d bytes does not exceed the cap",
-			len(nama))
+			len(supplied))
 	}
-	if !NameTooLong(nama) {
+	if !NameTooLong(supplied) {
 		t.Errorf(
 			"a %d-byte name passed a %d-byte cap; the check is counting "+
 				"runes and is looser than the column",
-			len(nama),
+			len(supplied),
 			MaxNameLen)
 	}
 }
@@ -1803,7 +1803,7 @@ func TestNameTooLongBoundary(t *testing.T) {
 }
 
 // TestZeroCapDisablesTheLimit is the half a hand-written comparison gets
-// backwards. Zero and negative mean NO cap, and `len(nama) > MaxNameLen`
+// backwards. Zero and negative mean NO cap, and `len(supplied) > MaxNameLen`
 // against a zero cap refuses every name there is.
 func TestZeroCapDisablesTheLimit(t *testing.T) {
 	restoreLimits(t)

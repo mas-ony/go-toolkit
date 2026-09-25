@@ -116,12 +116,13 @@ var ErrInvalidPhone = errors.New("whatsapp: phone number is not digits")
 // to the WebSocket (socket.NoiseSocket.SendFrame takes writeLock), and this
 // struct is read-only after New returns.
 //
-// It is NOT safe to call on a nil receiver, and that is the opposite of
-// *whatsmeow.Client, which guards its nil receiver at every entry point this
-// package touches, so the two cannot be reasoned about together. A caller
-// holding a *Service that is nil when WhatsApp is not configured has to check
-// it, and a call dispatched into a detached goroutine has nobody to catch the
-// panic when it does not.
+// It is NOT safe to call on a nil receiver, unlike the send paths of
+// *whatsmeow.Client, which return ErrClientIsNil instead of panicking — so
+// the two cannot be reasoned about together. (whatsmeow's guards are not
+// uniform either; the package documentation says which of its methods have
+// them.) A caller holding a *Service that is nil when WhatsApp is not
+// configured has to check it, and a call dispatched into a detached goroutine
+// has nobody to catch the panic when it does not.
 //
 // The trap is that the no-op paths in SendText and SendDocument survive a nil
 // receiver, because they return before reading any field. A smoke test with a

@@ -1,4 +1,6 @@
-// fiber_config.go covers the fiber.* section of config.yaml.
+package config
+
+// The fiber.* section of config.yaml.
 //
 // Keys in this section, with their environment-variable spellings:
 //
@@ -76,8 +78,8 @@
 //		FIBER_WRITE_TIMEOUT
 //
 // Thirty-six keys, and that is the whole section — NewFiberConfig below reads
-// exactly these. See doc.go for how the environment spelling is derived and
-// which tests hold it up.
+// exactly these. The environment spelling holds only for a Viper built by
+// NewViper; see the package documentation.
 //
 // NewFiberConfig also reads app.name and app.version, which belong to another
 // section and are listed in app_config.go. They are the two halves of AppName
@@ -85,8 +87,6 @@
 // same one argument. Nothing else in this package reads outside its own
 // section; if a second case appears, passing *AppConfig is the change to make
 // rather than adding a third exception to this note.
-
-package config
 
 import (
 	"errors"
@@ -168,14 +168,14 @@ type FiberConfig struct {
 //     so every field rule lives in the handler and service layers rather than
 //     in a tag.
 //   - ErrorHandler is supplied LATER, not skipped. It is a func closing over a
-//     logger that does not exist at config time, so router.New assigns it on
-//     the copy it takes of this struct — the same shape as
+//     logger that does not exist at config time, so the application assigns it
+//     on the copy it takes of this struct — the same shape as
 //     ZerologConfig.WithLogger and RecoverConfig.WithStackTraceHandler, and
 //     the same hazard if the assignment is ever dropped: not a crash, but
-//     Fiber's own DefaultErrorHandler, which answers in plain text rather
-//     than in the application's own error envelope. Unlike those two, there
-//     is no With* method forcing the call — the assignment is a bare line in
-//     router.New and nothing here can see it.
+//     Fiber's own DefaultErrorHandler, which answers in plain text rather than
+//     in the application's own error envelope. Unlike those two, there is no
+//     With* method forcing the call — the assignment is a bare line in the
+//     application and nothing here can see it.
 //   - Six are the OTHER codecs: XMLEncoder, XMLDecoder, CBOREncoder,
 //     CBORDecoder, MsgPackEncoder, and MsgPackDecoder. All funcs, cannot be
 //     expressed in YAML at any spelling. Fiber supplies a working default for
@@ -312,7 +312,7 @@ func NewFiberConfig(v *viper.Viper) *FiberConfig {
 			// opposite of what is happening.
 			// There is no value of any other key that makes true coherent —
 			// narrowing fiber.request_methods to GET and HEAD to match would
-			// panic in router.New at the first non-GET registration, since
+			// panic in the application at the first non-GET registration, since
 			// Fiber's Add panics outright on a method outside RequestMethods —
 			// so the setting is refused rather than paired with anything.
 			//
@@ -445,12 +445,12 @@ func NewFiberConfig(v *viper.Viper) *FiberConfig {
 			// and bad URLs cost nothing past the router lookahead.
 			//
 			// It is the one bool in this section whose true is a real trade
-			// rather than a preference. router.New registers FOUR middlewares
+			// rather than a preference. the recommended stack has FOUR middlewares
 			// with app.Use — zerolog, requestid, recover, limiter — and a
 			// skipped request reaches none of them: no request log line, no
 			// request id, and nothing counted against the limiter's quota.
 			// What comes back is still the application's envelope, because a
-			// 404 is a *fiber.Error and errorHandler answers those without
+			// 404 is a *fiber.Error and the error handler answers those without
 			// logging, so the response is indistinguishable and the log line
 			// is simply absent.
 			//

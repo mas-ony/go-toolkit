@@ -1,4 +1,6 @@
-// fiber_recover_config.go covers the fiber.recover.* section of config.yaml.
+package config
+
+// The fiber.recover.* section of config.yaml.
 //
 // Keys in this section, with their environment-variable spellings:
 //
@@ -6,10 +8,8 @@
 //		FIBER_RECOVER_ENABLE_STACK_TRACE
 //
 // One key, and that is the whole section — NewRecoverConfig below reads
-// exactly that one. See doc.go for how the environment spelling is derived and
-// which tests hold it up.
-
-package config
+// exactly that one. The environment spelling holds only for a Viper built by
+// NewViper; see the package documentation.
 
 import (
 	"errors"
@@ -26,9 +26,9 @@ import (
 // The middleware writes no response, which the name oversells: it calls
 // recover(), hands the value to PanicHandler, and returns the resulting error
 // up the chain exactly like a handler's `return err`. The 500 a client sees is
-// written by router.New's errorHandler, not here.
+// written by the application's error handler, not here.
 //
-// It is registered THIRD in router.New — inside zerolog, inside requestid,
+// It belongs THIRD in the stack — inside zerolog, inside requestid,
 // outside limiter — and every one of those three is load-bearing:
 //
 //   - Inside zerolog, so the error this produces surfaces as the return value
@@ -36,7 +36,7 @@ import (
 //     with a status attached. Registered outside, the panic would unwind past
 //     that c.Next() and the request would be missing from the log entirely.
 //   - Inside requestid, so an id already exists when the panic is caught. Both
-//     stackTraceHandler and errorHandler read it back with
+//     the stack-trace handler and the error handler read it back with
 //     requestid.FromContext(c), and that id is what ties the opaque 500 a
 //     client saw to the two log lines that explain it.
 //   - Outside limiter, so a handler panic is already an ERROR by the time it
@@ -89,14 +89,14 @@ func NewRecoverConfig(v *viper.Viper) *RecoverConfig {
 		Config: &fiberrecover.Config{
 			// EnableStackTrace is the gate on StackTraceHandler, and it is a
 			// gate rather than a formatting switch: the middleware calls the
-			// handler ONLY when this is true. With it false, router.New's
-			// stackTraceHandler is installed and never runs, so a recovered
+			// handler ONLY when this is true. With it false, the application's
+			// the stack-trace handler is installed and never runs, so a recovered
 			// panic produces no "recovered panic" line at all — no stack, no
 			// panic value, no handler=panic field.
 			//
 			// The request is still logged and the client still gets a 500. The
 			// zerolog middleware writes its usual line with status 500 and the
-			// panic text in the error field, and errorHandler writes its
+			// panic text in the error field, and the error handler writes its
 			// "unhandled error" line with the request id. What is lost is the
 			// only record of WHERE the panic happened, which is the one thing
 			// the other two lines cannot reconstruct.
@@ -116,18 +116,17 @@ func NewRecoverConfig(v *viper.Viper) *RecoverConfig {
 // handed to recover.New:
 //
 //	app.Use(fiberrecover.New(
-//	  cfg.Recover.WithStackTraceHandler(
-//	    stackTraceHandler(log, requestIDField))))
+//	  cfg.Recover.WithStackTraceHandler(myStackTraceHandler)))
 //
-// The handler lives in package router rather than here because it writes
-// through the application logger and reads the request id back out of the
-// Fiber context — both of which are the HTTP layer's business, and neither of
-// which exists when this config is built.
+// The handler belongs to the application rather than to this package,
+// because it writes through the application's logger and reads the request
+// id back out of the Fiber context — both of which are the HTTP layer's
+// business, and neither of which exists when this configuration is built.
 //
-// Its second argument is cfg.Zerolog.RequestIDField(), derived once in
-// router.New and shared with errorHandler, so the key the id is logged under
-// follows fiber.zerolog.fields_snake_case at all three sites rather than at
-// one of them. See ZerologConfig.RequestIDField for why the name is derived
+// Its second argument is cfg.Zerolog.RequestIDField(), derived once in the
+// application and shared with the error handler, so the key the id is logged
+// under follows fiber.zerolog.fields_snake_case at all three sites rather than
+// at one of them. See ZerologConfig.RequestIDField for why the name is derived
 // rather than spelled as a literal at each site.
 //
 // # Mechanics
@@ -141,11 +140,12 @@ func NewRecoverConfig(v *viper.Viper) *RecoverConfig {
 // Passing a nil h is not an error and not checked: recover.configDefault
 // substitutes defaultStackTraceHandler when EnableStackTrace is true and the
 // handler is nil, so the result is the middleware's stderr fallback rather
-// than a crash. That is a quiet degradation, which is why router.New's call
-// site is the one place this is meant to be built.
+// than a crash. That is a quiet degradation, which is why the application's
+// call site is the one place this is meant to be built.
 //
 // Panics if c or c.Config is nil, like every other promoted-field access on
-// this type. Validate rejects both at startup, well before router.New runs.
+// this type. Validate rejects both at startup, well before the application
+// runs.
 func (c *RecoverConfig) WithStackTraceHandler(
 	h func(fiber.Ctx, any),
 ) fiberrecover.Config {
@@ -159,16 +159,16 @@ func (c *RecoverConfig) WithStackTraceHandler(
 //
 // Deliberately unchecked:
 //
-//   - Whether router.New actually calls WithStackTraceHandler. That is the one
-//     way this section fails in practice and the one thing it cannot catch:
-//     skipping the call is not a crash, it installs the middleware's own
-//     defaultStackTraceHandler and splits the service's output across two
+//   - Whether the application actually calls WithStackTraceHandler. That is
+//     the one way this section fails in practice and the one thing it cannot
+//     catch: skipping the call is not a crash, it installs the middleware's
+//     own defaultStackTraceHandler and splits the service's output across two
 //     formats. Nothing in this package can see that call site.
 //   - Next, PanicHandler, and StackTraceHandler. All are nil here by design
 //     and stay nil for the life of the process; the middleware's configDefault
 //     substitutes DefaultPanicHandler for the nil PanicHandler and never
-//     consults a nil Next; StackTraceHandler is supplied to a COPY at
-//     router.New's call site by WithStackTraceHandler, so it is still nil in
+//     consults a nil Next; StackTraceHandler is supplied to a COPY at the
+//     application's call site by WithStackTraceHandler, so it is still nil in
 //     the value this method sees and requiring it here would reject every
 //     valid config. None can be expressed in YAML.
 //   - EnableStackTrace. A bool has no invalid value: both settings are

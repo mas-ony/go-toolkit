@@ -88,12 +88,21 @@
 // suppressing the error text alone still leaves every delivered number in
 // the log.
 //
-// # A *Service is not nil-safe, and *whatsmeow.Client is
+// # A *Service is not nil-safe; *whatsmeow.Client mostly is
 //
-// The two cannot be reasoned about together. whatsmeow guards its nil
-// receiver at every entry point this package touches; Service does not, and
-// a caller holding a nil *Service because WhatsApp is not configured has to
-// check it.
+// The two cannot be reasoned about together. Service does not guard its
+// nil receiver, and a caller holding a nil *Service because WhatsApp is not
+// configured has to check it.
+//
+// whatsmeow guards the SEND paths, which is what the tests below rely on,
+// but not uniformly. SendMessage checks for a nil client on entry. Upload
+// does not: it encrypts the whole payload first and fails with the same
+// ErrClientIsNil two calls deep, when it reaches the media connection — so
+// a nil-client SendDocument does the encryption work before failing.
+// Connect has no guard at all and would panic, which is harmless only
+// because this package calls it on nothing but a client NewClient has just
+// built. That was read from whatsmeow's own source at the pinned version;
+// re-read it before relying on any of it for a new call site.
 //
 // The trap is that the no-op paths survive a nil receiver, because they
 // return before reading any field. A smoke test with a blank number

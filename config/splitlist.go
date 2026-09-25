@@ -1,8 +1,8 @@
-// splitlist.go holds the one reader shared by every list-valued key in this
-// package. It is here rather than in a section file because the section
-// files are meant to be the authoritative list of ONE section's keys apiece.
-
 package config
+
+// The one reader shared by every list-valued key in this package. It is here
+// rather than in a section file because the section files are meant to be
+// the authoritative list of ONE section's keys apiece.
 
 import (
 	"strings"

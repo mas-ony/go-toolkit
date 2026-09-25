@@ -8,7 +8,7 @@
 // server had to say about it. Which paths exist, what they return, and
 // which deadline each one deserves belong to the caller.
 //
-//	c, err := httpclient.New(cfg.Client, httpclient.Options{
+//	c, err := httpclient.New(config.NewClientConfig(v), httpclient.Options{
 //		TrimPathSuffix: "/api/v1",
 //		Log:            log,
 //	})
@@ -96,13 +96,14 @@
 // One thing deliberately NOT claimed by a test: the bytes.Clone in send.
 // Its comment explains that the transport pools response buffers and that
 // anything still pointing at one after Close reads whatever lands there
-// next. That reasoning is sound and the clone should stay — but eight
-// thousand concurrent requests with the clone removed produced no
-// corruption on the transport version this was checked against, so a test
-// asserting otherwise would be asserting something that does not currently
-// happen. The clone is defence against a documented transport behaviour,
-// not against an observed failure, and saying so here is more honest than
-// a test that passes either way.
+// next. That reasoning is sound and the clone should stay. But with the
+// clone removed, 8,000 requests across 16 concurrent workers produced no
+// corruption — first on fiber v3.0.0-beta.4, and again on v3.5.0 — so a
+// test asserting otherwise would be asserting something that does not
+// happen on either. The clone is a defence against a documented transport
+// behaviour, not against an observed failure. Re-run that probe when the
+// transport changes: a version that does corrupt makes the test possible,
+// the way it was for the request package.
 //
 //	go test -tags integration -run Integration ./httpclient
 //

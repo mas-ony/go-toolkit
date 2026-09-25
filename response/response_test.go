@@ -291,15 +291,15 @@ func TestNewPaginatedDoesNotCopyItems(t *testing.T) {
 func TestPaginatedInsideResponse(t *testing.T) {
 	t.Parallel()
 
-	type sertifikat struct {
+	type certificate struct {
 		ID   int    `json:"id"`
-		Nama string `json:"nama"`
+		Name string `json:"name"`
 	}
 
-	r := OK("ok", NewPaginated([]sertifikat{{ID: 1, Nama: "A"}}, 42, 3, 10))
+	r := OK("ok", NewPaginated([]certificate{{ID: 1, Name: "A"}}, 42, 3, 10))
 
 	const want = `{"success":true,"message":"ok","data":` +
-		`{"items":[{"id":1,"nama":"A"}],"total":42,"page":3,"limit":10}}`
+		`{"items":[{"id":1,"name":"A"}],"total":42,"page":3,"limit":10}}`
 	if got := marshal(t, r); got != want {
 		t.Errorf("JSON:\n got %s\nwant %s", got, want)
 	}
@@ -308,21 +308,21 @@ func TestPaginatedInsideResponse(t *testing.T) {
 // TestPaginatedKeepsConcreteItemType is the reason the type is generic.
 //
 // The assertion is a type switch rather than a JSON comparison because the
-// point is what survives on the GO side: Items must come back as []sertifikat,
-// not []any. A non-generic version storing []any would marshal identically and
-// pass every other test in this file.
+// point is what survives on the GO side: Items must come back as
+// []certificate, not []any. A non-generic version storing []any would marshal
+// identically and pass every other test in this file.
 func TestPaginatedKeepsConcreteItemType(t *testing.T) {
 	t.Parallel()
 
-	type sertifikat struct {
+	type certificate struct {
 		ID int `json:"id"`
 	}
 
-	p := NewPaginated([]sertifikat{{ID: 1}}, 1, 1, 10)
+	p := NewPaginated([]certificate{{ID: 1}}, 1, 1, 10)
 
 	var items any = p.Items
-	if _, ok := items.([]sertifikat); !ok {
-		t.Errorf("Items: got %T, want []sertifikat", p.Items)
+	if _, ok := items.([]certificate); !ok {
+		t.Errorf("Items: got %T, want []certificate", p.Items)
 	}
 }
 

@@ -9,13 +9,17 @@ package datetime
 // are FOR is a disagreement between drivers, and the argument in Value's
 // doc comment — that go-mssqldb sends a value's own offset while
 // go-sql-driver converts to the DSN's location — was read out of driver
-// source rather than observed. This is where it is observed.
+// source rather than observed. This is where it is observed, and each half
+// only on its own engine's run: the MySQL half has been, against MariaDB,
+// and the SQL Server half needs a SQL Server DSN.
 //
 // The DSN variables and the build tag are the database package's, so one
 // scratch server serves both suites:
 //
-//	DB_TEST_MYSQL_DSN      user:pass@tcp(host:3306)/scratch
-//	DB_TEST_SQLSERVER_DSN  sqlserver://user:pass@host?database=scratch
+//	DB_TEST_MYSQL_DSN
+//		user:pass@tcp(host:3306)/scratch?parseTime=true&loc=Asia%2FJakarta
+//	DB_TEST_SQLSERVER_DSN
+//		sqlserver://user:pass@host?database=scratch&timezone=Asia%2FJakarta
 //
 //	go test -tags integration -run Integration ./datetime
 //
@@ -159,11 +163,20 @@ func zoneOffsetAt(year int, month time.Month, day int) int {
 // The headline claim: a value that arrives carrying UTC must not shift a
 // day when it lands in a DATE column.
 //
-// This is the exact failure Value's conversion prevents, and it is only
-// visible against a server in a zone ahead of or behind UTC. In a UTC
-// process the two spellings of the same instant coincide, so the test
+// It is only visible against a server in a zone ahead of or behind UTC. In
+// a UTC process the two spellings of the same instant coincide, so the test
 // skips rather than passing vacuously — a green run that proves nothing is
 // worse than no run.
+//
+// What a pass proves differs by engine, and the difference is the one
+// Value's comment describes. go-sql-driver converts every time.Time to the
+// DSN's location itself, so on MySQL this passes with or without Value's
+// own conversion to time.Local — that was checked by removing it and
+// running against MariaDB. go-mssqldb sends the value's own offset, so on
+// SQL Server Value's conversion is the only thing standing between this
+// input and the wrong day. A MySQL-only run therefore confirms the
+// end-to-end agreement, and says nothing about whether Value's conversion
+// is still needed; only a SQL Server run can.
 func TestIntegrationOffsetBearingInputKeepsItsLocalDate(t *testing.T) {
 	_, offset := time.Now().In(time.Local).Zone()
 	if offset == 0 {

@@ -7,13 +7,15 @@
 // and the caller owns it from there. Everything this package knows is
 // spent at that one call.
 //
-//	log := logger.New(cfg.App.Env)
+//	log := logger.New(config.NewAppConfig(v).Env)
 //	log.Info().Str("addr", addr).Msg("listening")
 //
-// A component tags itself once and the tag rides along afterwards, which
-// is what a value-returning constructor buys:
+// A component derives its own tagged child once, and the tag rides along
+// on everything it logs afterwards. The parent is untouched, which is what
+// a value-returning constructor buys:
 //
-//	log := log.With().Str("service", "billing").Logger()
+//	billing := log.With().Str("service", "billing").Logger()
+//	billing.Info().Msg("invoice sent") // carries service=billing
 //
 // # The environment string
 //

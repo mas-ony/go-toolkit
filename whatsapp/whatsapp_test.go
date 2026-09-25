@@ -299,7 +299,7 @@ func TestSendTextNoOpsOnEmptyInput(t *testing.T) {
 		phone   string
 		message string
 	}{
-		{"no phone number on the user record", "", "disposisi baru"},
+		{"no phone number on the user record", "", "new message"},
 		{"nothing to say", "628123456789", ""},
 		{"neither", "", ""},
 	}
@@ -349,7 +349,7 @@ func TestSendDocumentNoOpsOnEmptyInput(t *testing.T) {
 			err := svc.SendDocument(
 				tc.phone,
 				tc.data,
-				"Surat Masuk 042.pdf",
+				"Incoming Letter 042.pdf",
 				"application/pdf",
 				"caption")
 			if err != nil {
@@ -388,8 +388,8 @@ func TestSendDocumentDoesNotGuardFilenameOrMimetype(t *testing.T) {
 		caption  string
 	}{
 		{"empty filename", "", "application/pdf", "caption"},
-		{"empty mimetype", "Surat Masuk 042.pdf", "", "caption"},
-		{"empty caption", "Surat Masuk 042.pdf", "application/pdf", ""},
+		{"empty mimetype", "Incoming Letter 042.pdf", "", "caption"},
+		{"empty caption", "Incoming Letter 042.pdf", "application/pdf", ""},
 		{"all three empty", "", "", ""},
 	}
 
@@ -452,7 +452,7 @@ func TestPhoneNormalisationRunsBeforeTheEmptyGuard(t *testing.T) {
 
 			svc, out := newTestService(t)
 
-			if err := svc.SendText(tc.phone, "disposisi baru"); err != nil {
+			if err := svc.SendText(tc.phone, "new message"); err != nil {
 				t.Errorf(
 					"SendText: got %v, want nil — %q normalises to nothing "+
 						"and is as empty as \"\"",
@@ -524,7 +524,7 @@ func TestPhoneNormalisation(t *testing.T) {
 
 			t.Run("SendText", func(t *testing.T) {
 				svc, _ := newTestService(t)
-				err := svc.SendText(tc.input, "disposisi baru")
+				err := svc.SendText(tc.input, "new message")
 				assertPhoneInError(t, err, "whatsapp: send to ", tc.want)
 			})
 
@@ -745,7 +745,7 @@ func TestErrorMessagesIdentifyWhichStepFailed(t *testing.T) {
 		t.Parallel()
 
 		svc, _ := newTestService(t)
-		err := svc.SendText(phone, "disposisi baru")
+		err := svc.SendText(phone, "new message")
 		if err == nil {
 			t.Fatal("got nil, want an error")
 		}
@@ -782,7 +782,7 @@ func TestErrorsWrapRatherThanReplace(t *testing.T) {
 
 	svc, _ := newTestService(t)
 
-	textErr := svc.SendText("628123456789", "disposisi baru")
+	textErr := svc.SendText("628123456789", "new message")
 	if !errors.Is(textErr, whatsmeow.ErrClientIsNil) {
 		t.Errorf("SendText: %v does not wrap the cause", textErr)
 	}
@@ -809,7 +809,7 @@ func TestErrorsEmbedTheRecipientsPhoneNumber(t *testing.T) {
 	const phone = "628123456789"
 	svc, _ := newTestService(t)
 
-	err := svc.SendText(phone, "disposisi baru")
+	err := svc.SendText(phone, "new message")
 	if err == nil {
 		t.Fatal("got nil, want an error")
 	}
@@ -838,7 +838,7 @@ func TestFailedSendsAreSilent(t *testing.T) {
 
 	svc, out := newTestService(t)
 
-	_ = svc.SendText("628123456789", "disposisi baru")
+	_ = svc.SendText("628123456789", "new message")
 	_ = svc.SendDocument(
 		"628123456789", []byte("%PDF-1.4"), "a.pdf", "application/pdf", "")
 
@@ -901,7 +901,7 @@ func TestSendIsSafeForConcurrentUse(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			if i%2 == 0 {
-				_ = svc.SendText("+62 812-3456789", "disposisi baru")
+				_ = svc.SendText("+62 812-3456789", "new message")
 				return
 			}
 			_ = svc.SendDocument(
@@ -948,7 +948,7 @@ func TestANilServiceIsNotSafe(t *testing.T) {
 		t.Parallel()
 
 		p := capturePanic(func() {
-			_ = svc.SendText("628123456789", "disposisi baru")
+			_ = svc.SendText("628123456789", "new message")
 		})
 		if p == nil {
 			t.Error(

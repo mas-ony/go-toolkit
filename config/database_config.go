@@ -1,4 +1,6 @@
-// database_config.go covers the database.* section of config.yaml.
+package config
+
+// The database.* section of config.yaml.
 //
 // Keys in this section, with their environment-variable spellings:
 //
@@ -28,8 +30,8 @@
 //		DATABASE_MAX_OPEN_CONNS
 //
 // Twelve keys, and that is the whole section — NewDatabaseConfig below reads
-// exactly these. See doc.go for how the environment spelling is derived and
-// which tests hold it up.
+// exactly these. The environment spelling holds only for a Viper built by
+// NewViper; see the package documentation.
 //
 // Two of those twelve name things, and what the second one is worth depends on
 // the driver:
@@ -57,12 +59,12 @@
 // a query is re-pointed at a sibling database — another year, another tenant,
 // an archive — by rewriting the first segment, on either driver.
 //
-// database.username and database.password are present in config.yaml but
-// BLANK, and Validate requires both — so the checked-in file is not a loadable
-// configuration and cannot be turned into one without editing a tracked file.
-// See doc.go for why that is the arrangement rather than an oversight.
-
-package config
+// database.username and database.password belong in the environment —
+// DATABASE_USERNAME and DATABASE_PASSWORD — and never in a file that is
+// committed. Validate requires both, which is what makes that stick: a
+// config.yaml that leaves them blank is not a loadable configuration on
+// its own, so a deployment cannot quietly start on credentials somebody
+// checked in.
 
 import (
 	"errors"
@@ -118,8 +120,8 @@ var validDriverKinds = map[string]driverKind{
 
 // validEncryptModes is the allowlist of database.encrypt checked by
 // DatabaseConfig.Validate. The vocabulary is SQL Server's, which is the
-// deployed target; pkg/database.encryptModes translates each value into
-// MySQL's tls= so the key means the same thing on either driver.
+// deployed target; the database package's encryptModes translates each value
+// into MySQL's tls= so the key means the same thing on either driver.
 //
 // The split is deliberate: this package owns which values are LEGAL, that one
 // owns what each MEANS to a driver, and neither needs the other's table. They
@@ -211,7 +213,7 @@ type DatabaseConfig struct {
 	// MSSQL driver may quote the connection string it failed to parse, and The
 	// application hands that error straight to log.Fatal().Err(). A malformed
 	// DSN is therefore a live route for these credentials to reach the log
-	// aggregator. See the caution on the Open error in pkg/database.New.
+	// aggregator. See the caution on the Open error in database.New.
 	Username string
 
 	// Password is the database login password. Required; not logged here, with
@@ -256,10 +258,10 @@ type DatabaseConfig struct {
 	//	strict   TDS 8.0 (SQL Server 2022+): TLS before the TDS handshake,
 	//	         certificate always verified.
 	//
-	// The vocabulary above is SQL Server's; the key is not.
-	// pkg/database.encryptModes translates each value into the TLS parameter
-	// the configured driver understands, so the setting means the same thing
-	// on all three driver names:
+	// The vocabulary above is SQL Server's; the key is not. the database
+	// package's encryptModes translates each value into the TLS parameter the
+	// configured driver understands, so the setting means the same thing on all
+	// three driver names:
 	//
 	//	database.encrypt   sqlserver encrypt=   mysql tls=
 	//	disable            disable              false
@@ -303,9 +305,9 @@ type DatabaseConfig struct {
 	// rather than a clean error. Keep this below the shortest idle timeout
 	// on the path; 5m is comfortably under the common 15-30m.
 	//
-	// Applied via db.SetConnMaxIdleTime in pkg/database.applyPoolSettings.
-	// Both duration keys are required by Validate — 0 would mean
-	// "never expire", which is exactly the behaviour that produces the reset
+	// Applied via db.SetConnMaxIdleTime in the database package's
+	// applyPoolSettings. Both duration keys are required by Validate — 0 would
+	// mean "never expire", which is exactly the behaviour that produces the reset
 	// above.
 	ConnMaxIdleTime time.Duration
 
@@ -458,7 +460,7 @@ func NewDatabaseConfig(v *viper.Viper) *DatabaseConfig {
 // Namespace returns the qualifier prefix every table reference in the
 // repository layer is built from.
 //
-// This is what router.New hands to repository.Configure, and it is the only
+// This is what the application hands to database.Configure, and it is the only
 // place the driver's identifier grammar is applied. Everything downstream
 // concatenates this prefix and a table name with a dot and knows nothing about
 // which engine it is talking to — so a wrong prefix here is a wrong table
@@ -504,11 +506,11 @@ func (c *DatabaseConfig) Namespace() string { return c.namespace(c.Database) }
 //     rather than an error: idle eviction simply never fires first.
 //
 // The VALUE of Encrypt is checked here rather than left to the driver, because
-// pkg/database.encryptModes TRANSLATES it: on mysql there is no driver to
-// forward an unknown value to, so an unrecognised value has no meaning
-// anywhere in the process. One practical consequence — go-mssqldb accepts
-// anything strconv.ParseBool does, so a deployment carrying "encrypt: 0" or
-// "encrypt: True" fails at startup and needs the canonical spelling.
+// the database package's encryptModes TRANSLATES it: on mysql there is no
+// driver to forward an unknown value to, so an unrecognised value has no
+// meaning anywhere in the process. One practical consequence — go-mssqldb
+// accepts anything strconv.ParseBool does, so a deployment carrying "encrypt:
+// 0" or "encrypt: True" fails at startup and needs the canonical spelling.
 //
 // "mssql" and "sqlserver" are both accepted and map to the same registered
 // driver; "mssql" is the legacy alias. Nothing depends on which one is used.
@@ -580,11 +582,11 @@ func (c *DatabaseConfig) Validate() error {
 		}
 	}
 
-	// Encrypt is required for EVERY driver, and its value is checked against
-	// the vocabulary rather than forwarded. The two halves hold each other up:
-	// the key is required everywhere because pkg/database.encryptModes gives
-	// it a meaning everywhere, and it can only be translated if it is one of
-	// the four.
+	// Encrypt is required for EVERY driver, and its value is checked against the
+	// vocabulary rather than forwarded. The two halves hold each other up: the
+	// key is required everywhere because the database package's encryptModes
+	// gives it a meaning everywhere, and it can only be translated if it is one
+	// of the four.
 	//
 	// Not gated on kind: an unrecognised driver has already produced its own
 	// error above, and an empty or misspelled encrypt is still worth reporting

@@ -1,4 +1,6 @@
-// app_config.go covers the app.* section of config.yaml.
+package config
+
+// The app.* section of config.yaml.
 //
 // Keys in this section, with their environment-variable spellings:
 //
@@ -19,11 +21,9 @@
 //	app.upload_dir
 //		APP_UPLOAD_DIR
 //
-// Seven keys, and that is the whole section — NewAppConfig below reads exactly
-// these. See doc.go for how the environment spelling is derived and which
-// tests hold it up.
-
-package config
+// Eight keys, and that is the whole section: NewAppConfig reads exactly
+// these. The environment spelling holds only for a Viper built by NewViper;
+// see the package documentation.
 
 import (
 	"errors"
@@ -64,148 +64,119 @@ const (
 
 // AppConfig holds application-level identity and runtime settings.
 type AppConfig struct {
-	// Name is the human-readable service name. NewFiberConfig joins it with
-	// Version into fiber.Config.AppName, which router.New passes through to
-	// fiber.New; and pkg/database embeds it in the MSSQL connection string as
-	// "app name=" so the connection is identifiable in SQL Server's Activity
-	// Monitor (sys.dm_exec_sessions.program_name).
+	// Name is the human-readable service name.
 	//
-	// Fiber's use of it reaches nobody wherever the startup banner is off.
-	// AppName shows in that banner, and
-	// fiber.listen.disable_startup_message suppresses it — the setting a
-	// JSON log pipeline wants. What does carry the assembled string is
-	// The "configuration loaded" startup line: it walks the section list and
-	// logs FiberConfig.String, which leads with AppName=, at Info on every
-	// start — in JSON, in exactly the deployments where the banner is
-	// suppressed.
+	// Two consumers read it. NewFiberConfig joins it with Version into
+	// fiber.Config.AppName, and the database package embeds it in a SQL
+	// Server connection string as "app name=", so a connection is
+	// identifiable in the server's own session list
+	// (sys.dm_exec_sessions.program_name).
 	//
-	// That line is a record of what was loaded, though, not a handle on a
-	// running process. The SQL Server session is the handle, which is what
-	// makes the "app name=" use the one that actually matters.
+	// The second is the one that matters in practice. AppName reaches the
+	// framework's startup banner, which a JSON log pipeline usually turns
+	// off; the session name is a handle on a running process that survives
+	// whatever the logs are doing.
 	//
-	// The value is unconstrained while the DSN is built in the URL form,
-	// which escapes a semicolon to %3B through url.Values and reads it back
-	// intact — any byte is safe. The ADO form ("key=value;...") would not be,
-	// since ";" is its field separator, so a switch back to it makes this a
-	// constrained string again.
+	// Any byte is safe while the connection string is built in URL form,
+	// which escapes a semicolon to %3B and reads it back intact. The older
+	// "key=value;..." form would not be, since ";" is its field separator.
 	//
-	// It is NOT part of the Server response header. Fiber sets that header
-	// from fiber.Config.ServerHeader verbatim — a separate value carried from
-	// fiber.server_header — and omits the header entirely when it is empty.
-	// AppName plays no part in it.
+	// It is not the Server response header, which the framework takes
+	// verbatim from fiber.server_header and omits when that is empty.
 	Name string
 
-	// Version is the semantic version string. NewFiberConfig concatenates it
-	// with Name and, when the binary was linked with -ldflags, a buildTime
-	// suffix — "myapp 1.0.20260805120000" — to form AppName.
-	//
-	// Where that lands is the same story as Name above, and worth not reading
-	// twice: AppName's Fiber destination is the startup banner, which
-	// fiber.listen.disable_startup_message suppresses, so where the
-	// assembled string is actually read is the application's
-	// "configuration loaded" line, which logs FiberConfig.String.
-	//
-	// It does not reach the DSN: pkg/database uses Name alone for "app name=",
-	// so the SQL Server session identifies the service without a version.
+	// Version is the service's version string. NewFiberConfig appends it to
+	// Name, with a build-time suffix when the binary was linked with one, to
+	// form AppName. It does not reach the database connection string, which
+	// identifies the service by Name alone.
 	Version string
 
-	// Env is the runtime environment. Controls log format and verbosity.
-	//
-	// logger.New picks the console writer, DEBUG level, and caller annotation
-	// for "development" and JSON at INFO for everything else. Nothing else
-	// branches on Env — there is no environment-gated route, middleware, or
-	// database behaviour.
+	// Env is the runtime environment, which chooses the log format and
+	// verbosity: logger.New writes coloured console output at DEBUG for
+	// "development" and JSON at INFO for everything else. Nothing in this
+	// module branches on it otherwise.
 	//
 	// Allowed values: development | staging | production
 	Env string
 
-	// Host is the TCP bind address. Empty string binds to all interfaces
-	// (0.0.0.0), which is the correct default for container deployments where
-	// the network boundary is controlled externally. Set to "127.0.0.1" to
-	// accept local connections only (e.g. when a reverse proxy runs on the
-	// same host and the app should not be reachable directly).
+	// Host is the TCP bind address. Empty binds every interface, which is
+	// the right default in a container whose network boundary is controlled
+	// outside it. "127.0.0.1" accepts local connections only, for a service
+	// that should be reachable only through a proxy on the same host.
 	//
-	// Overloaded for unix sockets: when fiber.listen.listener_network is
-	// "unix", the application uses Host verbatim as the listen address, with
-	// no ":port" suffix, so it must be the socket PATH (e.g.
-	// "/run/myapp.sock"). Validate does not require Host — empty is the
-	// correct container default — and AppConfig.Validate structurally cannot
-	// catch the socket case anyway, since it never sees ListenConfig.
-	// Cross-section validation holds both sections and rejects
-	// (listener_network == "unix" && host == "") there, which is what keeps
-	// this pairing from reaching net.Listen as an empty path.
+	// It is overloaded for a unix socket: when fiber.listen.listener_network
+	// is "unix", a service is expected to use Host verbatim as the socket
+	// PATH, with no ":port". Validate cannot enforce that pairing — it never
+	// sees the listen section — so a service combining the two has to check
+	// it where both are in hand, or a unix listener reaches net.Listen with
+	// an empty path.
 	Host string
 
-	// Port is the TCP port the HTTP server listens on. Must be non-zero.
+	// Port is the TCP port to listen on. Must be non-zero.
 	//
-	// Ignored on the unix-socket path, where the application replaces the
-	// whole "host:port" address with Host. Validate still demands a non-zero
-	// value there, so a socket deployment has to set a port it will never
-	// bind.
+	// On the unix-socket path the whole address is replaced by Host, so the
+	// port is never bound — but Validate still requires one, which means a
+	// socket deployment sets a port it will not use.
 	Port int
 
-	// Location is an IANA time-zone name with two INDEPENDENT consumers. Both
-	// matter, and only one of them is about the process.
+	// Location is an IANA time-zone name with two INDEPENDENT consumers,
+	// and only one of them is about the process.
 	//
-	// First: the application assigns it to time.Local, so log timestamps and
-	// every offsetless time.Time the process constructs land in this zone.
-	// That assignment happens once at startup and Config is never re-read, so
-	// changing Location without restarting has no effect.
+	// First, a service is expected to assign it to time.Local at startup,
+	// so log timestamps and every offsetless time.Time it builds land in
+	// this zone. That happens once; changing Location without a restart has
+	// no effect.
 	//
-	// Second, and the load-bearing one for stored data: the DSN builder
-	// injects it into the connection string — "timezone=" on sqlserver, Loc
-	// on mysql. Without it the sqlserver driver labels every value it decodes
-	// from DATE / DATETIME / DATETIME2 / TIME as UTC, while a column whose
-	// default is the server's local wall clock was written in the server's
-	// zone. Every such timestamp then comes back adrift by the offset between
-	// the two, silently and uniformly, which is the shape of error that
-	// survives review because every row is wrong by the same amount.
+	// Second, and the load-bearing one for stored data: the database
+	// package injects it into the connection string — "timezone=" for SQL
+	// Server, Loc for MySQL. Without it the SQL Server driver labels every
+	// value decoded from DATE, DATETIME, DATETIME2 or TIME as UTC, while a
+	// column defaulting to the server's local clock was written in the
+	// server's zone. Every such timestamp then comes back adrift by the
+	// offset between the two, silently and uniformly — the shape of error
+	// that survives review because every row is wrong by the same amount.
 	//
-	// Validate only checks that this field is non-empty. Whether the value is
-	// a valid IANA name is determined by time.LoadLocation at startup, which
-	// returns an error for unrecognised zones (e.g. "Berln" instead of
-	// "Europe/Berlin"). A bad zone name therefore causes a startup failure,
-	// not a silent fallback to UTC. The sqlserver driver parses the value
-	// again when it builds the DSN, so a host without tzdata fails there too.
+	// Validate only checks that it is non-empty. Whether it is a real zone
+	// is time.LoadLocation's to decide at startup, which fails on an
+	// unknown name ("Berln") rather than falling back to UTC.
 	//
 	// Example: "UTC", "Europe/Berlin", "America/New_York"
 	Location string
 
-	// ReportsBaseURL is the scheme + host (+ port) of the external
-	// report-rendering service that /api/reports/:report proxies to. Scheme
-	// and authority only — handler.ReportsHandler appends
-	// reportsUpstreamPrefix ("/api/reports/") and the report name itself, and
-	// trims a trailing slash from this value on the way in so the join cannot
-	// double up.
+	// ReportsBaseURL is the scheme and authority of an external service a
+	// deployment proxies requests to — scheme, host and optional port, and
+	// nothing after them.
+	//
+	// It is the most application-specific key in this section: it exists
+	// for a service that forwards some routes to a separate renderer, and a
+	// service that does not can leave it unset, which Validate accepts.
+	//
+	// "Nothing after them" is the contract, because the consumer is
+	// expected to build the upstream URL by CONCATENATION — base + route —
+	// and anything past the authority would be silently prepended to every
+	// forwarded request. See Validate for what that costs.
 	ReportsBaseURL string
 
-	// UploadDir is the root under which uploaded files are written, one
-	// directory per record: <UploadDir>/<id>/<sanitised file name>. The
-	// stored name and the on-disk name can differ when the sanitiser rewrites
-	// a character, and reapplying it on every read is what keeps the mapping
-	// stable without the sanitised form ever being persisted.
+	// UploadDir is the root under which uploaded files are written: one
+	// directory per record, <UploadDir>/<id>/<name>, which is the layout the
+	// fileutil package implements.
 	//
-	// Nothing in this package touches the filesystem with it; it is passed to
-	// whichever helper the application writes files through. Storing the file
-	// NAME rather than a path is what lets this value change between
-	// deployments with no data migration — the path is recomputed from
-	// upload_dir, the id, and the name on every access.
+	// Nothing in this package touches the filesystem with it. Storing the
+	// file NAME rather than a path is what lets this value change between
+	// deployments with no data migration, because the path is recomputed
+	// from upload_dir, the id and the name on every access.
 	//
 	// A relative value is legal and resolves against the process working
-	// directory on every call. A startup probe may report it in absolute form
-	// without writing that form back here, so the two spellings stay
-	// interchangeable and New returns configuration exactly as parsed.
+	// directory on every call.
 	UploadDir string
 }
 
-// trimBaseURL normalises a base URL to the form the reports proxy concatenates
+// trimBaseURL normalises a base URL to the form a consumer concatenates
 // against: no surrounding whitespace, no trailing slash.
 //
-// Both variants — "http://host:5019/" and "http://host:5019" — therefore reach
-// Validate, String, and handler.NewReportsHandler as one string, so a stray
-// slash cannot produce a doubled one upstream and cannot make two identical
-// deployments log different values. handler.NewReportsHandler trims again on
-// its own copy; that is belt-and-braces, not a second authority.
+// "http://host:5019/" and "http://host:5019" therefore reach Validate and
+// String as one string, so a stray slash can neither produce a doubled one
+// upstream nor make two identical deployments log different values.
 func trimBaseURL(s string) string {
 	return strings.TrimRight(strings.TrimSpace(s), "/")
 }
@@ -238,40 +209,33 @@ func NewAppConfig(v *viper.Viper) *AppConfig {
 //
 //   - Whether anything consumes the key. Validate sees a *AppConfig and
 //     nothing else, so it cannot tell a wired route from a dead key.
-//   - Whether ReportsBaseURL is REACHABLE. Nothing here dials it, so a host
-//     that does not resolve, a port nothing listens on, and a report service
-//     that is simply down all pass startup and fail per-request in
-//     ReportsHandler.forward, which maps them to a 502 naming the upstream.
-//     That is the right place for it: the report service is allowed to restart
-//     independently of this one, and a startup probe would turn its downtime
-//     into this service's downtime.
-//   - Host. Empty is the correct default for a container (bind all
-//     interfaces), so it cannot be required here. The one case where it IS
-//     required — a unix-socket listener — is enforced by
-//     Cross-section validation, which can see both sections.
+//   - Whether ReportsBaseURL is REACHABLE. Nothing here dials it, so a
+//     host that does not resolve, a port nothing listens on and a renderer
+//     that is simply down all pass startup, and surface per request in
+//     whatever proxies to it. That is the right place: the renderer may
+//     restart independently of this service, and a startup probe would
+//     turn its downtime into this service's downtime.
+//   - Host. Empty is the correct default for a container, so it cannot be
+//     required here. The one case where it IS required — a unix-socket
+//     listener — needs the listen section as well, and has to be checked
+//     where both are in hand.
 //   - Location as an IANA name. time.LoadLocation at startup is the
 //     authority and fails the process on an unknown zone.
-//   - UploadDir beyond non-emptiness. A startup probe is the authority: it
-//     requires an EXISTING writable directory and fails otherwise — the same
-//     division as Location, where time.LoadLocation holds the real check. It
-//     belongs there rather than here because it has to stat a path and CREATE
-//     AND DELETE A FILE to learn anything. Every check in this method is a
-//     pure function of the struct, which is what lets the whole of it be
-//     exercised without a filesystem.
-//     "Existing" rather than "created on demand" is the load-bearing half. A
-//     helper that walks the chain and creates every missing level would let a
-//     misspelled path start cleanly and write uploads into a directory nobody
-//     provisioned. The probe is what turns that typo into a startup error.
+//   - UploadDir. A startup probe is the authority: it has to stat the path
+//     and create and delete a file to learn anything, and every check in
+//     this method is a pure function of the struct. "Existing" rather than
+//     "created on demand" is the property worth probing for — a helper that
+//     created every missing level would let a misspelled path start cleanly
+//     and write uploads somewhere nobody provisioned.
 //
-// Port range IS checked, and the argument for it is worth keeping because
-// database.port deliberately reaches the opposite conclusion. Both keys have a
-// second authority that would catch an out-of-range value on its own; what
-// differs is HOW LATE each one runs. The driver rejects a bad database.port
-// when the pool is opened, before a single route is registered, so the
-// duplicate check would buy nothing. net.Listen is the LAST thing to run, so
-// a 70000 here failed only after the pool was open, every route registered,
-// and the startup line written — a full startup spent to learn one number is
-// four digits too long. See the matching entry in DatabaseConfig.Validate.
+// Port range IS checked, and database.port deliberately reaches the opposite
+// conclusion, so the argument is worth keeping. Both have a second authority
+// that would catch an out-of-range value; what differs is how LATE each one
+// runs. The driver rejects a bad database.port when the pool is opened,
+// before a single route is registered, so a duplicate check buys nothing.
+// net.Listen is typically the LAST thing a service does, so a 70000 here
+// would fail only after the pool was open and every route registered — a
+// full startup spent to learn one number is four digits too long.
 //
 // The check is a chained else-if so an absent key produces one error rather
 // than two: 0 is caught as "required" and never also reported as out of range.
@@ -311,22 +275,18 @@ func (c *AppConfig) Validate() error {
 		errs = append(errs, errors.New("app.location is required"))
 	}
 	// Presence and SHAPE are both checked, and the shape half is the part that
-	// earns its keep. handler.ReportsHandler builds the upstream URL by
-	// concatenation — baseURL + "/api/reports/" + name — so anything past the
-	// authority is silently prepended to every report request: a value ending
-	// in "/api" yields "/api/api/reports/disposisi" and a 404 from the report
-	// service naming neither this key nor the doubling. url.Parse accepts all
-	// of that happily, which is why the parse result is inspected rather than
-	// just its error.
+	// earns its keep. The consumer builds the upstream URL by concatenation —
+	// base + "/route/" + name — so anything past the authority is silently
+	// prepended to every forwarded request: a value ending in "/api" yields
+	// "/api/api/route/name" and a 404 from the upstream naming neither this
+	// key nor the doubling. url.Parse accepts all of that happily, which is
+	// why the parse result is inspected rather than just its error.
 	//
 	// USERINFO is rejected on its own terms rather than folded into the
 	// path/query/fragment branch below, because it is the one part of a URL
-	// that is a credential. It survives the same concatenation into every
-	// upstream request, and String below prints this field verbatim into
-	// main.Setup's "configuration loaded" line — so a password written here
-	// reaches the log aggregator on every start, by the same route the
-	// caution on DatabaseConfig.Username describes and that
-	// DatabaseConfig.String exists to keep closed.
+	// that is a credential. It would survive the concatenation into every
+	// upstream request, and String prints this field verbatim — so a password
+	// written here would reach the log aggregator on every start.
 	if c.ReportsBaseURL != "" {
 		if u, err := url.Parse(c.ReportsBaseURL); err != nil {
 			errs = append(errs, fmt.Errorf("app.reports_base_url is not a valid "+
@@ -343,21 +303,22 @@ func (c *AppConfig) Validate() error {
 				c.ReportsBaseURL))
 		} else if u.User != nil {
 			// The offending value is NOT echoed, unlike every other branch here.
-			// Reporting it would copy the credential into an error that
-			// main.Setup hands to log.Fatal().Err(), which is the leak this
-			// check exists to prevent. Only the corrected form is printed, and
-			// that form drops the userinfo by construction.
+			// A service typically hands a validation error straight to a fatal
+			// log call, so reporting the value would copy the credential into
+			// exactly the place this check exists to keep it out of. Only the
+			// corrected form is printed, and it drops the userinfo by
+			// construction.
 			errs = append(errs, fmt.Errorf("app.reports_base_url must not "+
 				"carry userinfo: the value is concatenated into every upstream "+
-				"report URL and is printed verbatim in the startup log, so a "+
-				"credential here reaches both — use %q and authenticate to the "+
-				"report service some other way",
+				"URL and is printed verbatim when the configuration is logged, "+
+				"so a credential here reaches both — use %q and authenticate "+
+				"to the upstream some other way",
 				u.Scheme+"://"+u.Host))
 		} else if u.Path != "" || u.RawQuery != "" || u.Fragment != "" {
 			errs = append(errs, fmt.Errorf("app.reports_base_url must be scheme "+
 				"+ host (+ port) only, with no path, query, or fragment (got "+
-				"%q): the reports proxy appends \"/api/reports/<name>\" itself, "+
-				"so anything here is prepended to every report URL — use %q",
+				"%q): the consumer appends its own route, so anything here is "+
+				"prepended to every upstream URL — use %q",
 				c.ReportsBaseURL,
 				u.Scheme+"://"+u.Host))
 		}
@@ -381,7 +342,7 @@ func (c *AppConfig) String() string {
 		"Host=%s "+
 		"Port=%d "+
 		"Location=%s "+
-		"ReportsBaseURL=%s"+
+		"ReportsBaseURL=%s "+
 		"UploadDir=%s",
 		c.Name,
 		c.Version,

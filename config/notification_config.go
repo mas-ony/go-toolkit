@@ -1,4 +1,6 @@
-// notification_config.go covers the notification.* section of config.yaml.
+package config
+
+// The notification.* section of config.yaml.
 //
 // Keys in this section, with their environment-variable spellings:
 //
@@ -6,10 +8,8 @@
 //		NOTIFICATION_ASYNC
 //
 // One key, and that is the whole section — NewNotificationConfig below reads
-// exactly that one. See doc.go for how the environment spelling is derived and
-// which tests hold it up.
-
-package config
+// exactly that one. The environment spelling holds only for a Viper built by
+// NewViper; see the package documentation.
 
 import (
 	"errors"

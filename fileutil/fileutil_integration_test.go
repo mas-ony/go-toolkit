@@ -101,7 +101,7 @@ func (a *firstError) get() string {
 }
 
 // SafeName deliberately preserves case — a stored name is handed back to a
-// browser and "Laporan.PDF" should not become "laporan.pdf". The cost is
+// browser and "Report.PDF" should not become "report.pdf". The cost is
 // that whether two spellings are one file is the filesystem's decision,
 // not this package's, and a caller that treats names as unique keys is
 // relying on whichever one it happens to be deployed on.
@@ -386,6 +386,14 @@ func TestIntegrationMegabyteRoundTrip(t *testing.T) {
 func TestIntegrationConcurrentCopiesNeverShareAName(t *testing.T) {
 	dir := t.TempDir()
 	const src = "report.docx"
+
+	// restoreExts is the unit suite's helper, and using it is not optional:
+	// the extension table is package state, and a registration left behind
+	// here changes what every later test in the same process accepts. The
+	// first version of this test omitted it, and passed — because it was only
+	// ever run with -run Integration, where no unit test shared its process.
+	// Run together, TestHasAllowedExt started accepting .xlsx.
+	restoreExts(t)
 	RegisterExts(OfficeExts)
 
 	if _, err := Write(dir, itID, src, []byte("original")); err != nil {

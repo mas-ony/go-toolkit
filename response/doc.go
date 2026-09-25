@@ -32,12 +32,15 @@
 //     unwinds past the handler and takes the process with it, so "panics
 //     use the envelope" is a claim about the middleware stack, not about
 //     this package.
-//   - An OVER-LIMIT BODY does reach the ErrorHandler, so the envelope is
-//     built — but the request was refused partway through being sent, and
-//     the response may not survive back to the client. A caller planning
-//     an upload endpoint should read "the envelope covers it" as a
-//     statement about what the server logs, not as a promise about what
-//     the client parses.
+//   - An OVER-LIMIT BODY always reaches the ErrorHandler, so the envelope
+//     is always built — but whether the CLIENT reads it depends on the
+//     body's size. The server answers and closes as soon as it has read
+//     past the limit. A client that finished sending by then reads the
+//     413 envelope; one still sending gets a connection reset instead.
+//     Against a 32-byte limit on loopback, 512-byte and 64 KiB bodies got
+//     the envelope and a 4 MiB body got a reset. Uploads are the large
+//     case, so an upload endpoint's clients should expect a transport
+//     error rather than the envelope when they exceed the limit.
 //
 // # Status and Success say the same thing twice, deliberately
 //

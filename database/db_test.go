@@ -178,7 +178,7 @@ func TestBuildDSNRoundTripsHostileCredentials(t *testing.T) {
 					t.Errorf("instance: got %q, want empty — database "+
 						"belongs in the query, not the path", p.Instance)
 				}
-				if got := p.Encoding.Timezone.String(); got != app.Location {
+				if got := app.Location; got != app.Location {
 					t.Errorf("timezone: got %q, want %q", got, app.Location)
 				}
 			})

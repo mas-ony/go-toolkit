@@ -1,4 +1,6 @@
-// fiber_jwt_config.go covers the fiber.jwt.* section of config.yaml.
+package config
+
+// The fiber.jwt.* section of config.yaml.
 //
 // Keys in this section, with their environment-variable spellings:
 //
@@ -8,10 +10,8 @@
 //		FIBER_JWT_SECRET
 //
 // Two keys, and that is the whole section — NewJWTConfig below reads exactly
-// these. See doc.go for how the environment spelling is derived and which
-// tests hold it up.
-
-package config
+// these. The environment spelling holds only for a Viper built by NewViper;
+// see the package documentation.
 
 import (
 	"errors"
@@ -63,7 +63,11 @@ func NewJWTConfig(v *viper.Viper) *JWTConfig {
 }
 
 // Validate returns a joined error for every invalid or missing JWTConfig
-// field. Only called when fiber.auth.mode is "jwt".
+// field.
+//
+// A service is expected to call it only when fiber.auth.mode is "jwt" —
+// AuthConfig.IsJWT is the branch. Called in session mode, it would refuse
+// a deployment for leaving empty a secret that deployment never uses.
 //
 // Deliberately unchecked:
 //

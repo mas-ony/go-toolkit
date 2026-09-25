@@ -19,16 +19,26 @@
 // Two pieces: the selected dialect and the default namespace prefix. Both
 // are set once at startup and read by every helper afterwards.
 //
-//	db, err := database.New(cfg.Database, cfg.App)
+//	dbCfg := config.NewDatabaseConfig(v)
+//	appCfg := config.NewAppConfig(v)
+//
+//	db, err := database.New(dbCfg, appCfg)
 //	if err != nil {
 //		return err
 //	}
-//	d, err := database.ParseDialect(cfg.Database.Driver)
+//	d, err := database.ParseDialect(dbCfg.Driver)
 //	if err != nil {
 //		return err
 //	}
 //	database.SetDialect(d)
-//	database.Configure(cfg.Database.Schema)
+//	database.Configure(dbCfg.Namespace())
+//
+// Configure takes the whole PREFIX a table name is qualified with —
+// catalog.schema on SQL Server, the catalog alone on MySQL — which is what
+// DatabaseConfig.Namespace builds. Passing the schema on its own is the
+// easy mistake: SQL Server would then resolve every table against the
+// login's default database rather than the configured one, and MySQL, where
+// the config refuses a schema, would qualify nothing at all.
 //
 // SetDialect panics on an unknown dialect, and every helper that spells
 // grammar panics until it has run, because a missing call is a wiring
@@ -305,8 +315,16 @@
 // The INTEGRATION suite needs a scratch server for at least one engine and
 // is behind a build tag, so it is opt-in twice over:
 //
-//	DB_TEST_MYSQL_DSN      user:pass@tcp(host:3306)/scratch
-//	DB_TEST_SQLSERVER_DSN  sqlserver://user:pass@host?database=scratch
+//	DB_TEST_MYSQL_DSN
+//		user:pass@tcp(host:3306)/scratch?parseTime=true&loc=Asia%2FJakarta
+//	DB_TEST_SQLSERVER_DSN
+//		sqlserver://user:pass@host?database=scratch&timezone=Asia%2FJakarta
+//
+// This suite alone passes with or without the zone parameters, because
+// every test where time matters opens its pool through New, which adds
+// them itself. They are shown because the datetime package reads the same
+// two variables and cannot pass without them — and this suite passes with
+// them — so one pair of values serves both.
 //
 //	go test -tags integration -run Integration ./database
 //

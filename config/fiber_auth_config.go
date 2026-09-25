@@ -1,4 +1,6 @@
-// fiber_auth_config.go covers the fiber.auth.* section of config.yaml.
+package config
+
+// The fiber.auth.* section of config.yaml.
 //
 // Keys in this section, with their environment-variable spellings:
 //
@@ -6,10 +8,8 @@
 //		FIBER_AUTH_MODE
 //
 // One key, and that is the whole section — NewAuthConfig below reads exactly
-// that one. See doc.go for how the environment spelling is derived and which
-// tests hold it up.
-
-package config
+// that one. The environment spelling holds only for a Viper built by NewViper;
+// see the package documentation.
 
 import (
 	"errors"
@@ -18,27 +18,23 @@ import (
 	"github.com/spf13/viper"
 )
 
-// AuthConfig controls which authentication mechanism the application uses.
+// AuthConfig selects which authentication mechanism a service uses.
 //
-// Set fiber.auth.mode in config.yaml to switch between modes at deployment
-// time without touching any code. Only the sub-config that corresponds to the
-// active mode is validated at startup (SessionConfig for "session", JWTConfig
-// for "jwt"); the other is silently skipped.
+// Setting fiber.auth.mode switches between the two at deployment time
+// without touching code. A service is expected to validate only the
+// sub-section matching the active mode — SessionConfig for "session",
+// JWTConfig for "jwt" — and skip the other, which IsJWT exists to decide.
 //
 // Supported modes:
-//   - "session" — server-side session stored in memory. The session ID is sent
-//     to the client as an HttpOnly cookie and validated on every request by
-//     looking it up in the store. The session middleware is registered
-//     globally. Best for same-origin single-page apps where the frontend and
-//     backend share the same domain (no CORS complications, no client-side
-//     token logic).
-//   - "jwt" — stateless HMAC-SHA256 signed Bearer token. The signed token is
-//     returned in the login response body; clients send it as:
-//     Authorization: Bearer <token>
-//     The server validates the signature and expiry on every request with no
-//     session-store lookup. The session middleware is NOT registered.
-//     Best for mobile apps, third-party API clients, or deployments where the
-//     frontend is served from a different domain.
+//   - "session" — a server-side session. The session ID travels in an
+//     HttpOnly cookie and is looked up in the store on every request. Suits
+//     a same-origin single-page application, where the frontend and backend
+//     share a domain and there is no CORS or client-side token handling.
+//   - "jwt" — a stateless HMAC-SHA256 signed bearer token, returned in the
+//     login response and sent back as "Authorization: Bearer <token>". The
+//     signature and expiry are checked on every request with no store
+//     lookup. Suits mobile applications, third-party API clients, and a
+//     frontend served from a different domain.
 type AuthConfig struct {
 	// Mode is the active authentication mechanism. Validated against the set
 	// of known modes at startup so typos in config.yaml are caught immediately
@@ -70,18 +66,17 @@ func NewAuthConfig(v *viper.Viper) *AuthConfig {
 }
 
 // IsJWT reports whether the active auth mode is "jwt".
-// Used by router.New and handler constructors to conditionally register
-// the session middleware and select the correct login/logout behaviour.
 //
-// IsJWT is also used by Config.validate to decide which auth sub-config
-// (JWTConfig vs SessionConfig) to pass to its validation loop — only the
-// active sub-config is validated at startup.
+// It is the one branch a service needs: whether to register session
+// middleware, which login and logout behaviour to wire, and which of the
+// two auth sub-sections to validate.
 //
-// Nil-safe, and that is load-bearing rather than defensive habit:
-// Config.validate calls this BEFORE the validation loop runs, so a nil
-// *AuthConfig would panic here and lose the "not initialised" error that the
-// loop is about to produce. A nil receiver reports false, which selects
-// session mode — the same default NewAuthConfig applies to an absent key.
+// Nil-safe, and that is load-bearing rather than defensive habit. A service
+// aggregating its sections typically calls this to BUILD its validation
+// list, before that list has run — so a nil *AuthConfig must not panic here
+// and lose the "not initialised" error the list is about to report. A nil
+// receiver reports false, which selects session mode: the same default
+// NewAuthConfig applies to an absent key.
 func (c *AuthConfig) IsJWT() bool { return c != nil && c.Mode == "jwt" }
 
 // Validate returns a joined error for every invalid or missing AuthConfig
@@ -89,12 +84,12 @@ func (c *AuthConfig) IsJWT() bool { return c != nil && c.Mode == "jwt" }
 //
 // Deliberately unchecked:
 //
-//   - Whether the sub-config for the selected mode is USABLE. Config.validate
-//     runs exactly one of JWTConfig.Validate and SessionConfig.Validate based
-//     on IsJWT(), and neither is visible from here.
-//   - Whether router.New actually branched the same way. This value selects
-//     the mode; nothing in this package can see the middleware stack that
-//     honours it.
+//   - Whether the sub-section for the selected mode is USABLE. That is
+//     JWTConfig.Validate's or SessionConfig.Validate's to answer, and a
+//     service runs whichever IsJWT selects; neither is visible from here.
+//   - Whether the service actually branched the same way. This value
+//     selects the mode; nothing in this package can see the middleware
+//     stack that honours it.
 //   - An EMPTY Mode. NewAuthConfig substitutes "session" for it before this
 //     method ever runs, so "" is unreachable here and an error message naming
 //     it would be dead text. The consequence is worth stating plainly:

@@ -357,11 +357,11 @@ func TestCaptionFolding(t *testing.T) {
 	if got != "lokasi brankas" {
 		t.Errorf("normaliseCaption = %q, want lokasi brankas", got)
 	}
-	if foldCaption("Kab./ Kota") != foldCaption("Kab./Kota") {
+	if foldCaption("Dept./ Unit") != foldCaption("Dept./Unit") {
 		t.Error("interior spacing around punctuation must not" +
 			" distinguish two captions")
 	}
-	if foldCaption("Link") == foldCaption("Berkas") {
+	if foldCaption("Link") == foldCaption("File") {
 		t.Error("folding must not make genuinely different captions" +
 			" equal")
 	}

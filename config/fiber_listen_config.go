@@ -1,4 +1,6 @@
-// fiber_listen_config.go covers the fiber.listen.* section of config.yaml.
+package config
+
+// The fiber.listen.* section of config.yaml.
 //
 // Keys in this section, with their environment-variable spellings:
 //
@@ -30,10 +32,8 @@
 //		FIBER_LISTEN_UNIX_SOCKET_FILE_MODE
 //
 // Thirteen keys, and that is the whole section — NewListenConfig below reads
-// exactly these. See doc.go for how the environment spelling is derived and
-// which tests hold it up.
-
-package config
+// exactly these. The environment spelling holds only for a Viper built by
+// NewViper; see the package documentation.
 
 import (
 	"errors"

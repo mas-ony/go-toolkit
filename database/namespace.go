@@ -91,8 +91,9 @@ VALUES VARYING VIEW WAITFOR WHEN WHERE WHILE WITH WRITETEXT
 //	SELECT WORD FROM INFORMATION_SCHEMA.KEYWORDS WHERE RESERVED = 1
 //
 // Later MySQL releases reserve further words, and MariaDB reserves some that
-// MySQL does not. Either gap affects only a bare name, because both engines
-// read a word after a period as an identifier.
+// MySQL does not; mariadbReserved below covers those. Either gap affects only
+// a bare name, because both engines read a word after a period as an
+// identifier.
 const mysqlReserved = `
 ACCESSIBLE ADD ALL ALTER ANALYZE AND AS ASC ASENSITIVE BEFORE BETWEEN BIGINT
 BINARY BLOB BOTH BY CALL CASCADE CASE CHANGE CHAR CHARACTER CHECK COLLATE
@@ -124,6 +125,28 @@ UTC_TIMESTAMP VALUES VARBINARY VARCHAR VARCHARACTER VARYING VIRTUAL WHEN WHERE
 WHILE WINDOW WITH WRITE XOR YEAR_MONTH ZEROFILL
 `
 
+// mariadbReserved lists the words MariaDB 10.11 refuses as a bare table
+// name that mysqlReserved does not already cover.
+//
+// MariaDB publishes no RESERVED flag — its INFORMATION_SCHEMA.KEYWORDS lists
+// every keyword without saying which ones are reserved — so this list cannot
+// be copied the way mysqlReserved is. It was MEASURED instead: each keyword
+// was used as a bare table name in CREATE TEMPORARY TABLE, and these are the
+// ones the parser rejected. TestIntegrationReservedWordsCoverServer repeats
+// that measurement against any MariaDB it is pointed at, so a newer release
+// that reserves more words fails there and names them.
+//
+// The gap it closes is narrow and real. Qualified, every one of these works
+// — "app.portion" is fine — but a deployment with an empty namespace uses
+// bare names, which is a valid configuration, and there "SELECT x FROM
+// portion" is a syntax error on every query.
+const mariadbReserved = `
+CURRENT_ROLE DELETE_DOMAIN_ID DO_DOMAIN_IDS IGNORE_DOMAIN_IDS
+MASTER_DEMOTE_TO_REPLICA MASTER_DEMOTE_TO_SLAVE OFFSET PAGE_CHECKSUM
+PARSE_VCOL_EXPR PORTION REF_SYSTEM_ID RETURNING STATS_AUTO_RECALC
+STATS_PERSISTENT STATS_SAMPLE_PAGES
+`
+
 // DefaultNamespace is the prefix every repository starts from: constructors
 // copy it into the repository they return. Configure sets it.
 //
@@ -136,7 +159,7 @@ var DefaultNamespace = ""
 // reservedWords is the set of words reserved in T-SQL or in MySQL, in upper
 // case. Keywords that are not reserved, such as STATUS and NAME, are absent,
 // since both engines accept them bare.
-var reservedWords = wordSet(tsqlReserved, mysqlReserved)
+var reservedWords = wordSet(tsqlReserved, mysqlReserved, mariadbReserved)
 
 // wordSet builds a set from lists of words separated by white space.
 func wordSet(lists ...string) map[string]struct{} {

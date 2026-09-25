@@ -127,6 +127,7 @@ func TestReservedWords(t *testing.T) {
 	}{
 		{"tsqlReserved", tsqlReserved, 184},
 		{"mysqlReserved", mysqlReserved, 262},
+		{"mariadbReserved", mariadbReserved, 15},
 	}
 	for _, l := range lists {
 		words := strings.Fields(l.words)
@@ -144,7 +145,8 @@ func TestReservedWords(t *testing.T) {
 		}
 	}
 
-	for _, w := range []string{"USER", "FILE", "RANK", "SYSTEM", "ORDER"} {
+	for _, w := range []string{"USER", "FILE", "RANK", "SYSTEM", "ORDER",
+		"OFFSET", "RETURNING", "PORTION"} {
 		if _, ok := reservedWords[w]; !ok {
 			t.Errorf("reservedWords lacks %s", w)
 		}
