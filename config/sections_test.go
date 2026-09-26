@@ -2,17 +2,17 @@ package config
 
 // Contract tests every section is held to.
 //
-// All thirteen sections share one shape — a constructor reading a Viper,
-// a Validate, and a String safe to log — and each file's header makes the
+// Every section shares one shape — a constructor reading a Viper, a
+// Validate, and a String safe to log — and each file's header makes the
 // same promise: "N keys, and that is the whole section: the constructor
-// reads exactly these." That promise drifted once already (a header that
-// said seven keys above a list of eight), and nothing noticed, because
-// nothing checked it.
+// reads exactly these." A promise like that drifts without anyone
+// noticing, because nothing reads a comment against the code it
+// describes.
 //
 // So the tests here check it for every section at once, by parsing the
 // package's own source. A key added to a constructor without its header
-// line, a header line for a key nothing reads, a count that no longer
-// matches, and an environment spelling that does not follow the rule all
+// line, a header line for a key nothing reads, a count that does not
+// match, and an environment spelling that does not follow the rule all
 // fail here, naming the file.
 
 import (
@@ -88,6 +88,12 @@ var sections = []section{
 	{"NotificationConfig", func(v *viper.Viper) SectionConfig {
 		return NewNotificationConfig(v)
 	}, (*NotificationConfig)(nil)},
+	{"EmailConfig", func(v *viper.Viper) SectionConfig {
+		return NewEmailConfig(v)
+	}, (*EmailConfig)(nil)},
+	{"WhatsAppConfig", func(v *viper.Viper) SectionConfig {
+		return NewWhatsAppConfig(v)
+	}, (*WhatsAppConfig)(nil)},
 }
 
 // ----------------------------------------------------------------------------
@@ -220,8 +226,8 @@ func runRules(t *testing.T, base map[string]any,
 }
 
 // TestEverySectionListsExactlyTheKeysItReads holds each header to the
-// promise it makes. It is the test that would have caught the header
-// that said seven keys above a list of eight.
+// promise it makes: its count, its list and its spellings all have to
+// agree with what the constructor reads.
 func TestEverySectionListsExactlyTheKeysItReads(t *testing.T) {
 	t.Parallel()
 
@@ -344,9 +350,9 @@ func TestEverySectionIsNilSafe(t *testing.T) {
 	}
 }
 
-// String is what every section is logged through on start, so the three
-// secrets in this package must never appear in it. A deployment ships
-// its logs somewhere broader than its secrets are allowed to go.
+// String is what every section is logged through on start, so no secret
+// in this package may appear in it. A deployment ships its logs
+// somewhere broader than its secrets are allowed to go.
 func TestStringNeverPrintsASecret(t *testing.T) {
 	t.Parallel()
 	const secret = "s3cret-value-that-must-not-be-logged-0123456789"
@@ -363,6 +369,9 @@ func TestStringNeverPrintsASecret(t *testing.T) {
 		}},
 		{"fiber.jwt.secret", func(v *viper.Viper) SectionConfig {
 			return NewJWTConfig(v)
+		}},
+		{"notification.email.password", func(v *viper.Viper) SectionConfig {
+			return NewEmailConfig(v)
 		}},
 	} {
 		t.Run(c.key, func(t *testing.T) {
@@ -437,6 +446,37 @@ func TestEverySectionFileHasItsOwnTestFile(t *testing.T) {
 		test := strings.TrimSuffix(f, ".go") + "_test.go"
 		if _, err := os.Stat(test); err != nil {
 			t.Errorf("%s has no %s", f, test)
+		}
+	}
+}
+
+// A section file is named for its prefix with dots as underscores, which
+// is how a reader finds fiber.limiter in fiber_limiter_config.go without
+// opening every file. The type inside takes the last component alone —
+// LimiterConfig, EmailConfig — and is not checked here, since the section
+// table above already names every one.
+func TestEverySectionFileIsNamedForItsPrefix(t *testing.T) {
+	t.Parallel()
+	files, err := filepath.Glob("*_config.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range files {
+		fset := token.NewFileSet()
+		f, err := parser.ParseFile(fset, path, nil, parser.ParseComments)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// A header that names no section is reported by
+		// TestEverySectionListsExactlyTheKeysItReads.
+		m := sectionLine.FindStringSubmatch(headerOf(f, fset))
+		if m == nil {
+			continue
+		}
+		want := strings.ReplaceAll(m[1], ".", "_") + "_config.go"
+		if path != want {
+			t.Errorf("%s holds the %s.* section and belongs in %s",
+				path, m[1], want)
 		}
 	}
 }

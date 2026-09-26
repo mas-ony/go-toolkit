@@ -1,0 +1,169 @@
+# Service configuration, read by internal/config through the typed sections
+# of github.com/mas-ony/go-toolkit/config.
+#
+# Every key can be overridden by an environment variable named after its
+# path, upper-cased with dots as underscores: fiber.limiter.max is
+# FIBER_LIMITER_MAX. An empty variable does not blank a value. A list may
+# be a YAML sequence here and a comma-separated string in the environment.
+#
+# Secrets stay out of this file and come from the environment:
+#   DATABASE_USERNAME, DATABASE_PASSWORD
+#   NOTIFICATION_EMAIL_USERNAME, NOTIFICATION_EMAIL_PASSWORD
+#   FIBER_JWT_SECRET, FIBER_CLIENT_TOKEN
+#
+# Durations always carry a unit (30s, 5m, 8h): a bare number is read as
+# nanoseconds.
+
+app:
+  name: example-service
+  version: "1.0.0"
+  env: development          # development | staging | production
+  host: ""                  # empty binds every interface; the socket
+                            # path when fiber.listen.listener_network
+                            # is unix
+  port: 3000
+  location: Asia/Jakarta    # IANA zone; also the database driver's zone
+  reports_base_url: ""      # scheme://host[:port] only, no path
+  upload_dir: ./uploads
+
+database:
+  driver: sqlserver         # sqlserver | mssql | mysql
+  host: 127.0.0.1
+  port: 1433
+  catalog: app2026          # the database the connection opens
+  schema: dbo               # required on SQL Server, empty on MySQL
+  username: ""              # DATABASE_USERNAME
+  password: ""              # DATABASE_PASSWORD
+  encrypt: "true"           # disable | false | true | strict; true and
+                            # strict need a certificate the client trusts
+  max_open_conns: 25        # per process: divide by the core count
+                            # before turning on fiber.listen.enable_prefork
+  max_idle_conns: 25        # equal to max_open_conns: a fixed-size pool
+  conn_max_lifetime: 30m
+  conn_max_idle_time: 5m    # below any firewall idle timeout on the path
+
+notification:
+  channels: []              # whatsapp, email, both, or none
+  whatsapp:
+    async: true             # send in the background
+  email:
+    host: smtp.example.go.id
+    port: 587               # 587 with starttls, 465 with implicit
+    tls: starttls           # starttls | implicit | none
+    insecure: false         # true skips certificate checks
+    username: ""            # NOTIFICATION_EMAIL_USERNAME
+    password: ""            # NOTIFICATION_EMAIL_PASSWORD
+    from: "Notifikasi <noreply@example.go.id>"
+    timeout: 30s            # bounds one whole send, attachments included
+    async: true
+
+fiber:
+  # Limits and timeouts
+  body_limit: 22020096      # 21 MiB: fileutil.MaxFileBytes (20 MiB) plus
+                            # 1 MiB of multipart envelope; less is refused
+  concurrency: 262144
+  read_buffer_size: 4096
+  write_buffer_size: 4096
+  read_timeout: 60s         # a whole request, upload included
+  write_timeout: 60s
+  idle_timeout: 75s         # above the load balancer's idle timeout
+  max_ranges: 16
+
+  # Client IP behind a gateway: trust_proxy needs an allowlist, and
+  # proxy_header needs trust_proxy
+  trust_proxy: false
+  proxy_header: ""          # e.g. X-Forwarded-For
+  enable_ip_validation: false
+  trust_proxy_config:
+    proxies: []             # the gateway's own addresses or CIDRs
+    loopback: false
+    link_local: false
+    private: false
+    unix_socket: false
+
+  # Routing
+  request_methods: [GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS]
+  case_sensitive: false
+  strict_routing: false
+  unescape_path: false
+  skip_unmatched_routes: false  # true: unmatched requests skip logging
+  disable_head_auto_register: false
+  get_only: false           # always false; true is refused
+
+  # Usually left alone
+  server_header: ""         # empty sends no Server header
+  immutable: false
+  stream_request_body: false
+  reduce_memory_usage: false
+  disable_keepalive: false
+  disable_default_date: false
+  disable_default_content_type: false
+  disable_header_normalizing: false
+  disable_pre_parse_multipart_form: false
+  enable_splitting_on_parsers: false
+  pass_locals_to_context: false
+  pass_locals_to_views: false
+  views_layout: ""
+
+  auth:
+    mode: session           # session | jwt; only its section is used
+
+  jwt:
+    secret: ""              # FIBER_JWT_SECRET, openssl rand -hex 32
+    expiry: 8h
+
+  session:
+    absolute_timeout: 8h    # hard ceiling, activity or not
+    idle_timeout: 30m       # at most absolute_timeout
+    cookie_same_site: Lax   # Strict | Lax | None (None needs secure)
+    cookie_secure: true     # false only for plain HTTP off localhost
+    cookie_http_only: true
+    cookie_session_only: true
+    cookie_domain: ""       # empty: the request host
+    cookie_path: /
+
+  client:
+    base_url: ""            # e.g. https://api.example.go.id/api/v1
+    token: ""               # FIBER_CLIENT_TOKEN
+    retries: 2
+    no_retry_methods: [POST]  # [] replays every method, POST included
+    insecure: false
+
+  limiter:
+    max: 100
+    expiration: 1m
+    strategy: sliding       # fixed | sliding
+    skip_failed_requests: false
+    skip_successful_requests: false
+    disable_headers: false
+    disable_value_redaction: false
+    # Keyed on the client IP: behind a gateway without trust_proxy, every
+    # client shares one quota.
+
+  listen:
+    listener_network: tcp4  # tcp | tcp4 | tcp6 | unix
+    shutdown_timeout: 10s   # below the orchestrator's kill grace period
+    disable_startup_message: false  # true in production
+    enable_print_routes: false
+    enable_prefork: false   # not with session auth; see max_open_conns
+    prefork_recover_interval: 1s
+    prefork_recover_threshold: 0      # 0: max(1, GOMAXPROCS/2)
+    prefork_shutdown_grace_period: 15s  # at least shutdown_timeout
+    cert_file: ""           # set both to serve TLS directly
+    cert_key_file: ""
+    cert_client_file: ""    # CA for client certificates (mTLS)
+    tls_min_version: 771    # 771 is TLS 1.2, 772 is TLS 1.3
+    unix_socket_file_mode: 0770  # keep the leading zero
+
+  recover:
+    enable_stack_trace: true
+
+  requestid:
+    header: X-Request-ID    # the access log reads only this name
+
+  zerolog:
+    fields: [error, status, url, method, ip, latency, requestId]
+    fields_snake_case: false
+    wrap_headers: false
+    messages: ["Server error", "Client error", "Success"]
+    levels: [error, warn, info]   # nothing below info outside development

@@ -5,9 +5,9 @@ configuration, a SQL layer that speaks both MySQL and SQL Server,
 spreadsheet reading and import, upload handling, and the request and
 response shapes every service uses.
 
-Everything here is a library. Nothing starts a server or reads a config
-file, and the only process-wide state is the handful of startup settings
-listed under [Conventions](#conventions).
+Everything here, `examples/` aside, is a library. Nothing starts a server
+or reads a config file, and the only process-wide state is the handful of
+startup settings listed under [Conventions](#conventions).
 
 ```
 go get github.com/mas-ony/go-toolkit
@@ -28,6 +28,7 @@ go get github.com/mas-ony/go-toolkit
 | `database`   | sqlx setup, MySQL/T-SQL grammar, clause builders   |
 | `datetime`   | Time type that parses many formats, JSON and SQL   |
 | `document`   | One-pass index of a document directory             |
+| `email`      | Sends mail with attachments through an SMTP relay  |
 | `fileutil`   | Upload paths, safe names, type allowlist, writes   |
 | `httpclient` | JSON client with retries and typed errors          |
 | `importer`   | Drives one spreadsheet import, row by row          |
@@ -52,21 +53,23 @@ structs.
 
 Sections, and the key prefix each is nested behind:
 
-| Section      | Prefix            | Covers                            |
-| ------------ | ----------------- | --------------------------------- |
-| App          | `app`             | Name, env, host, port, time zone  |
-| Database     | `database`        | Driver, host, credentials, pool   |
-| Notification | `notification`    | Sync or async dispatch            |
-| Fiber        | `fiber`           | Server and router settings        |
-| Auth         | `fiber.auth`      | Auth mode                         |
-| JWT          | `fiber.jwt`       | Secret and expiry                 |
-| Client       | `fiber.client`    | Outbound base URL, token, retries |
-| Limiter      | `fiber.limiter`   | Rate limit max, window, strategy  |
-| Listen       | `fiber.listen`    | TLS, prefork, shutdown timeout    |
-| Recover      | `fiber.recover`   | Stack traces on panic             |
-| RequestID    | `fiber.requestid` | Correlation header                |
-| Session      | `fiber.session`   | Cookie flags and timeouts         |
-| Zerolog      | `fiber.zerolog`   | Access log fields and levels      |
+| Section      | Prefix                  | Covers                            |
+| ------------ | ----------------------- | --------------------------------- |
+| App          | `app`                   | Name, env, host, port, time zone  |
+| Database     | `database`              | Driver, host, credentials, pool   |
+| Notification | `notification`          | Channels in use                   |
+| WhatsApp     | `notification.whatsapp` | Sync or async sending             |
+| Email        | `notification.email`    | SMTP relay, TLS, sender, async    |
+| Fiber        | `fiber`                 | Server and router settings        |
+| Auth         | `fiber.auth`            | Auth mode                         |
+| JWT          | `fiber.jwt`             | Secret and expiry                 |
+| Client       | `fiber.client`          | Outbound base URL, token, retries |
+| Limiter      | `fiber.limiter`         | Rate limit max, window, strategy  |
+| Listen       | `fiber.listen`          | TLS, prefork, shutdown timeout    |
+| Recover      | `fiber.recover`         | Stack traces on panic             |
+| RequestID    | `fiber.requestid`       | Correlation header                |
+| Session      | `fiber.session`         | Cookie flags and timeouts         |
+| Zerolog      | `fiber.zerolog`         | Access log fields and levels      |
 
 Every section implements `SectionConfig` — `Validate() error` and
 `String() string` — so one list drives both the startup check and the
@@ -118,6 +121,8 @@ sections := []config.Section{
         Value: config.NewDatabaseConfig(v)},
     {Name: "limiter", Prefix: "fiber.limiter",
         Value: config.NewLimiterConfig(v)},
+    {Name: "email", Prefix: "notification.email",
+        Value: config.NewEmailConfig(v)},
 }
 
 supplied := config.SuppliedSections(v, sections)
@@ -144,45 +149,53 @@ bare environment string on whitespace, so `FIBER_REQUEST_METHODS=GET,POST`
 would otherwise register one method nobody sends and answer 405 to
 everything.
 
-### Example config.yaml
+### Example
 
-```yaml
-app:
-  name: example-service
-  version: 1.0.0
-  env: development        # development | staging | production
-  host: 0.0.0.0
-  port: 3000
-  location: Asia/Jakarta
-  upload_dir: ./uploads
+[`examples/service`](examples/service) is a complete setup to copy into a
+service:
 
-database:
-  driver: sqlserver       # sqlserver | mssql | mysql
-  host: 127.0.0.1
-  port: 1433
-  username: sa
-  password: secret
-  catalog: app2026
-  schema: dbo             # required on SQL Server, empty on MySQL
-  encrypt: true           # disable | false | true | strict
-  max_open_conns: 25
-  max_idle_conns: 5
-  conn_max_lifetime: 30m
-  conn_max_idle_time: 5m
+- `config.yaml` sets every key the sections read, leaves the credentials
+  to the environment, and comments every value that is not obvious.
+- `internal/config/config.go` builds every section, validates the ones
+  the deployment uses, and adds the checks that need two sections at
+  once.
+- `internal/config/config_test.go` pins each of those checks.
 
-fiber:
-  body_limit: 4194304
-  read_timeout: 10s
-  write_timeout: 10s
-  limiter:
-    max: 100
-    expiration: 1m
-    strategy: sliding     # fixed | sliding
-  listen:
-    shutdown_timeout: 10s
-  zerolog:
-    fields: status,method,latency
+It is built and tested with the rest of the module, so a change that
+breaks it fails `go test ./...` instead of leaving a stale example behind.
+
+### Notification channels
+
+`notification.channels` chooses the channels in use — `whatsapp`,
+`email`, both, or neither — and each channel is configured by the section
+named after it. Each carries its own `async`, because a WhatsApp document
+upload and an SMTP conversation are different waits, and a deployment may
+want one in the background and the other waited for.
+
+```go
+notif := config.NewNotificationConfig(v)
+
+var mailer *email.Service  // nil: every send returns ErrNotConfigured
+if notif.Enabled(config.ChannelEmail) {
+    mailer, err = email.New(config.NewEmailConfig(v), log)
+    if err != nil {
+        return err  // chosen, so a missing section is fatal too
+    }
+}
+
+var wa *whatsapp.Service  // nil: NOT safe to call, so guard each send
+if notif.Enabled(config.ChannelWhatsApp) {
+    wa, err = whatsapp.New(log)
+    if err != nil {
+        return err  // ErrNotPaired if the QR window closed
+    }
+}
 ```
+
+Leaving a channel out of the list switches it off and keeps its section.
+The two services differ when switched off: a nil email `*Service` answers
+every send with `ErrNotConfigured`, while a nil WhatsApp one panics, so
+WhatsApp sends sit behind `notif.Enabled(config.ChannelWhatsApp)`.
 
 ## Database
 
@@ -680,7 +693,50 @@ stripped, and anything else left over is `ErrInvalidPhone`; a number that
 is empty once stripped is a silent no-op, so an unfilled column needs no
 guard. `SendTextContext` and `SendDocumentContext` take a context, the
 only bound on a send, and worth passing for a document, whose upload is
-the slowest call here.
+the slowest call here. Under `notification.whatsapp.async` no request is
+left to end a send, so give it a deadline of its own:
+`context.WithTimeout(context.WithoutCancel(ctx), time.Minute)`.
+
+### email
+
+Sends notification mail through an SMTP relay, one connection per
+message, with the standard library's `net/smtp` underneath. Building the
+service is shown under [Notification channels](#notification-channels).
+
+```go
+err = mailer.Send(ctx, email.Message{
+    To:      []string{"Budi Santoso <budi@example.go.id>"},
+    Cc:      []string{"arsip@example.go.id"},
+    Subject: "Laporan realisasi Triwulan III",
+    Text:    "Laporan terlampir.",
+    Attachments: []email.Attachment{{
+        Filename:    "realisasi.pdf",
+        ContentType: "application/pdf",
+        Data:        pdf,
+    }},
+})
+err = mailer.SendText(ctx, "budi@example.go.id", "Subjek", "Isi")
+```
+
+Without any `notification.email.*` key, `New` returns `ErrNotConfigured`,
+which is fatal where email is chosen. A nil `*Service` returns the same
+error from every send rather than panic, so call sites need no guard.
+`tls` is `starttls`, `implicit` or `none`, with no fallback: under
+`starttls`, a relay that does not offer the upgrade fails the send.
+Credentials go only over TLS or to a relay on loopback, with PLAIN or
+LOGIN.
+
+Every send is bounded by `notification.email.timeout` and by the
+context. Under `notification.email.async`, send on
+`context.WithoutCancel(ctx)` and build the `Message` from copies before
+the goroutine starts, since Fiber reuses request memory once the handler
+returns.
+
+A nil error means the relay accepted the message; a missing mailbox is a
+bounce, later. A refused recipient fails the whole send before anything
+is uploaded, and the error unwraps to `*textproto.Error`: 4xx is worth
+retrying, 5xx is not. `ErrInvalidAddress` marks a stored address that
+does not parse. Each entry holds one address, never a list.
 
 ## Testing
 

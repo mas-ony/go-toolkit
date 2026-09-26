@@ -5,17 +5,18 @@ package config
 // Integration tests for section.go: the environment contract NewViper
 // establishes, and the environment half of SuppliedSections.
 //
-// Twelve section files spell their keys' environment variables, and none
-// of those spellings works unless the Viper was built by NewViper. Until
-// these tests, nothing held that up — and the contract fails invisibly: a
-// Viper built without the key replacer ignores every documented variable,
-// substitutes the file's value or a zero, and reports nothing.
+// Every section file spells its keys' environment variables, and none of
+// those spellings works unless the Viper was built by NewViper. The
+// contract fails invisibly: a Viper built without the key replacer ignores
+// every documented variable, substitutes the file's value or a zero, and
+// reports nothing.
 //
 // The app section is the vehicle here, because it is small and every
 // deployment has one. What is under test is the wiring, which is the same
-// for all thirteen sections; the contract suite in sections_test.go
-// separately checks that each section's documented spellings follow the
-// rule these tests prove.
+// for every section; the contract suite in sections_test.go separately
+// checks that each section's documented spellings follow the rule these
+// tests prove. The one exception is the nested-prefix case, which needs a
+// real nested section and uses notification.email.
 //
 // These set REAL process variables with t.Setenv and read a real
 // config.yaml through NewViper, so each assertion is about what a
@@ -28,10 +29,22 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/spf13/viper"
 )
+
+const baseFile = `
+app:
+  name: from-file
+  version: 1.0.0
+  env: production
+  port: 8080
+  location: UTC
+  reports_base_url: https://file.example
+`
 
 // loadFile writes body to a config.yaml in a temporary directory and reads
 // it through NewViper, the way a service would at startup.
@@ -48,16 +61,6 @@ func loadFile(t *testing.T, body string) *viper.Viper {
 	}
 	return v
 }
-
-const baseFile = `
-app:
-  name: from-file
-  version: 1.0.0
-  env: production
-  port: 8080
-  location: UTC
-  reports_base_url: https://file.example
-`
 
 // The documented variable overrides the file, key by key, and leaves the
 // keys it does not name alone.
@@ -186,5 +189,64 @@ func TestIntegrationAnEmptyVariableDoesNotSupplyASection(t *testing.T) {
 	})
 	if got["zqempty"] {
 		t.Error("an exported-but-empty variable switched a section on")
+	}
+}
+
+// A variable is routed by the longest prefix, as a file key is.
+// NOTIFICATION_EMAIL_HOST begins with the notification section's prefix as
+// well as the email section's, and has to switch on only the second, or
+// configuring mail would drag notification into validation with it. The
+// whatsapp section beside it shares the parent's prefix and nothing else,
+// so it stays off too.
+//
+// Every other NOTIFICATION_* variable the machine exports is emptied
+// first, because an empty variable supplies nothing, so a runner that
+// happens to set NOTIFICATION_CHANNELS cannot switch notification on here.
+func TestIntegrationANestedSectionClaimsItsOwnVariables(t *testing.T) {
+	for _, entry := range os.Environ() {
+		name, _, _ := strings.Cut(entry, "=")
+		if strings.HasPrefix(name, "NOTIFICATION_") &&
+			!strings.HasPrefix(name, "NOTIFICATION_EMAIL_") {
+			t.Setenv(name, "")
+		}
+	}
+	t.Setenv("NOTIFICATION_EMAIL_HOST", "smtp.example.com")
+	t.Setenv("NOTIFICATION_EMAIL_PASSWORD", " spaced secret ")
+	t.Setenv("NOTIFICATION_EMAIL_TIMEOUT", "45s")
+
+	v := loadFile(t, baseFile)
+	got := SuppliedSections(v, []Section{
+		{Name: "notification", Prefix: "notification",
+			Value: AbsentSection{}},
+		{Name: "email", Prefix: "notification.email",
+			Value: AbsentSection{}},
+		{Name: "whatsapp", Prefix: "notification.whatsapp",
+			Value: AbsentSection{}},
+	})
+	if !got["email"] {
+		t.Error("email is supplied by NOTIFICATION_EMAIL_* and was not " +
+			"seen")
+	}
+	if got["notification"] {
+		t.Error("NOTIFICATION_EMAIL_* switched the notification section " +
+			"on; the longer prefix should have claimed it")
+	}
+	if got["whatsapp"] {
+		t.Error("NOTIFICATION_EMAIL_* switched the whatsapp section on")
+	}
+
+	// And the values arrive under the documented spellings, the password
+	// exactly as exported.
+	c := NewEmailConfig(v)
+	if c.Host != "smtp.example.com" {
+		t.Errorf("Host = %q, want the value of NOTIFICATION_EMAIL_HOST",
+			c.Host)
+	}
+	if c.Password != " spaced secret " {
+		t.Errorf("Password = %q, want it exactly as exported", c.Password)
+	}
+	if c.Timeout != 45*time.Second {
+		t.Errorf("Timeout = %s, want 45s from NOTIFICATION_EMAIL_TIMEOUT",
+			c.Timeout)
 	}
 }

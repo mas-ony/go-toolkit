@@ -112,9 +112,10 @@ func (s Supplied) Configured(name string) bool {
 // config.yaml supplies nothing, and every section would load as absent.
 //
 // A key is routed to the section with the LONGEST matching prefix, which is
-// what keeps fiber from claiming the six sections nested inside it:
+// what keeps a parent from claiming the sections nested inside it:
 // fiber.limiter.max begins with both "fiber" and "fiber.limiter", and only
-// the second one is its section.
+// the second one is its section, just as notification.email.host belongs
+// to the email section and not to notification.
 //
 // The environment half is the same routing over the same prefixes in their
 // environment spelling, and it is the WEAKER of the two, because it matches
@@ -122,17 +123,21 @@ func (s Supplied) Configured(name string) bool {
 // exported for something else marks the database section supplied; the
 // section is then validated and reports the keys it actually wants, which is
 // loud and wrong rather than quiet and wrong. It also routes on underscores,
-// where the file routes on dots — so a fiber key spelled listen_something
-// would be read as the listen section's from the environment and as fiber's
-// from the file. None exists today; the fix if one is added is to name it so
-// it does not collide, because the environment spelling cannot represent the
-// difference.
+// where the file routes on dots — so a fiber key spelled listen_something,
+// or a notification key spelled email_something or whatsapp_something,
+// would be read as the nested section's from the environment and as the
+// parent's from the file. Neither exists; the fix if one is added is to
+// name it so it does not collide, because the environment spelling cannot
+// represent the difference.
 //
 // That weakness is worth knowing before this package is lifted into a new
-// deployment. The three sections whose prefixes carry no fiber. component —
-// app, database, and notification — match the short, common spellings
+// deployment. Of the sections whose prefixes carry no fiber. component,
+// app, database, and notification match the short, common spellings
 // APP_*, DATABASE_*, and NOTIFICATION_*, so a variable another stack
-// already exports switches one of them on.
+// already exports switches one of them on. The channel sections are
+// nested under notification to stay out of that: their variables are
+// NOTIFICATION_EMAIL_* and NOTIFICATION_WHATSAPP_*, rather than the MAIL_*
+// or SMTP_* that several frameworks export.
 //
 // An empty variable is not a value. AllowEmptyEnv is off, so Viper would not
 // read one either, and treating it as evidence would make an exported-but-

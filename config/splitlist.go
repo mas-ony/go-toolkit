@@ -13,12 +13,12 @@ import (
 // splitList reads a list key that may arrive as a YAML sequence or as a
 // single comma-separated string, and returns the elements either way.
 //
-// Six keys across three sections read through it:
-// fiber.client.no_retry_methods from fiber_client_config.go,
-// fiber.request_methods and fiber.trust_proxy_config.proxies from
-// fiber_config.go, and fiber.zerolog.fields, fiber.zerolog.messages, and
-// fiber.zerolog.levels from fiber_zerolog_config.go — the last of those
-// through parseLevels.
+// Every list-valued key reads through it: fiber.client.no_retry_methods
+// from fiber_client_config.go, fiber.request_methods and
+// fiber.trust_proxy_config.proxies from fiber_config.go,
+// fiber.zerolog.fields, fiber.zerolog.messages, and fiber.zerolog.levels
+// from fiber_zerolog_config.go — the last of those through parseLevels —
+// and notification.channels from notification_config.go.
 //
 // The two shapes come from the two sources. From config.yaml the value is a
 // real sequence, arrives as []interface{}, and GetStringSlice casts it
