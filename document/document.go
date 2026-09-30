@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"math"
 	"os"
 	"path/filepath"
 	"slices"
@@ -12,25 +13,12 @@ import (
 	"github.com/mas-ony/go-toolkit/fileutil"
 )
 
-// Errors returned by Index.Lookup and by Load. They are sentinels rather than
-// formatted strings so a caller can decide per-case whether a miss is a
-// warning or a failure, without matching on message text.
-var (
-	// ErrNotFound means the reference names a document the directory does not
-	// contain, under any accepted extension and in either case.
-	ErrNotFound = errors.New("no matching file in the document directory")
-
-	// ErrAmbiguous means the reference matched more than one file — most
-	// often the same stem stored as both a PDF and a JPEG. The wrapped
-	// message names the candidates.
-	ErrAmbiguous = errors.New("reference matches more than one file")
-)
-
 // An Index is a one-pass index of a directory, keyed for the two ways a
 // document is usually referred to: by full filename and by stem.
 //
 // The zero value is not usable; build one with NewIndex. An Index is read-only
-// once built and safe for concurrent Lookup and Load.
+// once built, so Lookup, Load, Count and Skipped are safe to call from any
+// number of goroutines at once.
 type Index struct {
 	// root is the directory that was walked. It is kept only so an ambiguity
 	// can be reported as a path relative to it — see resolve.
@@ -55,7 +43,8 @@ type Index struct {
 	// immediately rather than leaving every later reference to report a miss.
 	//
 	// Dotfiles are NOT counted here, because they are dropped a step earlier
-	// as not-documents. A directory holding only editor swap files, macOS ._
+	// as not-documents, and neither is anything inside a skipped
+	// dot-directory. A directory holding only editor swap files, macOS ._
 	// forks, or fileutil's own ".tmp-*" leftovers from an interrupted upload
 	// therefore indexes as zero files AND zero skips — the one shape this
 	// counter cannot explain, and the reason it is reported alongside Count
@@ -63,61 +52,19 @@ type Index struct {
 	skipped int
 }
 
-// read is the tail shared by Load and ReadFile: name the file, check the name
-// against the column width, read it, and refuse an empty one.
-//
-// The extension gate is deliberately not here. Load's candidates passed it at
-// index time and re-checking would be dead work; ReadFile's did not and must
-// be checked before the stat result is trusted as a document.
-//
-// Both limit checks go through fileutil's own helpers rather than comparing
-// against MaxNameLen and MaxFileBytes directly, because a zero or negative
-// cap means NO cap in that package — a caller that disables either limit
-// would otherwise have every file here refused for exceeding nothing. Both
-// MESSAGES go through fileutil's labels for the matching reason:
-// MaxNameLabel names the unit, and a message that printed the bare number
-// would say "characters" to whoever read it while the check counted bytes.
-//
-// The size is taken from a stat rather than from len(data), so an oversized
-// file is refused without being read. That costs one extra stat on the
-// ReadFile path, which has already stat'd to reject a directory; the
-// alternative is passing the FileInfo down and coupling the two functions for
-// one syscall per file.
-//
-// int is 64-bit on every 64-bit target, so the conversion below cannot wrap
-// a large size into a small positive number. On a 32-bit target it can, and
-// the guard would need rewriting against info.Size() directly.
-func read(path string) (name string, data []byte, err error) {
-	name = fileutil.SafeName(filepath.Base(path))
-	if fileutil.NameTooLong(name) {
-		return "", nil, fmt.Errorf(
-			"filename %q is %d bytes, over the %s limit",
-			name,
-			len(name),
-			fileutil.MaxNameLabel())
-	}
+// Errors returned by Index.Lookup and by Load. They are sentinels rather than
+// formatted strings so a caller can decide per-case whether a miss is a
+// warning or a failure, without matching on message text.
+var (
+	// ErrNotFound means the reference names a document the directory does not
+	// contain, under any accepted extension and in either case.
+	ErrNotFound = errors.New("no matching file in the document directory")
 
-	info, err := os.Stat(path)
-	if err != nil {
-		return "", nil, fmt.Errorf("reading %s: %w", path, err)
-	}
-	if fileutil.TooLarge(int(info.Size())) {
-		return "", nil, fmt.Errorf(
-			"%s is %d bytes, over the %s limit",
-			path,
-			info.Size(),
-			fileutil.MaxFileLabel())
-	}
-
-	data, err = os.ReadFile(path)
-	if err != nil {
-		return "", nil, fmt.Errorf("reading %s: %w", path, err)
-	}
-	if len(data) == 0 {
-		return "", nil, fmt.Errorf("%s is empty", path)
-	}
-	return name, data, nil
-}
+	// ErrAmbiguous means the reference matched more than one file — most
+	// often the same stem stored as both a PDF and a JPEG. The wrapped
+	// message names the candidates.
+	ErrAmbiguous = errors.New("reference matches more than one file")
+)
 
 // resolve returns the one path in paths, or ErrAmbiguous naming all of them.
 //
@@ -154,6 +101,71 @@ func (i *Index) resolve(paths []string) (string, error) {
 	return "", fmt.Errorf("%w: %s", ErrAmbiguous, strings.Join(names, ", "))
 }
 
+// read is the tail shared by Load and ReadFile: name the file, check the name
+// against the column width, read it, and refuse an empty one.
+//
+// The extension gate is deliberately not here. Load's candidates passed it at
+// index time and re-checking would be dead work; ReadFile's did not and must
+// be checked before the stat result is trusted as a document.
+//
+// Both limit checks go through fileutil's own helpers rather than comparing
+// against MaxNameLen and MaxFileBytes directly, because a zero or negative
+// cap means NO cap in that package — a caller that disables either limit
+// would otherwise have every file here refused for exceeding nothing. Both
+// MESSAGES go through fileutil's labels for the matching reason:
+// MaxNameLabel names the unit, and a message that printed the bare number
+// would say "characters" to whoever read it while the check counted bytes.
+//
+// The size is taken from a stat rather than from len(data), so an oversized
+// file is refused without being read. That costs one extra stat on the
+// ReadFile path, which has already stat'd to reject a directory; the
+// alternative is passing the FileInfo down and coupling the two functions for
+// one syscall per file.
+//
+// The stat reports an int64 and TooLarge takes an int, which is 32 bits on a
+// 32-bit target, where a size past math.MaxInt would wrap into a small
+// positive number and pass. Such a size is refused first, on its own terms:
+// nothing that large fits in a []byte there, whatever the configured cap.
+// On a 64-bit target the first check can never fire.
+func read(path string) (name string, data []byte, err error) {
+	name = fileutil.SafeName(filepath.Base(path))
+	if fileutil.NameTooLong(name) {
+		return "", nil, fmt.Errorf(
+			"filename %q is %d bytes, over the %s limit",
+			name,
+			len(name),
+			fileutil.MaxNameLabel())
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", nil, fmt.Errorf("reading %s: %w", path, err)
+	}
+	size := info.Size()
+	if size > math.MaxInt {
+		return "", nil, fmt.Errorf(
+			"%s is %d bytes, too large to read into memory here",
+			path,
+			size)
+	}
+	if fileutil.TooLarge(int(size)) {
+		return "", nil, fmt.Errorf(
+			"%s is %d bytes, over the %s limit",
+			path,
+			size,
+			fileutil.MaxFileLabel())
+	}
+
+	data, err = os.ReadFile(path)
+	if err != nil {
+		return "", nil, fmt.Errorf("reading %s: %w", path, err)
+	}
+	if len(data) == 0 {
+		return "", nil, fmt.Errorf("%s is empty", path)
+	}
+	return name, data, nil
+}
+
 // NewIndex walks dir and indexes every file with an accepted extension.
 //
 // recursive controls whether subdirectories are descended. Flat is the usual
@@ -162,11 +174,15 @@ func (i *Index) resolve(paths []string) (string, error) {
 // where the stems are still unique but the files are spread out.
 //
 // Dotfiles are skipped: editor swap files and macOS ._ resource forks are not
-// documents. A subdirectory that cannot be read is skipped rather than
-// aborting the walk, on the reasoning that one unreadable folder should not
-// fail a run whose files are all elsewhere; the references it would have
-// served come back as ErrNotFound, which is visible in the caller's report.
-// The ROOT is the exception and fails the call — see the walk below.
+// documents. In a recursive walk, directories whose names start with a dot are
+// skipped too, whole, since what lives in one — a trash folder, a NAS's
+// thumbnails — is a copy of a document rather than the document, and one that
+// is still there after the original is gone. A subdirectory that cannot be
+// read is skipped rather than aborting the walk, on the reasoning that one
+// unreadable folder should not fail a run whose files are all elsewhere; the
+// references it would have served come back as ErrNotFound, which is visible
+// in the caller's report. The ROOT is the exception and fails the call — see
+// the walk below.
 //
 // Symlinks are not followed as directories, because WalkDir does not follow
 // them, but a symlink NAMED like a document is indexed and Load reads
@@ -215,7 +231,13 @@ func NewIndex(dir string, recursive bool) (*Index, error) {
 			return nil
 		}
 		if d.IsDir() {
-			if path != dir && !recursive {
+			// A dot-directory is skipped for the reason a dotfile is: it
+			// holds what tools keep beside documents — a trash folder, a
+			// NAS's thumbnails, a repository's metadata — and a document
+			// resolved from one is one somebody deleted or never filed. The
+			// root is exempt, since the caller named it.
+			if path != dir &&
+				(!recursive || strings.HasPrefix(d.Name(), ".")) {
 				return fs.SkipDir
 			}
 			return nil

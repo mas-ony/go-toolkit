@@ -1,5 +1,12 @@
 package xlsx
 
+// Tests for workbook.go, against a real workbook written with excelize: the
+// layout resolution, caption folding and matching through merges and the
+// group row, the header check, row selection, cell bounds, and both
+// hyperlink storage forms. What depends on the epoch property, a number
+// format, cached formula results, the working directory or contention is
+// in workbook_integration_test.go.
+
 import (
 	"errors"
 	"path/filepath"
@@ -29,17 +36,6 @@ func fixtureColumns() []Column {
 		{Col: "F", Captions: []string{"Extra"}, Purpose: "extra"},
 		{Col: "G", Captions: []string{"Checks"}, Purpose: "checks"},
 	}
-}
-
-func openFixture(t *testing.T, layout Layout) *File {
-	t.Helper()
-
-	wb, err := Open(writeFixture(t), layout)
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
-	t.Cleanup(func() { _ = wb.Close() })
-	return wb
 }
 
 // writeFixture builds a workbook with the shape this package exists to
@@ -125,6 +121,21 @@ func writeFixture(t *testing.T) string {
 	return path
 }
 
+// openFixture writes the fixture and opens it under layout, closing it when
+// the test ends.
+func openFixture(t *testing.T, layout Layout) *File {
+	t.Helper()
+
+	wb, err := Open(writeFixture(t), layout)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { _ = wb.Close() })
+	return wb
+}
+
+// An empty Layout.Sheet reads the first sheet, and the File reports that
+// sheet's name, its rows and the directory the workbook is in.
 func TestOpenDefaultsToTheFirstSheet(t *testing.T) {
 	wb := openFixture(t, fixtureLayout())
 
@@ -160,6 +171,8 @@ func TestCaptionResolvesThroughMergesAndGroupRow(t *testing.T) {
 	}
 }
 
+// The fixture passes the header check against its own contract, merged
+// and group-row captions included.
 func TestVerifyHeadersAcceptsTheFixture(t *testing.T) {
 	wb := openFixture(t, fixtureLayout())
 
@@ -238,6 +251,8 @@ func TestDataRowsSkipsRowsWithNothingMapped(t *testing.T) {
 	}
 }
 
+// Layout.LastRow ends the data range, and one past the end of the sheet is
+// clamped to it.
 func TestLastDataRowHonoursLayout(t *testing.T) {
 	wb := openFixture(t, Layout{HeaderRow: 6, FirstRow: 9, LastRow: 10})
 
@@ -326,6 +341,8 @@ func TestLinkResolvesAgainstTheWorkbookDirectory(t *testing.T) {
 	}
 }
 
+// Only a literal first argument of a HYPERLINK() formula is read; a
+// computed one, and any other formula, yields nothing.
 func TestHyperlinkFormulaTarget(t *testing.T) {
 	cases := map[string]string{
 		`=HYPERLINK("documents/1.pdf","1")`: "documents/1.pdf",

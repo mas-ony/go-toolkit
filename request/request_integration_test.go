@@ -10,13 +10,12 @@ package request
 // keep-alive, for enough sequential requests that the framework recycles
 // the buffers it parsed them into.
 //
-// That distinction is the whole reason this file exists, and it was
-// established by trying the easy way first. The framework's in-process
-// test transport gives every call a fresh context, so a test written
-// against it passes with the clones in request.go and passes just as
+// That distinction is the whole reason this file exists. The framework's
+// in-process test transport gives every call a fresh context, so a test
+// written against it passes with the clones in request.go and just as
 // happily with them deleted — which is worse than no test, because it
-// looks like coverage. Against a real listener the same code corrupts 199
-// of 200 captured values.
+// looks like coverage. Against a real listener, the same code without the
+// clones corrupts 199 of 200 captured values.
 //
 // So every test below holds what a handler produced, keeps issuing
 // requests on the same connections, and then checks what it held. Remove
@@ -40,11 +39,6 @@ import (
 	"github.com/gofiber/fiber/v3"
 )
 
-// requests is how many sequential calls each test makes. It has to be
-// comfortably more than the connection pool holds, because corruption only
-// appears once a buffer is handed to a SECOND request.
-const requests = 200
-
 // harness is one application on a real port, plus a client that reuses
 // connections.
 type harness struct {
@@ -58,6 +52,33 @@ type harness struct {
 type capture struct {
 	mu   sync.Mutex
 	vals []string
+}
+
+// requests is how many sequential calls each test makes. It has to be
+// comfortably more than the connection pool holds, because corruption only
+// appears once a buffer is handed to a SECOND request.
+const requests = 200
+
+// waitReady covers the gap between Listen returning and the serving
+// goroutine being scheduled.
+func (h *harness) waitReady(t *testing.T) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		resp, err := h.client.Get(h.base + "/ready")
+		if err == nil {
+			_, _ = io.Copy(io.Discard, resp.Body)
+			_ = resp.Body.Close()
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("the application never became reachable")
+}
+
+// ready registers the endpoint waitReady polls.
+func ready(app *fiber.App) {
+	app.Get("/ready", func(c fiber.Ctx) error { return c.SendString("ok") })
 }
 
 // serve starts app on a loopback port and returns a harness for it.
@@ -91,23 +112,6 @@ func serve(t *testing.T, app *fiber.App) *harness {
 	return h
 }
 
-// waitReady covers the gap between Listen returning and the serving
-// goroutine being scheduled.
-func (h *harness) waitReady(t *testing.T) {
-	t.Helper()
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		resp, err := h.client.Get(h.base + "/ready")
-		if err == nil {
-			_, _ = io.Copy(io.Discard, resp.Body)
-			_ = resp.Body.Close()
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatal("the application never became reachable")
-}
-
 // get issues one request and drains the body, which is what returns the
 // connection to the pool so the next request can reuse the buffer behind
 // it.
@@ -121,11 +125,7 @@ func (h *harness) get(t *testing.T, path string) {
 	_ = resp.Body.Close()
 }
 
-// ready registers the endpoint waitReady polls.
-func ready(app *fiber.App) {
-	app.Get("/ready", func(c fiber.Ctx) error { return c.SendString("ok") })
-}
-
+// add records one value under the lock.
 func (c *capture) add(s string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()

@@ -1,6 +1,11 @@
 package config
 
 // Tests for app_config.go.
+//
+// What the section promises: every key read under its documented name,
+// every problem reported at once, app.env matched exactly, an absent port
+// reported once and an out-of-range one refused, and a log line whose
+// fields stand apart.
 
 import (
 	"strings"
@@ -29,49 +34,27 @@ func TestNewAppConfigReadsEveryKey(t *testing.T) {
 	t.Parallel()
 	v := viper.New()
 	for key, val := range map[string]any{
-		"app.name":             "svc",
-		"app.version":          "2.3.4",
-		"app.env":              "staging",
-		"app.host":             "127.0.0.1",
-		"app.port":             9090,
-		"app.location":         "Asia/Jakarta",
-		"app.reports_base_url": "https://reports.example",
-		"app.upload_dir":       "/data/uploads",
+		"app.name":     "svc",
+		"app.version":  "2.3.4",
+		"app.env":      "staging",
+		"app.host":     "127.0.0.1",
+		"app.port":     9090,
+		"app.location": "Asia/Jakarta",
 	} {
 		v.Set(key, val)
 	}
 
 	got := NewAppConfig(v)
 	want := &AppConfig{
-		Name:           "svc",
-		Version:        "2.3.4",
-		Env:            "staging",
-		Host:           "127.0.0.1",
-		Port:           9090,
-		Location:       "Asia/Jakarta",
-		ReportsBaseURL: "https://reports.example",
-		UploadDir:      "/data/uploads",
+		Name:     "svc",
+		Version:  "2.3.4",
+		Env:      "staging",
+		Host:     "127.0.0.1",
+		Port:     9090,
+		Location: "Asia/Jakarta",
 	}
 	if *got != *want {
 		t.Errorf("NewAppConfig =\n%+v\nwant\n%+v", *got, *want)
-	}
-}
-
-// The base URL is normalised on the way in, so two spellings of the same
-// upstream reach Validate, String and a consumer as one string.
-func TestNewAppConfigTrimsTheBaseURL(t *testing.T) {
-	t.Parallel()
-	for _, raw := range []string{
-		"https://reports.example",
-		"https://reports.example/",
-		"  https://reports.example//  ",
-	} {
-		v := viper.New()
-		v.Set("app.reports_base_url", raw)
-		if got := NewAppConfig(v).ReportsBaseURL; got !=
-			"https://reports.example" {
-			t.Errorf("%q normalised to %q", raw, got)
-		}
 	}
 }
 
@@ -85,6 +68,8 @@ func TestNewAppConfigFromNothingIsAllZero(t *testing.T) {
 	}
 }
 
+// The fixture every other test changes one field of is itself valid, so a
+// failure elsewhere is about the field that test changed.
 func TestAppValidateAcceptsAValidConfig(t *testing.T) {
 	t.Parallel()
 	if err := validApp().Validate(); err != nil {
@@ -92,6 +77,7 @@ func TestAppValidateAcceptsAValidConfig(t *testing.T) {
 	}
 }
 
+// A section that was never built is reported, not dereferenced.
 func TestAppValidateRejectsANilReceiver(t *testing.T) {
 	t.Parallel()
 	var c *AppConfig
@@ -181,87 +167,24 @@ func TestAppValidatePortBoundaries(t *testing.T) {
 	}
 }
 
-// The base URL is checked for SHAPE, because a consumer builds the
-// upstream URL by concatenation and anything past the authority is
-// silently prepended to every forwarded request.
-func TestAppValidateBaseURLShape(t *testing.T) {
-	t.Parallel()
-	for _, c := range []struct {
-		name, url string
-		ok        bool
-	}{
-		{"unset is fine", "", true},
-		{"scheme and host", "https://reports.example", true},
-		{"with a port", "http://reports.example:5019", true},
-		{"no scheme", "reports.example", false},
-		{"another scheme", "ftp://reports.example", false},
-		{"no host", "https://", false},
-		{"a path", "https://reports.example/api", false},
-		{"a query", "https://reports.example?x=1", false},
-		{"a fragment", "https://reports.example#top", false},
-	} {
-		t.Run(c.name, func(t *testing.T) {
-			cfg := validApp()
-			cfg.ReportsBaseURL = c.url
-			err := cfg.Validate()
-			if c.ok && err != nil {
-				t.Errorf("%q refused: %v", c.url, err)
-			}
-			if !c.ok && err == nil {
-				t.Errorf("%q validated", c.url)
-			}
-		})
-	}
-}
-
-// A credential in the base URL is refused, and — unlike every other
-// branch — the offending value is NOT echoed. A service hands a
-// validation error straight to a fatal log call, so echoing it would copy
-// the password into exactly the place the check exists to keep it out of.
-func TestAppValidateRefusesUserinfoWithoutEchoingIt(t *testing.T) {
-	t.Parallel()
-	const secret = "hunter2-do-not-log"
-
-	cfg := validApp()
-	cfg.ReportsBaseURL = "https://admin:" + secret + "@reports.example"
-	err := cfg.Validate()
-	if err == nil {
-		t.Fatal("a base URL carrying a password validated")
-	}
-	if strings.Contains(err.Error(), secret) {
-		t.Errorf("the error quotes the password:\n%v", err)
-	}
-	if strings.Contains(err.Error(), "admin") {
-		t.Errorf("the error quotes the username:\n%v", err)
-	}
-	// It does offer the corrected form, which drops the userinfo.
-	if !strings.Contains(err.Error(), "https://reports.example") {
-		t.Errorf("the error should offer the corrected form:\n%v", err)
-	}
-}
-
-// Every field has to appear, SEPARATED from its neighbours. The original
-// format string had no space between ReportsBaseURL and UploadDir, so the
-// two ran together into one unreadable token in every startup log line.
+// Every field has to appear, SEPARATED from its neighbours. A missing space
+// in the format string runs two fields together into one token on every
+// startup log line, which is easy to write and hard to notice.
 func TestAppStringSeparatesEveryField(t *testing.T) {
 	t.Parallel()
 	c := &AppConfig{
-		Name:           "svc",
-		Version:        "1.0.0",
-		Env:            EnvProduction,
-		Host:           "127.0.0.1",
-		Port:           8080,
-		Location:       "UTC",
-		ReportsBaseURL: "https://reports.example",
-		UploadDir:      "/data/uploads",
+		Name:     "svc",
+		Version:  "1.0.0",
+		Env:      EnvProduction,
+		Host:     "127.0.0.1",
+		Port:     8080,
+		Location: "UTC",
 	}
 	got := c.String()
 
 	for _, want := range []string{
 		"Name=svc", "Version=1.0.0", "Env=production",
 		"Host=127.0.0.1", "Port=8080", "Location=UTC",
-		"ReportsBaseURL=https://reports.example",
-		"UploadDir=/data/uploads",
 	} {
 		// Each field must stand as its own whitespace-separated token.
 		found := false
@@ -277,6 +200,8 @@ func TestAppStringSeparatesEveryField(t *testing.T) {
 	}
 }
 
+// A nil section prints a placeholder instead of panicking inside the
+// startup log line.
 func TestAppStringHandlesANilReceiver(t *testing.T) {
 	t.Parallel()
 	var c *AppConfig

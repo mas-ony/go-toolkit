@@ -33,13 +33,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/mas-ony/go-toolkit/xlsx"
 	"github.com/rs/zerolog"
 	"github.com/xuri/excelize/v2"
-
-	"github.com/mas-ony/go-toolkit/xlsx"
 )
-
-const itSheet = "Sheet1"
 
 // recorder is a Dataset that records the calls Execute makes.
 type recorder struct {
@@ -59,6 +56,25 @@ type recorder struct {
 
 	// let Import see the run
 	onImport func(i int, run *Run) Outcome
+}
+
+// itSheet is the sheet every fixture writes, excelize's default.
+const itSheet = "Sheet1"
+
+// matchingColumns is a contract the fixture satisfies.
+func matchingColumns() []xlsx.Column {
+	return []xlsx.Column{
+		{Col: "A", Captions: []string{"Code"}, Purpose: "code"},
+		{Col: "B", Captions: []string{"Name"}, Purpose: "name"},
+	}
+}
+
+// newRun builds the Run Execute is given.
+func newRun(opt Options) *Run {
+	if opt.Layout.HeaderRow == 0 {
+		opt.Layout = xlsx.Layout{HeaderRow: 1, FirstRow: 2}
+	}
+	return &Run{Log: zerolog.Nop(), Opt: opt, Count: &Counters{}}
 }
 
 // writeSheet builds a workbook whose header row carries captions and whose
@@ -92,34 +108,31 @@ func writeSheet(t *testing.T, captions []string, rows int) string {
 	return path
 }
 
-// newRun builds the Run Execute is given.
-func newRun(opt Options) *Run {
-	if opt.Layout.HeaderRow == 0 {
-		opt.Layout = xlsx.Layout{HeaderRow: 1, FirstRow: 2}
-	}
-	return &Run{Log: zerolog.Nop(), Opt: opt, Count: &Counters{}}
-}
-
-// matchingColumns is a contract the fixture satisfies.
-func matchingColumns() []xlsx.Column {
-	return []xlsx.Column{
-		{Col: "A", Captions: []string{"Code"}, Purpose: "code"},
-		{Col: "B", Captions: []string{"Name"}, Purpose: "name"},
-	}
-}
-
+// Info names the recorder.
 func (r *recorder) Info() Info {
 	return Info{Name: "recorder", Describe: "a test dataset"}
 }
 
+// Len returns the row count the test set.
+func (r *recorder) Len() int { return r.rows }
+
+// Flags registers nothing.
 func (r *recorder) Flags(*flag.FlagSet) {}
-func (r *recorder) Validate() error     { return nil }
+
+// Validate accepts.
+func (r *recorder) Validate() error { return nil }
+
+// Layout returns the layout the test set.
 func (r *recorder) Layout() xlsx.Layout { return r.layout }
+
+// Columns records the call and returns the contract the test set.
 func (r *recorder) Columns() []xlsx.Column {
 	r.calls = append(r.calls, "Columns")
 	return r.columns
 }
 
+// HeaderAdvice records the call and returns the advice the test set, or
+// wraps err.
 func (r *recorder) HeaderAdvice(err error) error {
 	r.calls = append(r.calls, "HeaderAdvice")
 	if r.headerAdvice != nil {
@@ -128,11 +141,15 @@ func (r *recorder) HeaderAdvice(err error) error {
 	return fmt.Errorf("dataset advice: %w", err)
 }
 
+// Connect records the call. Execute never makes it, which the transcripts
+// above show: connecting is the command's job.
 func (r *recorder) Connect(context.Context, Transport, *Run) error {
 	r.calls = append(r.calls, "Connect")
 	return nil
 }
 
+// Prepare records the call, panics unless the sheet was resolved first,
+// and returns what the test set.
 func (r *recorder) Prepare(
 	_ context.Context, wb *xlsx.File, run *Run,
 ) ([]Outcome, error) {
@@ -145,8 +162,7 @@ func (r *recorder) Prepare(
 	return r.prepareOutcomes, r.prepareErr
 }
 
-func (r *recorder) Len() int { return r.rows }
-
+// Import records the call and the row, then answers as the test directs.
 func (r *recorder) Import(_ context.Context, i int, run *Run) Outcome {
 	r.calls = append(r.calls, "Import")
 	r.importedRows = append(r.importedRows, i)
@@ -157,6 +173,7 @@ func (r *recorder) Import(_ context.Context, i int, run *Run) Outcome {
 	return Outcome{ExcelRow: 10 + i, Status: StatusCreated}
 }
 
+// Report returns fixed column names.
 func (r *recorder) Report() ReportShape {
 	return ReportShape{Label: "label", ID: "id"}
 }

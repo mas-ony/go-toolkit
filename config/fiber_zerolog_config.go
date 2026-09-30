@@ -29,19 +29,6 @@ import (
 	"github.com/spf13/viper"
 )
 
-// zerologClassCount is how many response classes the middleware buckets by
-// status code: >= 500, >= 400, and everything else. Both
-// fiber.zerolog.messages and fiber.zerolog.levels are indexed by that bucket,
-// so both are required to have exactly this many entries when they are set at
-// all.
-//
-// The middleware itself accepts fewer and clamps the index to the last
-// element, which is why this file requires the full three rather than leaving
-// it alone. A one-element list reads as "only this" and means "this for
-// everything": levels: [error] logs every 200 at Error, and nothing about the
-// running service would suggest the list was ever meant to be longer.
-const zerologClassCount = 3
-
 // ZerologConfig wraps fiberzerolog.Config so it participates in the standard
 // Validate/String lifecycle used by all other sub-configs.
 //
@@ -59,9 +46,9 @@ const zerologClassCount = 3
 // does `chainErr := c.Next()` with no defer, so a panic recovered OUTSIDE it
 // unwinds straight past that call and the request is missing from the log
 // entirely — no error, no warning, just a request that was served and never
-// recorded. the application carries the full argument; the point to preserve
-// here is that anything registered BEFORE this one produces requests that
-// never appear in the log, and nothing anywhere reports that.
+// recorded. doc.go lays out the whole stack; the point to preserve here is
+// that anything registered BEFORE this one produces requests that never
+// appear in the log, and nothing anywhere reports that.
 //
 // It calls the app's ErrorHandler itself, which is what puts a status on the
 // line.
@@ -74,7 +61,7 @@ const zerologClassCount = 3
 //     or panicking request is logged as the 500 the client actually received.
 //     Were the error merely returned and handled a layer out, this middleware
 //     would read the status first and log a 200 for a request that failed.
-//   - the application's error handler therefore runs INSIDE this middleware,
+//   - The application's error handler therefore runs INSIDE this middleware,
 //     not above it, so its "unhandled error" line is written BEFORE the
 //     request line — and, for a panic, after the stack-trace handler's. Three
 //     lines, innermost first, tied together by the request id.
@@ -105,6 +92,55 @@ type ZerologConfig struct {
 	// Constructors in this package never return an error, so the errors are
 	// carried here instead of returned. Nothing outside Validate reads them.
 	levelErrs []error
+}
+
+// zerologClassCount is how many response classes the middleware buckets by
+// status code: >= 500, >= 400, and everything else. Both
+// fiber.zerolog.messages and fiber.zerolog.levels are indexed by that bucket,
+// so both are required to have exactly this many entries when they are set at
+// all.
+//
+// The middleware itself accepts fewer and clamps the index to the last
+// element, which is why this file requires the full three rather than leaving
+// it alone. A one-element list reads as "only this" and means "this for
+// everything": levels: [error] logs every 200 at Error, and nothing about the
+// running service would suggest the list was ever meant to be longer.
+const zerologClassCount = 3
+
+// classListErrors returns the length errors for a status-class list —
+// fiber.zerolog.messages or fiber.zerolog.levels — given the length it was
+// read at. Both are indexed identically by the middleware and fail
+// identically, so the two messages live in one place rather than being written
+// twice.
+//
+// Returns a slice rather than a single error only to keep the call sites'
+// append line uniform with the rest of Validate; at most one error is ever
+// produced.
+//
+// n is the length of a NON-NIL list. A nil list is the documented way to
+// inherit the middleware's default and never reaches here, which is why zero
+// is treated as a crash rather than as absence.
+func classListErrors(key string, n int) []error {
+	switch {
+	case n == 0:
+		return []error{fmt.Errorf("%s is an empty list, which is not a way "+
+			"to switch it off: the middleware clamps its class index to "+
+			"len-1 and would read the slice at -1, so the first request "+
+			"panics. Omit the key entirely to inherit the default",
+			key)}
+	case n != zerologClassCount:
+		return []error{fmt.Errorf("%s must have exactly %d entries — one "+
+			"for status >= 500, one for status >= 400, one for everything "+
+			"else — but has %d. The middleware accepts a shorter list and "+
+			"clamps to the last entry, so a single entry silently applies "+
+			"to every response class. Omit the key entirely to inherit the "+
+			"default",
+			key,
+			zerologClassCount,
+			n)}
+	default:
+		return nil
+	}
 }
 
 // parseLevel converts one entry of fiber.zerolog.levels.
@@ -167,8 +203,8 @@ func parseLevel(name string) (zerolog.Level, error) {
 		return zerolog.NoLevel, errors.New(`"disabled" is not accepted: the ` +
 			`middleware returns before writing anything, so every response ` +
 			`in that class disappears from the log with nothing reporting ` +
-			`it. Drop the field list or add a Skip func in code if that is ` +
-			`really what is wanted`)
+			`it. Use a Skip func in code if dropping that class is really ` +
+			`what is wanted`)
 	case "":
 		return zerolog.NoLevel, errors.New(`an empty entry reads as ` +
 			`zerolog's NoLevel, which the middleware treats as "do not log" ` +
@@ -201,8 +237,8 @@ func parseLevel(name string) (zerolog.Level, error) {
 // value is DebugLevel. Skipping shortens the list, which on its own would be
 // silent — the middleware reads a short list as an instruction to clamp — so
 // the error accompanying each skip is the whole mechanism, and Validate must
-// report it. A ZerologConfig with a non-empty levelErrs never reaches
-// the application.
+// report it. A ZerologConfig with a non-empty levelErrs never passes
+// Validate.
 func parseLevels(v *viper.Viper, key string) ([]zerolog.Level, []error) {
 	raw := splitList(v, key)
 	if raw == nil {
@@ -221,42 +257,6 @@ func parseLevels(v *viper.Viper, key string) ([]zerolog.Level, []error) {
 	}
 
 	return levels, errs
-}
-
-// classListErrors returns the length errors for a status-class list —
-// fiber.zerolog.messages or fiber.zerolog.levels — given the length it was
-// read at. Both are indexed identically by the middleware and fail
-// identically, so the two messages live in one place rather than being written
-// twice.
-//
-// Returns a slice rather than a single error only to keep the call sites'
-// append line uniform with the rest of Validate; at most one error is ever
-// produced.
-//
-// n is the length of a NON-NIL list. A nil list is the documented way to
-// inherit the middleware's default and never reaches here, which is why zero
-// is treated as a crash rather than as absence.
-func classListErrors(key string, n int) []error {
-	switch {
-	case n == 0:
-		return []error{fmt.Errorf("%s is an empty list, which is not a way "+
-			"to switch it off: the middleware clamps its class index to "+
-			"len-1 and would read the slice at -1, so the first request "+
-			"panics. Omit the key entirely to inherit the default",
-			key)}
-	case n != zerologClassCount:
-		return []error{fmt.Errorf("%s must have exactly %d entries — one "+
-			"for status >= 500, one for status >= 400, one for everything "+
-			"else — but has %d. The middleware accepts a shorter list and "+
-			"clamps to the last entry, so a single entry silently applies "+
-			"to every response class. Omit the key entirely to inherit the "+
-			"default",
-			key,
-			zerologClassCount,
-			n)}
-	default:
-		return nil
-	}
 }
 
 // NewZerologConfig reads ZerologConfig fields from the provided Viper
@@ -325,15 +325,14 @@ func classListErrors(key string, n int) []error {
 // zerolog itself, so levels: [error, warn, debug] in production logs 5xx and
 // 4xx and nothing else — no error, no warning, and a String line at startup
 // that shows the setting as configured. ZerologConfig.Validate never sees
-// app.env, so the check would have to live in validateCrossSection, and it
-// would be pinned to logger.New's hard-coded floor rather than to anything
-// either file states. Until it exists, the rule is: nothing below info outside
-// development.
+// app.env, so the rule lives in the application's cross-section validation,
+// pinned to logger.New's floor: nothing below info outside development.
 //
-// fiber.zerolog.levels is the one key that cannot fully use that route — its
-// text has to be converted, and zerolog.Level has no value meaning "not a
-// level" — so its conversion failures are stashed in levelErrs and reported by
-// Validate along with everything else.
+// fiber.zerolog.levels is also the one key whose failures cannot come back
+// as a zero value for Validate to find — its text has to be converted, and
+// zerolog.Level has no value meaning "not a level" — so its conversion
+// failures are stashed in levelErrs and reported by Validate along with
+// everything else.
 func NewZerologConfig(v *viper.Viper) *ZerologConfig {
 	levels, levelErrs := parseLevels(v, "fiber.zerolog.levels")
 
@@ -344,7 +343,7 @@ func NewZerologConfig(v *viper.Viper) *ZerologConfig {
 			// written to the structured log entry for every HTTP request. The
 			// order here determines the order of keys in the log output.
 			//
-			// Available field names (constants in contrib zerolog v1.1.3 —
+			// Available field names (constants in contrib zerolog v1.1.5 —
 			// unknown names are silently ignored, so a typo produces no field
 			// and no error):
 			//   error         — handler error message (only added when
@@ -366,21 +365,24 @@ func NewZerologConfig(v *viper.Viper) *ZerologConfig {
 			//                   listening on, despite how the name reads; "0"
 			//                   when there is no remote address and "" on a
 			//                   unix socket
-			//   protocol      — "http" or "https"
+			//   protocol      — the HTTP VERSION from the request line, e.g.
+			//                   "HTTP/1.1" — not the scheme; no field here
+			//                   logs http versus https
 			//   referer       — Referer request header
 			//   ua            — User-Agent request header
 			//   latency       — total request processing duration, formatted
 			//   requestId     — value of the X-Request-ID RESPONSE header, set
-			//                   by the requestid middleware, which the application
-			//                   registers between this one and recover. The
-			//                   header name is read from a CONSTANT here, not
-			//                   from fiber.requestid.header, so renaming that
-			//                   key empties this field; the pairing is
-			//                   rejected at startup in
-			//                   Cross-section validation. The field is
-			//                   ALWAYS emitted — as an empty string when no
-			//                   header is present — so log queries can filter
-			//                   on requestId != "" to find traced requests
+			//                   by the requestid middleware, which the
+			//                   application registers between this one and
+			//                   recover. The header name is read from a
+			//                   CONSTANT here, not from
+			//                   fiber.requestid.header, so renaming that key
+			//                   empties this field; the application's
+			//                   cross-section validation rejects the pairing
+			//                   at startup. The field is ALWAYS emitted — as
+			//                   an empty string when no header is present —
+			//                   so log queries can filter on requestId != ""
+			//                   to find traced requests
 			//   queryParams   — query-string parameters
 			//   bytesReceived — request body size in bytes
 			//   bytesSent     — response body size in bytes
@@ -451,9 +453,9 @@ func NewZerologConfig(v *viper.Viper) *ZerologConfig {
 			//
 			// It is a single switch, and only because two sites outside the
 			// middleware cooperate: the application's error handler and
-			// the stack-trace handler write their own request-id field and take its
-			// name from RequestIDField below. A literal at either site makes
-			// this a half-switch — a query for request_id finds the
+			// stack-trace handler write request-id fields of their own, and
+			// take the name from RequestIDField below. A literal at either
+			// site makes this a half-switch — a query for request_id finds the
 			// middleware's line for a failed request but not the error or
 			// panic line explaining it.
 			FieldsSnakeCase: v.GetBool("fiber.zerolog.fields_snake_case"),
@@ -481,8 +483,8 @@ func NewZerologConfig(v *viper.Viper) *ZerologConfig {
 			//
 			// OPTIONAL, unlike Fields. Omitting the key leaves this nil, and a
 			// nil Messages is the one shape configDefault replaces — with
-			// {"Server error", "Client error", "Success"}, which is what
-			// the same three a file would normally state. Inheriting and
+			// {"Server error", "Client error", "Success"}, which are the
+			// same three a file would normally state. Inheriting and
 			// stating therefore agree here, which is exactly why this key is
 			// allowed to be absent and Fields is not: the middleware's default
 			// field list DIFFERS from any list a file states, so inheriting it
@@ -495,9 +497,9 @@ func NewZerologConfig(v *viper.Viper) *ZerologConfig {
 			// is worse: len(Messages)-1 is -1, the middleware indexes
 			// Messages[-1] without a guard, and the FIRST request panics.
 			// Whether that ends the process or returns a 500 depends only on
-			// where the application puts this middleware relative to recover, which
-			// is not a distinction worth relying on. Validate makes it
-			// unreachable.
+			// where the application puts this middleware relative to
+			// recover, which is not a distinction worth relying on.
+			// Validate makes it unreachable.
 			//
 			// From the ENVIRONMENT this key needs COMMAS. Its values contain
 			// spaces, and the space-separated form is split on whitespace:
@@ -609,7 +611,8 @@ func (c *ZerologConfig) WithLogger(log zerolog.Logger) fiberzerolog.Config {
 // fiberzerolog.FieldRequestID rather than repeating the string: half of this
 // pair is pinned to upstream, and the compiler notices if it moves. The true
 // branch cannot be — fieldRequestID_ is unexported — so
-// TestSnakeCaseRenamesEveryRequestIDField covers it instead.
+// TestZerologRequestIDFieldMatchesTheMiddleware covers it instead, by running
+// the middleware and reading the key back out of the line it writes.
 //
 // Panics if c or c.Config is nil, like every other promoted-field access on
 // this type. Validate rejects both at startup, well before the application
@@ -680,9 +683,9 @@ func (c *ZerologConfig) RequestIDField() string {
 // The nil-versus-made-but-empty distinction the two bullets rest on is a
 // property of spf13/cast, not an assumption: toSliceEOk returns (nil, true,
 // err) for a nil input, and make([]string, 0) — non-nil — for an empty YAML
-// sequence. TestSplitList pins both, including that the absent-key result is
-// nil rather than merely length zero, which is what parseLevels below depends
-// on.
+// sequence. TestSplitListKeepsAbsentAndEmptyApart pins both, including that
+// the absent-key result is nil rather than merely length zero, which is what
+// parseLevels above depends on.
 //
 // # Messages and Levels
 //
@@ -767,13 +770,12 @@ func (c *ZerologConfig) Validate() error {
 // Printing a value copy (%v on ZerologConfig, not &ZerologConfig) bypasses it
 // and dumps the struct fields directly.
 //
-// The nil check is TWO-PART, mirroring Validate's. zerolog reaches this method
-// through fmt.Stringer, and its own guard — `if val == nil` in
-// internal/json.AppendStringer — is an INTERFACE nil, which neither a typed
-// nil pointer nor a wrapper around a nil embedded pointer satisfies. So it
-// calls String on both, and without the second half the half-built one panics
-// inside the startup log line rather than rendering a placeholder.
-// The section list carries the argument.
+// The nil check is TWO-PART, mirroring Validate's. A logger's own guard, such
+// as zerolog's `if val == nil` before it calls a Stringer, compares an
+// INTERFACE with nil, which neither a typed nil pointer nor a wrapper around
+// a nil embedded pointer satisfies. Without the second half, the half-built
+// one would panic inside the startup log line instead of rendering a
+// placeholder.
 //
 // Messages and Levels print "(middleware default)" when nil rather than "[]".
 // The distinction is the whole meaning of those two keys — nil inherits

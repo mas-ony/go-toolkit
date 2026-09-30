@@ -13,8 +13,8 @@ import (
 	// package is never referenced by name, only for the side effect of its
 	// init() registering the "sqlite3" driver name. Pure Go — SQLite built
 	// to Wasm and translated to Go ahead of time — so there is no cgo and
-	// no gcc at build time. See New for why the registered NAME is what
-	// picked this driver, and what the sandbox costs per connection.
+	// no gcc at build time. See NewContext for why the registered NAME is
+	// what picked this driver, and what the sandbox costs per connection.
 	_ "github.com/ncruces/go-sqlite3/driver"
 	"github.com/rs/zerolog"
 	"go.mau.fi/whatsmeow"
@@ -25,14 +25,26 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-// The column width of the rules framing the QR block on stdout, and the
-// text the top rule opens with. A mismatch between the two rules is only
-// visible once a code is on screen, so both are built from these rather than
-// written out as literals that have to be counted by hand.
-const (
-	qrBannerWidth = 49
-	qrBannerLabel = "── WhatsApp QR Code "
-)
+// Service is the application-level WhatsApp client. It is safe for concurrent
+// use: whatsmeow's SendMessage acquires its own internal mutex before writing
+// to the WebSocket (socket.NoiseSocket.SendFrame takes writeLock), and this
+// struct is read-only after New returns.
+//
+// It is NOT safe to call on a nil receiver, unlike the send paths of
+// *whatsmeow.Client, which return ErrClientIsNil instead of panicking — so
+// the two cannot be reasoned about together. (whatsmeow's guards are not
+// uniform either; the package documentation says which of its methods have
+// them.) A caller holding a *Service that is nil when WhatsApp is not
+// configured has to check it, and a call dispatched into a detached goroutine
+// has nobody to catch the panic when it does not.
+//
+// The trap is that the no-op paths in SendText and SendDocument survive a nil
+// receiver, because they return before reading any field. A smoke test with a
+// blank number therefore suggests the whole type is nil-safe.
+type Service struct {
+	client *whatsmeow.Client
+	log    zerolog.Logger
+}
 
 // storePragmas are the SQLite pragmas the credential store is opened with.
 //
@@ -61,14 +73,21 @@ const (
 // reading in the order they are explained above.
 const storePragmas = "_pragma=busy_timeout(10000)&_pragma=foreign_keys(1)"
 
-// QR banner rules. They are built rather than spelled out because a literal
-// row of box-drawing characters costs three bytes per column, which puts the
-// source line well past any sane line-length limit while telling the reader
-// nothing the construction below does not.
-var (
-	qrBannerTop    = "\n" + qrRule(qrBannerLabel)
-	qrBannerBottom = qrRule("")
+// The column width of the rules framing the QR block on stdout, and the
+// text the top rule opens with. A mismatch between the two rules is only
+// visible once a code is on screen, so both are built from these rather than
+// written out as literals that have to be counted by hand.
+const (
+	qrBannerWidth = 49
+	qrBannerLabel = "── WhatsApp QR Code "
 )
+
+// DefaultStorePath is the credential database New opens when no path is
+// given. It is RELATIVE, so it resolves against the process working
+// directory — which is the whole reason NewContext takes a path: two
+// services started from the same directory would otherwise share one file
+// and fight over a single device registration.
+const DefaultStorePath = "whatsapp.db"
 
 // phoneReplacer is built once at package init rather than per call.
 // strings.Replacer is safe for concurrent use, which matters here because
@@ -89,12 +108,14 @@ var phoneReplacer = strings.NewReplacer("+", "", " ", "", "-", "")
 // "%" rule cannot re-encode the escapes the other two produce.
 var sqliteURIEscaper = strings.NewReplacer("%", "%25", "?", "%3F", "#", "%23")
 
-// DefaultStorePath is the credential database New opens when no path is
-// given. It is RELATIVE, so it resolves against the process working
-// directory — which is the whole reason NewContext takes a path: two
-// services started from the same directory would otherwise share one file
-// and fight over a single device registration.
-const DefaultStorePath = "whatsapp.db"
+// QR banner rules. They are built rather than spelled out because a literal
+// row of box-drawing characters costs three bytes per column, which puts the
+// source line well past any sane line-length limit while telling the reader
+// nothing the construction below does not.
+var (
+	qrBannerTop    = "\n" + qrRule(qrBannerLabel)
+	qrBannerBottom = qrRule("")
+)
 
 // ErrNotPaired is returned by New when the QR window closed without the
 // device being linked. It is a sentinel so a caller can tell "WhatsApp is not
@@ -111,25 +132,23 @@ var ErrNotPaired = errors.New("whatsapp: QR window closed without pairing")
 // say which of the two happened.
 var ErrInvalidPhone = errors.New("whatsapp: phone number is not digits")
 
-// Service is the application-level WhatsApp client. It is safe for concurrent
-// use: whatsmeow's SendMessage acquires its own internal mutex before writing
-// to the WebSocket (socket.NoiseSocket.SendFrame takes writeLock), and this
-// struct is read-only after New returns.
+// phoneDigits reports whether a normalised number is safe to build a JID
+// from, which for a user JID means digits and nothing else.
 //
-// It is NOT safe to call on a nil receiver, unlike the send paths of
-// *whatsmeow.Client, which return ErrClientIsNil instead of panicking — so
-// the two cannot be reasoned about together. (whatsmeow's guards are not
-// uniform either; the package documentation says which of its methods have
-// them.) A caller holding a *Service that is nil when WhatsApp is not
-// configured has to check it, and a call dispatched into a detached goroutine
-// has nobody to catch the panic when it does not.
+// It is a character check, not a plausibility check: a number with the wrong
+// digit count, or one missing its country code, satisfies it and fails at
+// delivery instead. Validating the shape belongs where the number is entered.
 //
-// The trap is that the no-op paths in SendText and SendDocument survive a nil
-// receiver, because they return before reading any field. A smoke test with a
-// blank number therefore suggests the whole type is nil-safe.
-type Service struct {
-	client *whatsmeow.Client
-	log    zerolog.Logger
+// The empty string satisfies it vacuously. That case is the callers' silent
+// no-op — an unfilled phone column, not bad data — and is checked before
+// this.
+func phoneDigits(phone string) bool {
+	for _, r := range phone {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // qrRule pads label with box-drawing characters out to qrBannerWidth
@@ -147,19 +166,6 @@ type Service struct {
 func qrRule(label string) string {
 	n := max(qrBannerWidth-utf8.RuneCountInString(label), 0)
 	return label + strings.Repeat("─", n)
-}
-
-// storeDSN builds the SQLite URI for a credential store at path, falling
-// back to DefaultStorePath when path is empty.
-//
-// "file:" with a single slash covers both shapes: "file:whatsapp.db" is
-// relative to the working directory and "file:/var/lib/app/whatsapp.db" is
-// absolute, so nothing here has to tell them apart.
-func storeDSN(path string) string {
-	if path == "" {
-		path = DefaultStorePath
-	}
-	return "file:" + sqliteURIEscaper.Replace(path) + "?" + storePragmas
 }
 
 // normalisePhone strips the punctuation a WhatsApp JID cannot carry, leaving
@@ -182,23 +188,27 @@ func normalisePhone(phone string) string {
 	return phoneReplacer.Replace(phone)
 }
 
-// phoneDigits reports whether a normalised number is safe to build a JID
-// from, which for a user JID means digits and nothing else.
+// storeDSN builds the SQLite URI for a credential store at path, falling
+// back to DefaultStorePath when path is empty.
 //
-// It is a character check, not a plausibility check: a number with the wrong
-// digit count, or one missing its country code, satisfies it and fails at
-// delivery instead. Validating the shape belongs where the number is entered.
-//
-// The empty string satisfies it vacuously. That case is the callers' silent
-// no-op — an unfilled phone column, not bad data — and is checked before
-// this.
-func phoneDigits(phone string) bool {
-	for _, r := range phone {
-		if r < '0' || r > '9' {
-			return false
-		}
+// "file:" with a single slash covers both shapes: "file:whatsapp.db" is
+// relative to the working directory and "file:/var/lib/app/whatsapp.db" is
+// absolute, so nothing here has to tell them apart.
+func storeDSN(path string) string {
+	return "file:" + sqliteURIEscaper.Replace(storeFile(path)) + "?" +
+		storePragmas
+}
+
+// storeFile is the credential store's path as NewContext opens it: path,
+// or DefaultStorePath when path is empty. The ErrNotPaired message names it,
+// since telling an operator to put a paired store in place is only useful
+// if it says where, and a caller that passed its own path is not reading
+// DefaultStorePath.
+func storeFile(path string) string {
+	if path == "" {
+		return DefaultStorePath
 	}
-	return true
+	return path
 }
 
 // New creates and connects a WhatsApp Service.
@@ -272,14 +282,15 @@ func NewContext(
 	// forces the two apart — modernc.org/sqlite registers "sqlite", and
 	// reaching it means opening the *sql.DB here and switching to
 	// sqlstore.NewWithDB so whatsmeow still hears "sqlite3". This driver
-	// registers "sqlite3" directly, so this line is the same one the cgo
-	// driver was called with.
+	// registers "sqlite3" itself, so the one name serves both jobs and
+	// nothing needs bridging.
 	//
 	// NewWithDB is also the way in if this ever needs SetMaxOpenConns.
 	// Every pooled connection runs in its own Wasm instance, so the pool
-	// costs more memory here than it did under cgo, and capping it at one
-	// would close the locking question above from the other side. Neither
-	// is worth doing for a store this small until something says otherwise.
+	// costs more memory here than it would with a cgo driver, and capping
+	// it at one would close the locking question above from the other
+	// side. Neither is worth doing for a store this small until something
+	// says otherwise.
 	container, err := sqlstore.New(ctx, "sqlite3", storeDSN(storePath),
 		waLogger)
 	if err != nil {
@@ -340,8 +351,8 @@ func NewContext(
 	//
 	// Whatsmeow refuses the call when the client is nil, when it is already
 	// connected, or when the store already holds a device ID. None of the
-	// three is reachable here, which is what makes the hang a dependency
-	// bump away rather than a bug today.
+	// three is reachable here, which is why reaching the hang would take a
+	// change in whatsmeow rather than a bug in this function.
 	qrChan, err := client.GetQRChannel(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("whatsapp: get QR channel: %w", err)
@@ -391,7 +402,7 @@ func NewContext(
 		client.Disconnect()
 		return nil, fmt.Errorf(
 			"%w; scan the code shown above, or start with a paired "+
-				"whatsapp.db already in place", ErrNotPaired)
+				"store already at %s", ErrNotPaired, storeFile(storePath))
 	}
 
 	log.Info().Msg("whatsapp: client connected")
@@ -402,12 +413,12 @@ func NewContext(
 // SendText delivers a plain-text WhatsApp message to the given phone number.
 //
 // phone must be in E.164-compatible format: digits only, starting with
-// the country code, e.g. "628123456789". Leading "+", spaces, and hyphens are
-// stripped by normalisePhone before the JID is constructed, so "62
-// 812-3456789" and "+62 812-3456789" both work. Other characters
-// (parentheses, dots, etc.) are NOT stripped; a number still holding one
-// after normalisation is refused with ErrInvalidPhone rather than sent. See
-// normalisePhone for why refusing beats filtering further.
+// the country code, e.g. "628123456789". "+", spaces, and hyphens are
+// stripped by normalisePhone wherever they appear, before the JID is
+// constructed, so "62 812-3456789" and "+62 812-3456789" both work. Other
+// characters (parentheses, dots, etc.) are NOT stripped; a number still
+// holding one after normalisation is refused with ErrInvalidPhone rather
+// than sent. See normalisePhone for why refusing beats filtering further.
 //
 // The resulting WhatsApp JID has the form "<phone>@s.whatsapp.net"
 // (types.DefaultUserServer). Group JIDs (@g.us) are not supported; this
@@ -507,9 +518,10 @@ func (s *Service) SendTextContext(
 // conditions — avoid calling it on a request path that needs to return
 // quickly.
 //
-// Neither this nor SendText takes a context, so a caller cannot bound how
-// long a send takes: both pass context.Background, and the only deadline is
-// whatever whatsmeow's own transport applies.
+// This form and SendText pass context.Background, so neither bounds how
+// long a send takes, and the only deadline is whatever whatsmeow's own
+// transport applies. SendDocumentContext is the form that can, and the one
+// to use on any path that has to return.
 //
 // Empty-input behaviour is NOT identical to SendText's. Both no-op on a
 // recipient that is empty once normalised, and this one also no-ops on empty

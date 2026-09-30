@@ -92,11 +92,23 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 
 	"github.com/bytedance/sonic"
 	"github.com/gofiber/fiber/v3"
 	"github.com/spf13/viper"
 )
+
+// FiberConfig wraps fiber.Config so it participates in the standard
+// Validate/String lifecycle used by all other sub-configs.
+type FiberConfig struct {
+	// Embedded as a POINTER, so both the wrapper and the embedded struct can
+	// be nil independently — hence the two-part nil check in Validate.
+	// Embedding also promotes the fields (c.AppName, not
+	// c.FiberConfig.AppName), which is why a nil embedded pointer panics on
+	// field access rather than at the method call.
+	*fiber.Config
+}
 
 // buildTime is injected at link time via -ldflags and appended to AppName so
 // the running binary version is visible in the Fiber startup banner —
@@ -124,17 +136,6 @@ import (
 // becomes "<name> 1.0" rather than "<name> 1.0.<timestamp>".
 var buildTime string
 
-// FiberConfig wraps fiber.Config so it participates in the standard
-// Validate/String lifecycle used by all other sub-configs.
-type FiberConfig struct {
-	// Embedded as a POINTER, so both the wrapper and the embedded struct can
-	// be nil independently — hence the two-part nil check in Validate.
-	// Embedding also promotes the fields (c.AppName, not
-	// c.FiberConfig.AppName), which is why a nil embedded pointer panics on
-	// field access rather than at the method call.
-	*fiber.Config
-}
-
 // NewFiberConfig reads FiberConfig fields from the provided Viper instance.
 //
 // Never returns an error: absent keys and uncastable values both come back as
@@ -145,8 +146,9 @@ type FiberConfig struct {
 // Viper never looks it up, so neither the file nor an environment variable can
 // supply it.
 //
-// AppName is assembled from app.name + app.version + buildTime so every log
-// line and the startup banner identify the exact build that is running.
+// AppName is assembled from app.name + app.version + buildTime so the startup
+// banner and the configuration line logged at startup identify the exact
+// build that is running.
 //
 // sonic is used as the JSON encoder/decoder in place of the standard library
 // for improved throughput on large request/response payloads. JSON only — see
@@ -158,7 +160,7 @@ type FiberConfig struct {
 // (the thirty-six keys above collapse to thirty-two fields, since
 // fiber.trust_proxy_config.* is one struct, plus AppName, JSONDecoder, and
 // JSONEncoder). The remaining seventeen split four ways, and only the first
-// two BULLETS — three fields — are load-bearing today:
+// two BULLETS — three fields — change what a request sees:
 //
 //   - Views and StructValidator are interfaces with real consequences when
 //     nil. A nil Views means there is no template engine, which is what makes
@@ -184,11 +186,12 @@ type FiberConfig struct {
 //     nothing else. A service that serves only JSON leaves the others
 //     unreachable rather than slow.
 //   - The remaining eight are structural or unused: Services,
-//     ServicesStartupContextProvider, ServicesShutdownContextProvider,
-//     SharedStorage, and SharedStatePrefix are Fiber v3's service-dependency
-//     feature, which nothing here wires; RegexHandler is a func;
+//     ServicesStartupContextProvider, and ServicesShutdownContextProvider
+//     are Fiber v3's service-dependency feature, and SharedStorage and
+//     SharedStatePrefix its storage-backed shared state (app.SharedState),
+//     neither of which anything here wires; RegexHandler is a func;
 //     ColorScheme is a struct of ANSI escape strings for the startup banner,
-//     which main suppresses outside development anyway; and
+//     which fiber.listen.disable_startup_message can turn off entirely; and
 //     CompressedFileSuffixes is a map, meaningful only for static file
 //     serving.
 //
@@ -201,19 +204,21 @@ func NewFiberConfig(v *viper.Viper) *FiberConfig {
 
 	return &FiberConfig{
 		Config: &fiber.Config{
-			// AppName is shown in the Fiber startup banner and — since
-			// config.yaml suppresses that banner — in the startup log
-			// line, which logs the String method below. It is not the Server
-			// response header; see ServerHeader for that.
+			// AppName is shown in the Fiber startup banner, unless
+			// fiber.listen.disable_startup_message turns that off, and in
+			// the "configuration loaded" startup line, which logs String
+			// below. It is not the Server response header; see ServerHeader
+			// for that.
 			AppName: appName,
 
 			// BodyLimit is the maximum allowed request body size in bytes.
 			// Requests exceeding this receive 413 Request Entity Too Large.
 			//
 			// It bounds the WHOLE request, not the file inside it, so on any
-			// upload route it has to cover config.MaxFileBytes plus the
-			// multipart envelope. Cross-section validation enforces that
-			// floor and is the only place both numbers are in scope.
+			// upload route it has to cover fileutil.MaxFileBytes plus the
+			// multipart envelope. The application's cross-section
+			// validation enforces that floor, since it is the only place
+			// both numbers are in scope.
 			//
 			// Fiber's own default of 4194304 (4 MiB) is therefore NOT usable
 			// under any per-file limit near it or above — it falls below the
@@ -228,8 +233,8 @@ func NewFiberConfig(v *viper.Viper) *FiberConfig {
 			CaseSensitive: v.GetBool("fiber.case_sensitive"),
 
 			// Concurrency is the maximum number of simultaneous connections.
-			// 262144 = 256 × 1024. Tune based on available file descriptors
-			// (ulimit -n).
+			// 0 selects Fiber's default, 262144 (256 × 1024). Tune it to the
+			// file descriptors available (ulimit -n).
 			Concurrency: v.GetInt("fiber.concurrency"),
 
 			// DisableDefaultContentType suppresses the automatic Content-Type
@@ -244,9 +249,9 @@ func NewFiberConfig(v *viper.Viper) *FiberConfig {
 			DisableDefaultDate: v.GetBool("fiber.disable_default_date"),
 
 			// DisableHeadAutoRegister prevents GET routes from being mirrored
-			// to HEAD automatically. HTTP/1.1 requires HEAD support
-			// (RFC 7231); keep false unless HEAD handlers are registered
-			// manually.
+			// to HEAD automatically. HTTP requires HEAD wherever GET is
+			// supported (RFC 9110); keep false unless HEAD handlers are
+			// registered manually.
 			DisableHeadAutoRegister: v.GetBool(
 				"fiber.disable_head_auto_register"),
 
@@ -269,12 +274,16 @@ func NewFiberConfig(v *viper.Viper) *FiberConfig {
 			// EnableIPValidation makes c.IP() and c.IPs() validate addresses
 			// parsed from proxy headers before returning them; c.IP() then
 			// returns the first valid IP rather than the raw header value.
-			// Not gated on TrustProxy, but it only has anything to validate
-			// when the proxy header is actually read — which needs both
-			// TrustProxy AND a non-empty TrustProxyConfig. On the untrusted
-			// path c.IP() returns the socket address, which fasthttp already
-			// parsed, so this setting costs per-request work and changes
-			// nothing.
+			//
+			// The two are gated differently. c.IP() reads ProxyHeader only
+			// on the trusted path — TrustProxy AND a matching
+			// TrustProxyConfig — and otherwise returns the socket address,
+			// which needs no validating, so there this setting changes
+			// nothing. c.IPs() is not gated at all: it parses
+			// X-Forwarded-For from ANY client, trusted or not, and this
+			// setting filters what it returns either way. Validated or not,
+			// what c.IPs() returns off the trusted path is whatever the
+			// client chose to write.
 			EnableIPValidation: v.GetBool("fiber.enable_ip_validation"),
 
 			// EnableSplittingOnParsers splits comma-separated query, body, and
@@ -284,8 +293,9 @@ func NewFiberConfig(v *viper.Viper) *FiberConfig {
 				"fiber.enable_splitting_on_parsers"),
 
 			// GETOnly rejects every request that is not GET or HEAD, and
-			// Validate rejects the value true — the only key in this section
-			// that is refused outright rather than checked against another.
+			// Validate rejects the value true outright — the one setting in
+			// this section refused whatever the rest of the file says, rather
+			// than for its shape or for contradicting another key.
 			//
 			// The rejection is fasthttp's, not the router's, and that is what
 			// makes it worth a startup error. Fiber assigns this straight to
@@ -310,11 +320,12 @@ func NewFiberConfig(v *viper.Viper) *FiberConfig {
 			// fiber.listen.enable_print_routes on to find out what is
 			// registered and the route table prints them all and says the
 			// opposite of what is happening.
-			// There is no value of any other key that makes true coherent —
-			// narrowing fiber.request_methods to GET and HEAD to match would
-			// panic in the application at the first non-GET registration, since
-			// Fiber's Add panics outright on a method outside RequestMethods —
-			// so the setting is refused rather than paired with anything.
+			//
+			// There is no value of any other key that makes true coherent.
+			// Narrowing fiber.request_methods to GET and HEAD to match would
+			// panic at the first non-GET registration, since Fiber's Add
+			// panics outright on a method outside RequestMethods, so the
+			// setting is refused rather than paired with anything.
 			//
 			// The second effect is smaller and points the same way: fasthttp
 			// documents that with GetOnly set the request is limited by
@@ -347,12 +358,20 @@ func NewFiberConfig(v *viper.Viper) *FiberConfig {
 			// path on other architectures).
 			//
 			// Trade-off: sonic.Marshal/Unmarshal use sonic's ConfigDefault,
-			// which differs from encoding/json in two visible ways — HTML
-			// characters (<, >, &) are NOT escaped in output, and map keys are
-			// NOT sorted. Neither matters here (the JSON is consumed by the
-			// SPA, not embedded into HTML, and key order is irrelevant), but
-			// if byte-identical standard-library behaviour is ever needed,
-			// switch to sonic.ConfigStd.Marshal / sonic.ConfigStd.Unmarshal.
+			// which differs from encoding/json in three ways a client can
+			// see. On output, HTML characters (<, >, &) are NOT escaped and
+			// map keys are NOT sorted; on input, a control character left
+			// unescaped inside a JSON string is ACCEPTED, where encoding/json
+			// rejects the whole body. The first two do not matter to a JSON
+			// API whose responses are never embedded into HTML and whose
+			// clients do not depend on key order; the third makes a request
+			// the standard library would refuse reach the handler. Where
+			// standard-library behaviour is needed, switch to
+			// sonic.ConfigStd.Marshal and sonic.ConfigStd.Unmarshal.
+			//
+			// sonic.Unmarshal copies its input before decoding, so decoded
+			// strings never alias fasthttp's request buffer, which is
+			// recycled once the handler returns.
 			JSONDecoder: sonic.Unmarshal,
 			JSONEncoder: sonic.Marshal,
 
@@ -388,22 +407,38 @@ func NewFiberConfig(v *viper.Viper) *FiberConfig {
 			// defend against slow-read attacks.
 			ReadTimeout: v.GetDuration("fiber.read_timeout"),
 
-			// ReduceMemoryUsage releases the request body buffer immediately
-			// after reading, lowering peak memory under many concurrent large
-			// requests at a small throughput cost.
+			// ReduceMemoryUsage trades CPU for memory: fasthttp hands a
+			// connection's read and write buffers back to its pools between
+			// requests, and keeps no request or response body buffer for the
+			// next one, instead of holding all of them for the life of the
+			// connection. fasthttp recommends it for a server whose memory
+			// goes on many mostly idle keep-alive connections.
 			ReduceMemoryUsage: v.GetBool("fiber.reduce_memory_usage"),
 
 			// RequestMethods is the allowlist of HTTP methods the router
-			// accepts. Any other method receives 405. Removing unused methods
+			// accepts. A request with any other method is answered 501 Not
+			// Implemented before routing. A LISTED method is routed as usual:
+			// 404 where no route matches the path at all, and 405 where the
+			// path has routes for other methods only. Removing unused methods
 			// reduces the attack surface.
+			//
 			// When empty, Fiber uses fiber.DefaultMethods: GET, HEAD, POST,
-			// PUT, DELETE, CONNECT, OPTIONS, TRACE, PATCH, and QUERY (RFC
-			// 10008). Explicitly setting this field overrides the entire
-			// default — omitting HEAD would disable it even though RFC 7231
-			// requires it. A list that names seven drops CONNECT, TRACE, and
-			// QUERY by omission rather than by decision; the count is worth
-			// knowing before deleting the key on the assumption that the
-			// default matches what the file lists.
+			// PUT, DELETE, CONNECT, OPTIONS, TRACE, PATCH, and QUERY.
+			// Explicitly setting this field overrides the entire default —
+			// omitting HEAD would disable it even though RFC 9110 requires
+			// it. A list that names seven drops CONNECT, TRACE, and QUERY by
+			// omission rather than by decision; the count is worth knowing
+			// before deleting the key on the assumption that the default
+			// matches what the file lists.
+			//
+			// Registering a route for a method the list does not name
+			// PANICS at startup — "add: invalid http method GET" — naming
+			// the method but neither this key nor its source. So a list that
+			// misspells GET, or leaves out a method the service registers,
+			// does not start. Fiber upper-cases the method of every route it
+			// registers before looking it up here, so an entry that is not
+			// upper-case can never match one; Validate refuses it by name
+			// rather than leaving it to that panic.
 			//
 			// Viper note: v.GetStringSlice returns a NIL slice when the key is
 			// absent — cast's toSliceEOk returns (nil, true, err) for a nil
@@ -417,7 +452,8 @@ func NewFiberConfig(v *viper.Viper) *FiberConfig {
 			// elsewhere: fiber.zerolog.levels and fiber.zerolog.fields both
 			// turn on it, because the zerolog middleware restores its own
 			// defaults for nil ONLY. See the nil-versus-made-but-empty note in
-			// ZerologConfig.Validate, which TestSplitList pins.
+			// ZerologConfig.Validate, which
+			// TestSplitListKeepsAbsentAndEmptyApart pins.
 			//
 			// Read through splitList for the same reason fiber.zerolog.fields
 			// is, and the consequence here is worse. From the ENVIRONMENT a
@@ -426,12 +462,14 @@ func NewFiberConfig(v *viper.Viper) *FiberConfig {
 			//	FIBER_REQUEST_METHODS=GET,POST
 			//
 			// would arrive as ONE element, "GET,POST". len() is 1, so Fiber
-			// does not fall back to DefaultMethods; it builds a router whose
-			// only registered method is a string no client will ever send, and
-			// every request — GET included — answers 405. Nothing catches
-			// that: Validate does not inspect the contents, and the startup
-			// banner prints the routes without the method table. splitList
-			// turns the spelling into the two methods the operator meant.
+			// does not fall back to DefaultMethods; its only method is a
+			// string no client sends, and the first route the service
+			// registers panics with "add: invalid http method GET" — a
+			// message about a method, from a key that names two correctly.
+			// splitList turns the spelling into the two methods the operator
+			// meant, and Validate refuses any entry that still contains a
+			// comma or a space, which is how the same mistake arrives from a
+			// YAML sequence.
 			RequestMethods: splitList(v, "fiber.request_methods"),
 
 			// ServerHeader is the value of the Server response header.
@@ -445,14 +483,21 @@ func NewFiberConfig(v *viper.Viper) *FiberConfig {
 			// and bad URLs cost nothing past the router lookahead.
 			//
 			// It is the one bool in this section whose true is a real trade
-			// rather than a preference. the recommended stack has FOUR middlewares
-			// with app.Use — zerolog, requestid, recover, limiter — and a
-			// skipped request reaches none of them: no request log line, no
-			// request id, and nothing counted against the limiter's quota.
-			// What comes back is still the application's envelope, because a
-			// 404 is a *fiber.Error and the error handler answers those without
-			// logging, so the response is indistinguishable and the log line
-			// is simply absent.
+			// rather than a preference. The recommended stack (see doc.go)
+			// registers FOUR middlewares with app.Use — zerolog, requestid,
+			// recover, limiter — and a skipped request reaches none of them:
+			// no request log line, no request id, and nothing counted
+			// against the limiter's quota. What comes back is still the
+			// application's envelope, because a 404 is a *fiber.Error and
+			// the error handler answers those without logging, so the
+			// response is indistinguishable and the log line is simply
+			// absent.
+			//
+			// The same goes for anything that ANSWERS through app.Use on a
+			// path with no route of its own — static files, a catch-all 404
+			// page, a proxy. With this true, none of them runs for such a
+			// path; Fiber's own documentation lists them. Check the service
+			// registers nothing of the kind before turning this on.
 			//
 			// Preflight is exempt — Fiber checks IsPreflight before the
 			// lookahead — and the fast path only arms when at least one Use
@@ -487,18 +532,16 @@ func NewFiberConfig(v *viper.Viper) *FiberConfig {
 
 			// TrustProxy allows Fiber to read X-Forwarded-For and related
 			// headers when — and only when — the request arrives from an
-			// address in TrustProxyConfig. Fiber v3 changed this from v2, and
-			// the change is easy to configure straight past:
+			// address in TrustProxyConfig, a rule that is easy to configure
+			// straight past:
 			//
-			//	TrustProxy=false  proxy headers ignored; c.IP() is the socket
-			//                    IP
+			//	TrustProxy=false
+			//	    proxy headers ignored; c.IP() is the socket IP
 			//	TrustProxy=true, allowlist EMPTY
-			//	                  proxy headers ignored; c.IP() is the socket
-			//                    IP
+			//	    proxy headers ignored; c.IP() is the socket IP
 			//	TrustProxy=true, request IP in the allowlist
-			//	                  c.IP() reads ProxyHeader, c.Scheme() reads
-			//	                  X-Forwarded-Proto, c.Host() reads
-			//	                  X-Forwarded-Host
+			//	    c.IP() reads ProxyHeader, c.Scheme() reads
+			//	    X-Forwarded-Proto, c.Host() reads X-Forwarded-Host
 			//
 			// The middle row is the trap. Fiber's own doc for this field: "If
 			// you enable TrustProxy and do not provide a TrustProxyConfig,
@@ -520,10 +563,12 @@ func NewFiberConfig(v *viper.Viper) *FiberConfig {
 			// anything. Ignored entirely when TrustProxy is false.
 			//
 			// Proxies takes IP addresses or CIDR ranges — the gateway's egress
-			// address(es), not the clients'. The three booleans are shorthands
-			// for whole classes: Loopback (127.0.0.0/8, ::1/128), LinkLocal
-			// (169.254.0.0/16, fe80::/10), Private (10/8, 172.16/12,
-			// 192.168/16, fc00::/7).
+			// address(es), not the clients'. Three of the booleans are
+			// shorthands for whole classes: Loopback (127.0.0.0/8, ::1/128),
+			// LinkLocal (169.254.0.0/16, fe80::/10), Private (10/8,
+			// 172.16/12, 192.168/16, fc00::/7). The fourth, UnixSocket,
+			// trusts every connection that arrives over a unix socket, which
+			// has no peer IP to match against a list.
 			//
 			// Private is the pragmatic setting for a gateway on the same
 			// cluster network and the one to reach for first. It is also the
@@ -552,8 +597,11 @@ func NewFiberConfig(v *viper.Viper) *FiberConfig {
 			// view engine. Irrelevant for JSON APIs that use no view engine.
 			ViewsLayout: v.GetString("fiber.views_layout"),
 
-			// WriteBufferSize is the per-connection write buffer in bytes.
-			// Increase for APIs that serve large responses or use SSE streams.
+			// WriteBufferSize is the per-connection write buffer in bytes. It
+			// is a buffer, not a limit: a larger response is written through
+			// it in pieces, and raising it only means fewer, larger writes.
+			// Increase for APIs that serve large responses or use SSE
+			// streams.
 			WriteBufferSize: v.GetInt("fiber.write_buffer_size"),
 
 			// WriteTimeout is the maximum time to write the full response.
@@ -571,38 +619,43 @@ func NewFiberConfig(v *viper.Viper) *FiberConfig {
 //
 //   - BodyLimit, here. Fiber replaces any value <= 0 with DefaultBodyLimit
 //     (4 MiB), so an absent key is not a broken server — it is a 4 MiB cap
-//     silently below config.MaxFileBytes, which is a DIFFERENT and more
-//     specific problem. Cross-section validation is the only place both
-//     numbers are in scope and it rejects every value a check here would,
-//     with a message naming the floor and the reason. A plain
-//     "fiber.body_limit is required" beside it would report one cause twice.
+//     silently below fileutil.MaxFileBytes, which is a DIFFERENT and more
+//     specific problem. The application's cross-section validation is the
+//     only place both numbers are in scope, and it rejects every value a
+//     check here would, with a message naming the floor and the reason. A
+//     plain "fiber.body_limit is required" beside it would report one cause
+//     twice.
 //   - Concurrency. Same shape: Fiber replaces <= 0 with DefaultConcurrency
 //     (262144), so an absent key changes nothing observable for a deployment
 //     that wanted the default. Requiring it would buy a startup error for
 //     a deployment that behaves identically either way.
-//   - The CONTENTS of RequestMethods. splitList fixes the comma spelling, but
-//     "GTE" is still accepted and still yields a router that 405s every real
-//     GET. Fiber's method table is built from these strings directly, so a
-//     check here would have to mirror fiber.DefaultMethods and re-check it on
-//     every dependency bump.
+//   - Whether each RequestMethods entry names a REAL method. Each is checked
+//     to be an upper-case HTTP token, which is the grammar every method
+//     shares, but "GTE" is one: it passes here, and the service then panics
+//     at its first GET registration. Checking more would mean mirroring
+//     fiber.DefaultMethods and refusing the custom methods this field exists
+//     to add.
 //   - Buffer sizes, timeouts, and every bool EXCEPT GETOnly and the
 //     TrustProxy and SkipUnmatchedRoutes pairings below. Fiber has a working
 //     default or a meaningful zero for each, and none of them can be invalid —
 //     only unwise.
 //
-// What IS checked is four things, and only the first is refused on its own:
-// GETOnly outright, then three pairings — TrustProxy without an allowlist,
+// What IS checked is five things. Two stand on their own: GETOnly, refused
+// outright, and the shape of each RequestMethods entry, an upper-case HTTP
+// token. Three are pairings — TrustProxy without an allowlist,
 // SkipUnmatchedRoutes above the 64-method mask, and ProxyHeader without
-// TrustProxy. Each pairing has the same shape: a key that reads as ON in
-// config.yaml, reads as ON in String below, and does nothing where it matters.
+// TrustProxy — and each has the same shape: a key that reads as ON in
+// config.yaml, reads as ON in String below, and does nothing where it
+// matters.
 //
-// GETOnly is the exception, and it is the only value in this section refused
-// on its own rather than for contradicting another key. fasthttp rejects
-// every non-GET while it reads the request, so every write route a service
-// registers answers 405 without a handler ever running — and if
-// fiber.listen.enable_print_routes is on, the startup route table prints
-// every one of them. See the field comment in NewFiberConfig for the
-// mechanics and for why no other key can make it coherent.
+// GETOnly is the one VALUE refused outright: true is rejected whatever the
+// rest of the file says, where every other check objects to a shape or to
+// a contradiction between two keys. fasthttp rejects every non-GET while it
+// reads the request, so every write route a service registers answers 405
+// without a handler ever running — and if fiber.listen.enable_print_routes
+// is on, the startup route table prints every one of them. See the field
+// comment in NewFiberConfig for the mechanics and for why no other key can
+// make it coherent.
 //
 // Every check appends rather than returning early, so one restart surfaces
 // every fiber.* problem at once.
@@ -674,6 +727,39 @@ func (c *FiberConfig) Validate() error {
 			"fewer, or set fiber.skip_unmatched_routes to false"))
 	}
 
+	// A method is an RFC 9110 token, the same grammar as a header name, so
+	// isHTTPFieldName answers for both. An entry that is not one — "GET,POST"
+	// or "GET POST" from a YAML sequence, where splitList never splits, or an
+	// empty string — can never match a request, and the first route
+	// registered for the method it was meant to hold panics at startup.
+	//
+	// A token that is not upper-case fails the same way by another route.
+	// Fiber upper-cases the method of every route before looking it up in
+	// this list, so "get" is never found, and registering a GET route panics
+	// exactly as if the entry were missing.
+	for i, m := range c.RequestMethods {
+		switch {
+		case !isHTTPFieldName(m):
+			errs = append(errs, fmt.Errorf("fiber.request_methods[%d] is not "+
+				"a method name (got %q): a method is a single token — "+
+				"letters, digits, and %s — so write one per entry, and a "+
+				"route registered for a method missing from the list "+
+				"panics at startup",
+				i,
+				m,
+				tokenSpecials))
+		case m != strings.ToUpper(m):
+			errs = append(errs, fmt.Errorf("fiber.request_methods[%d] must "+
+				"be upper-case (got %q): Fiber upper-cases the method of "+
+				"every route it registers before looking it up here, so "+
+				"this entry can never match one, and registering a route "+
+				"for %s panics at startup",
+				i,
+				m,
+				strings.ToUpper(m)))
+		}
+	}
+
 	// ProxyHeader is only read on the trusted path. Set without TrustProxy it
 	// is inert, and the mistake is worth a startup error rather than a support
 	// ticket about client IPs that never appear in the log.
@@ -693,19 +779,26 @@ func (c *FiberConfig) Validate() error {
 // Printing a value copy (%v on FiberConfig, not &FiberConfig) bypasses it and
 // dumps the struct fields directly.
 //
-// The nil check is TWO-PART, mirroring Validate's. zerolog reaches this method
-// through fmt.Stringer, and its own guard — `if val == nil` in
-// internal/json.AppendStringer — is an INTERFACE nil, which neither a typed
-// nil pointer nor a wrapper around a nil embedded pointer satisfies. So it
-// calls String on both, and without the second half the half-built one panics
-// inside the startup log line rather than rendering a placeholder.
-// The section list carries the argument.
+// The nil check is TWO-PART, mirroring Validate's. A logger's own guard, such
+// as zerolog's `if val == nil` before it calls a Stringer, compares an
+// INTERFACE with nil, which neither a typed nil pointer nor a wrapper around
+// a nil embedded pointer satisfies. Without the second half, the half-built
+// one would panic inside the startup log line instead of rendering a
+// placeholder.
+//
+// RequestMethods prints "(fiber.DefaultMethods)" when empty rather than
+// "[]", because an empty list is the setting that allows every default
+// method and "[]" reads as allowing none.
 func (c *FiberConfig) String() string {
 	if c == nil {
 		return "<nil FiberConfig>"
 	}
 	if c.Config == nil {
 		return "<uninitialised FiberConfig>"
+	}
+	methods := fmt.Sprintf("%v", c.RequestMethods)
+	if len(c.RequestMethods) == 0 {
+		methods = "(fiber.DefaultMethods)"
 	}
 	return fmt.Sprintf("AppName=%s "+
 		"BodyLimit=%d "+
@@ -729,7 +822,7 @@ func (c *FiberConfig) String() string {
 		"ReadBufferSize=%d "+
 		"ReadTimeout=%s "+
 		"ReduceMemoryUsage=%t "+
-		"RequestMethods=%v "+
+		"RequestMethods=%s "+
 		"ServerHeader=%s "+
 		"SkipUnmatchedRoutes=%t "+
 		"StreamRequestBody=%t "+
@@ -766,7 +859,7 @@ func (c *FiberConfig) String() string {
 		c.ReadBufferSize,
 		c.ReadTimeout,
 		c.ReduceMemoryUsage,
-		c.RequestMethods,
+		methods,
 		c.ServerHeader,
 		c.SkipUnmatchedRoutes,
 		c.StreamRequestBody,

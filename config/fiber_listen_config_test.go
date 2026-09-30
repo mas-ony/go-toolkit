@@ -1,6 +1,13 @@
 package config
 
 // Tests for fiber_listen_config.go.
+//
+// What the section promises: a drain deadline that is stated and at least a
+// second, a certificate and its key set together, a listener network and a
+// TLS floor Fiber accepts, a socket mode that is a permission and a hint
+// when it was written without its leading zero, no negative prefork
+// setting, and under prefork a network it can bind and a master grace no
+// shorter than the drain.
 
 import (
 	"strings"
@@ -9,20 +16,34 @@ import (
 	"github.com/spf13/viper"
 )
 
+// listenBase is a configuration the listen section accepts, which each
+// rule case changes one key at a time.
 var listenBase = map[string]any{
 	"fiber.listen.shutdown_timeout": "10s",
 }
 
+// buildListen adapts NewListenConfig to the constructor shape runRules
+// takes.
 func buildListen(v *viper.Viper) SectionConfig { return NewListenConfig(v) }
 
+// TestListenValidate holds the section's rules, each beside the value that
+// satisfies it.
 func TestListenValidate(t *testing.T) {
 	t.Parallel()
 	runRules(t, listenBase, buildListen, []ruleCase{
 		{"no shutdown timeout", map[string]any{
 			"fiber.listen.shutdown_timeout": nil},
 			"fiber.listen.shutdown_timeout"},
-		// A certificate without its key, or the reverse, cannot serve TLS
-		// and would otherwise surface only when the listener starts.
+		// 10 meant as seconds is 10ns, and a negative deadline has passed
+		// before the drain begins: both drop every in-flight request.
+		{"a bare-number shutdown timeout", map[string]any{
+			"fiber.listen.shutdown_timeout": 10},
+			"fiber.listen.shutdown_timeout must be at least 1s"},
+		{"a negative shutdown timeout", map[string]any{
+			"fiber.listen.shutdown_timeout": "-10s"},
+			"fiber.listen.shutdown_timeout must be at least 1s"},
+		// A certificate without its key, or the reverse, cannot serve TLS,
+		// and Fiber does not say so: it serves plain HTTP instead.
 		{"a cert without a key", map[string]any{
 			"fiber.listen.cert_file": "/tls/cert.pem"},
 			"fiber.listen.cert"},
@@ -47,6 +68,27 @@ func TestListenValidate(t *testing.T) {
 		{"negative grace period", map[string]any{
 			"fiber.listen.prefork_shutdown_grace_period": "-1s"},
 			"fiber.listen.prefork_shutdown_grace_period"},
+		// Fiber panics at Listen on any version but 1.2 and 1.3.
+		{"TLS 1.1", map[string]any{
+			"fiber.listen.tls_min_version": 770},
+			"fiber.listen.tls_min_version"},
+		{"TLS 1.3", map[string]any{
+			"fiber.listen.tls_min_version": 772}, ""},
+		// Prefork binds through SO_REUSEPORT, which fasthttp implements
+		// for tcp4 and tcp6 only.
+		{"prefork on a dual-stack network", map[string]any{
+			"fiber.listen.enable_prefork":                true,
+			"fiber.listen.listener_network":              "tcp",
+			"fiber.listen.prefork_shutdown_grace_period": "15s"},
+			"tcp4 or tcp6"},
+		// An unset grace is fasthttp's 5s, shorter than the 10s drain, so
+		// the master would SIGKILL a worker that believes it has time.
+		{"prefork with the default grace", map[string]any{
+			"fiber.listen.enable_prefork": true},
+			"fiber.listen.prefork_shutdown_grace_period"},
+		{"prefork with a grace above the drain", map[string]any{
+			"fiber.listen.enable_prefork":                true,
+			"fiber.listen.prefork_shutdown_grace_period": "15s"}, ""},
 	})
 }
 
@@ -67,6 +109,8 @@ func TestListenValidateSuggestsTheOctalMode(t *testing.T) {
 	}
 }
 
+// octalIntent recovers the octal mode a decimal number's digits spell, and
+// declines when those digits are not an octal permission at all.
 func TestOctalIntent(t *testing.T) {
 	t.Parallel()
 	for _, c := range []struct {

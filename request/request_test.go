@@ -1,5 +1,12 @@
 package request
 
+// Tests for request.go, each driven through a real Fiber router so the
+// values under test are the ones a handler receives: ID and QueryID and the
+// one 400 they return, the junk-skipping in IDs, the paging defaults and
+// ceiling, Sort and Cols, the three answers of each pointer helper, and the
+// cloning of every string that leaves the package. Buffer reuse across
+// requests needs a real listener and is in request_integration_test.go.
+
 import (
 	"errors"
 	"io"
@@ -11,7 +18,6 @@ import (
 	"unsafe"
 
 	"github.com/gofiber/fiber/v3"
-
 	"github.com/mas-ony/go-toolkit/database"
 )
 
@@ -45,6 +51,8 @@ func badRequest(err error) (int, string) {
 	return 0, ""
 }
 
+// ID reads a positive route parameter, and answers a missing, non-numeric
+// or non-positive one with the same 400 naming the parameter.
 func TestID(t *testing.T) {
 	for _, target := range []string{"/items/7"} {
 		probe(t, target, func(c fiber.Ctx) {
@@ -70,6 +78,7 @@ func TestID(t *testing.T) {
 	}
 }
 
+// QueryID holds a query parameter to the same rule and the same 400 as ID.
 func TestQueryID(t *testing.T) {
 	probe(t, "/items?unit_id=4", func(c fiber.Ctx) {
 		id, err := QueryID(c, "unit_id")
@@ -92,7 +101,7 @@ func TestQueryID(t *testing.T) {
 
 // The whole point of returning the error: the caller's guard fires, the
 // handler stops, and the error handler renders one 400.
-func TestParseIDRendersOneBadRequest(t *testing.T) {
+func TestIDRendersOneBadRequest(t *testing.T) {
 	reached := false
 	app := fiber.New(fiber.Config{
 		ErrorHandler: func(c fiber.Ctx, err error) error {
@@ -148,6 +157,8 @@ func TestWritingTheResponseYieldsNoError(t *testing.T) {
 	}
 }
 
+// IDs keeps each positive integer once, in order, skips everything else,
+// and returns nil when nothing usable is left.
 func TestIDs(t *testing.T) {
 	cases := map[string][]int{
 		"/items":                         nil,
@@ -162,12 +173,14 @@ func TestIDs(t *testing.T) {
 	for target, want := range cases {
 		probe(t, target, func(c fiber.Ctx) {
 			if got := IDs(c, "ids"); !reflect.DeepEqual(got, want) {
-				t.Errorf("%s: parseIDs = %v, want %v", target, got, want)
+				t.Errorf("%s: IDs = %v, want %v", target, got, want)
 			}
 		})
 	}
 }
 
+// Page corrects a page below 1 to the first, and a limit outside 1 to
+// MaxLimit to the default rather than to the ceiling.
 func TestPage(t *testing.T) {
 	cases := map[string][2]int{
 		"/items":                  {1, 10},
@@ -192,6 +205,8 @@ func TestPage(t *testing.T) {
 	}
 }
 
+// Sort keeps each column as sent, reads desc in any case as descending and
+// anything else as ascending, and returns nil when nothing is left.
 func TestSort(t *testing.T) {
 	field := func(col, dir string) database.SortField {
 		return database.SortField{Col: col, Dir: dir}
@@ -213,12 +228,14 @@ func TestSort(t *testing.T) {
 	for target, want := range cases {
 		probe(t, target, func(c fiber.Ctx) {
 			if got := Sort(c); !reflect.DeepEqual(got, want) {
-				t.Errorf("%s: parseSort = %v, want %v", target, got, want)
+				t.Errorf("%s: Sort = %v, want %v", target, got, want)
 			}
 		})
 	}
 }
 
+// Cols trims and keeps each non-empty name, and returns nil for every
+// column.
 func TestCols(t *testing.T) {
 	cases := map[string][]string{
 		"/items":                  nil,
@@ -231,12 +248,13 @@ func TestCols(t *testing.T) {
 	for target, want := range cases {
 		probe(t, target, func(c fiber.Ctx) {
 			if got := Cols(c); !reflect.DeepEqual(got, want) {
-				t.Errorf("%s: parseCols = %v, want %v", target, got, want)
+				t.Errorf("%s: Cols = %v, want %v", target, got, want)
 			}
 		})
 	}
 }
 
+// splitList trims each piece and drops the empty ones.
 func TestSplitList(t *testing.T) {
 	cases := map[string][]string{
 		"":         nil,
@@ -253,6 +271,7 @@ func TestSplitList(t *testing.T) {
 	}
 }
 
+// StringPtr trims the value, and treats an empty or absent one as nil.
 func TestStringPtr(t *testing.T) {
 	probe(t, "/items?code=%20alpha%20&empty=%20", func(c fiber.Ctx) {
 		got := StringPtr(c, "code")
@@ -268,6 +287,8 @@ func TestStringPtr(t *testing.T) {
 	})
 }
 
+// IntPtr returns a positive integer, and nil for zero, a negative, text, a
+// blank or an absent parameter.
 func TestIntPtr(t *testing.T) {
 	probe(t, "/items?n=5&zero=0&neg=-1&text=abc&blank=", func(c fiber.Ctx) {
 		if got := IntPtr(c, "n"); got == nil || *got != 5 {
@@ -282,6 +303,8 @@ func TestIntPtr(t *testing.T) {
 	})
 }
 
+// BoolPtr reads true, 1 and yes, and false, 0 and no, in any case; every
+// other spelling, and an absent parameter, is nil.
 func TestBoolPtr(t *testing.T) {
 	probe(t, "/items?a=true&b=1&c=YES&d=false&e=0&f=No&g=yeah&h=",
 		func(c fiber.Ctx) {
@@ -315,17 +338,17 @@ func TestQueryValuesAreCloned(t *testing.T) {
 
 		if got := StringPtr(c, "code"); got == nil ||
 			unsafe.StringData(*got) == unsafe.StringData(raw) {
-			t.Error("queryStringPtr kept the request buffer")
+			t.Error("StringPtr kept the request buffer")
 		}
 		if got := Cols(c); len(got) != 1 ||
 			unsafe.StringData(got[0]) ==
 				unsafe.StringData(c.Query("cols")) {
-			t.Error("parseCols kept the request buffer")
+			t.Error("Cols kept the request buffer")
 		}
 		if got := Sort(c); len(got) != 1 ||
 			unsafe.StringData(got[0].Col) ==
 				unsafe.StringData(c.Query("sort")) {
-			t.Error("parseSort kept the request buffer")
+			t.Error("Sort kept the request buffer")
 		}
 	})
 }

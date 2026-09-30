@@ -1,5 +1,14 @@
 package database
 
+// Tests for db.go.
+//
+// What the file promises: every credential byte survives the DSN it is
+// written into or is refused by name, the driver name sqlx sees picks the
+// right placeholders, the encrypt vocabulary reaches each driver translated,
+// a setting a driver's parser would reject is refused naming its key, and no
+// error New can return offline carries the password. Nothing here needs a
+// server; what an engine makes of the DSN is db_integration_test.go's.
+
 import (
 	"context"
 	"errors"
@@ -8,9 +17,8 @@ import (
 	"testing"
 
 	"github.com/go-sql-driver/mysql"
-	"github.com/microsoft/go-mssqldb/msdsn"
-
 	"github.com/mas-ony/go-toolkit/config"
+	"github.com/microsoft/go-mssqldb/msdsn"
 )
 
 // safeUsername stands in wherever the corpus value is being exercised as a
@@ -95,12 +103,6 @@ func redact(dsn string) string {
 	return scheme + "[redacted]" + dsn[at:]
 }
 
-func testConfigs(
-	driver, credential string,
-) (*config.DatabaseConfig, *config.AppConfig) {
-	return testConfigsWith(driver, credential, credential)
-}
-
 // testConfigsWith is the two-field form, needed because MySQL treats the
 // username and the password differently and the tests have to say which one
 // they mean.
@@ -119,6 +121,14 @@ func testConfigsWith(
 		Name:     "testapp",
 		Location: "Asia/Jakarta",
 	}
+}
+
+// testConfigs builds the config pair buildDSN takes, with credential as
+// both the username and the password.
+func testConfigs(
+	driver, credential string,
+) (*config.DatabaseConfig, *config.AppConfig) {
+	return testConfigsWith(driver, credential, credential)
 }
 
 // TestBuildDSNRoundTripsHostileCredentials is why db.go documents no list of
@@ -178,7 +188,11 @@ func TestBuildDSNRoundTripsHostileCredentials(t *testing.T) {
 					t.Errorf("instance: got %q, want empty — database "+
 						"belongs in the query, not the path", p.Instance)
 				}
-				if got := app.Location; got != app.Location {
+				// The zone has to reach the driver: it labels every value
+				// decoded from an offsetless column, and UTC in its place
+				// shifts them all by the zone's offset.
+				if got := p.Encoding.GetTimezone().String(); got !=
+					app.Location {
 					t.Errorf("timezone: got %q, want %q", got, app.Location)
 				}
 			})
@@ -235,8 +249,9 @@ func TestBuildDSNRoundTripsHostileCredentials(t *testing.T) {
 			// and a no-op UPDATE simply starts returning 404 where SQL Server
 			// returns success. See the branch in buildDSN.
 			if !parsed.ClientFoundRows {
-				t.Error("clientFoundRows: got false, want true — " +
-					"requireOneRow would read a no-op UPDATE as missing")
+				t.Error("clientFoundRows: got false, want true — a " +
+					"repository reading RowsAffected() == 0 as missing " +
+					"would answer a no-op UPDATE with 404")
 			}
 		}
 
@@ -788,12 +803,13 @@ func TestDriverIsReportedBeforeEncrypt(t *testing.T) {
 // log a startup error verbatim, so a credential in any of these messages
 // lands in the log aggregator.
 //
-// ErrMalformedDSN is NOT among them, and cannot be: buildDSN assembles its
-// output with url.URL and mysql.Config.FormatDSN, so there is no input that
-// reaches sqlx.Open with a string those parsers reject. The sentinel exists so
-// that the driver's own error can be dropped rather than wrapped at that call
-// site — the driver may quote the connection string it was handed — and it
-// stays untested here for want of a way to provoke it.
+// ErrMalformedDSN is NOT among them. buildDSN assembles its output with
+// url.URL and mysql.Config.FormatDSN, and checkTarget refuses the host,
+// port and zone values go-mssqldb's parser would reject, so no known input
+// reaches sqlx.Open with a string the driver refuses. The sentinel exists
+// so that the driver's own error can be dropped rather than wrapped at that
+// call site — the driver may quote the connection string it was handed —
+// and it stays untested here for want of a way to provoke it.
 func TestNewErrorsCarryNoCredentials(t *testing.T) {
 	t.Parallel()
 
@@ -819,6 +835,16 @@ func TestNewErrorsCarryNoCredentials(t *testing.T) {
 			mutate:  func(c *config.DatabaseConfig) { c.Driver = "mysql" },
 			wantErr: ErrInvalidCredential,
 		},
+		{
+			name:   "port out of range",
+			mutate: func(c *config.DatabaseConfig) { c.Port = 70000 },
+		},
+		{
+			name: "a named-instance host",
+			mutate: func(c *config.DatabaseConfig) {
+				c.Host = `db.internal\SQLEXPRESS`
+			},
+		},
 	}
 
 	for _, tc := range tests {
@@ -832,7 +858,10 @@ func TestNewErrorsCarryNoCredentials(t *testing.T) {
 			if db != nil {
 				t.Error("New returned a pool alongside an error")
 			}
-			if !errors.Is(err, tc.wantErr) {
+			if err == nil {
+				t.Fatal("New succeeded")
+			}
+			if tc.wantErr != nil && !errors.Is(err, tc.wantErr) {
 				t.Fatalf("got %v, want %v", err, tc.wantErr)
 			}
 			if strings.Contains(err.Error(), password) {
@@ -935,5 +964,137 @@ func TestNewDelegatesToNewContext(t *testing.T) {
 		direct.Error() != viaContext.Error() {
 		t.Errorf("New returned %v, NewContext returned %v — want the "+
 			"same error", direct, viaContext)
+	}
+}
+
+// TestBuildDSNNamesTheKeyForAnUnusableTarget holds checkTarget in place.
+//
+// Each of these values is one a person can type into config.yaml. Without
+// checkTarget, each would pass buildDSN on the sqlserver branch and then be
+// refused by go-mssqldb inside sqlx.Open, where the cause is dropped and
+// the error reads "malformed DSN". The assertion is on the key named in the
+// message, on both drivers, since that is what an operator acts on.
+func TestBuildDSNNamesTheKeyForAnUnusableTarget(t *testing.T) {
+	t.Parallel()
+
+	for _, driver := range []string{"sqlserver", "mysql"} {
+		for _, c := range []struct {
+			name, key string
+			mutate    func(*config.DatabaseConfig, *config.AppConfig)
+		}{
+			{"a mistyped zone", "app.location",
+				func(_ *config.DatabaseConfig, a *config.AppConfig) {
+					a.Location = "Asia/Jakartaa"
+				}},
+			{"port 0", "database.port",
+				func(c *config.DatabaseConfig, _ *config.AppConfig) {
+					c.Port = 0
+				}},
+			{"port 70000", "database.port",
+				func(c *config.DatabaseConfig, _ *config.AppConfig) {
+					c.Port = 70000
+				}},
+			{"a named instance", "database.host",
+				func(c *config.DatabaseConfig, _ *config.AppConfig) {
+					c.Host = `db.internal\SQLEXPRESS`
+				}},
+			{"a path in the host", "database.host",
+				func(c *config.DatabaseConfig, _ *config.AppConfig) {
+					c.Host = "db.internal/x"
+				}},
+			{"a bracketed IPv6 address", "database.host",
+				func(c *config.DatabaseConfig, _ *config.AppConfig) {
+					c.Host = "[::1]"
+				}},
+			{"no host", "database.host",
+				func(c *config.DatabaseConfig, _ *config.AppConfig) {
+					c.Host = ""
+				}},
+		} {
+			t.Run(driver+"/"+c.name, func(t *testing.T) {
+				t.Parallel()
+				cfg, app := testConfigs(driver, "secret")
+				c.mutate(cfg, app)
+				_, dsn, err := buildDSN(cfg, app)
+				if err == nil {
+					t.Fatalf("buildDSN accepted it: %s", redact(dsn))
+				}
+				if !strings.Contains(err.Error(), c.key) {
+					t.Errorf("err = %v, want it to name %s", err, c.key)
+				}
+			})
+		}
+	}
+}
+
+// Every host shape checkTarget accepts has to survive both drivers' own
+// parsers, or the check would let through exactly what it exists to stop.
+func TestBuildDSNAcceptsEveryHostShape(t *testing.T) {
+	t.Parallel()
+
+	for _, host := range []string{
+		"db.internal", "db-1", "db_1", "DB.Example.COM", "10.0.0.5", "::1",
+		"2001:db8::10",
+	} {
+		t.Run(host, func(t *testing.T) {
+			t.Parallel()
+			for _, driver := range []string{"sqlserver", "mysql"} {
+				cfg, app := testConfigs(driver, "secret")
+				cfg.Host = host
+				_, dsn, err := buildDSN(cfg, app)
+				if err != nil {
+					t.Fatalf("%s: buildDSN: %v", driver, err)
+				}
+				if driver == "sqlserver" {
+					p, perr := msdsn.Parse(dsn)
+					if perr != nil || p.Host != host {
+						t.Errorf("sqlserver: host %q, err %v", p.Host, perr)
+					}
+					continue
+				}
+				if _, perr := mysql.ParseDSN(dsn); perr != nil {
+					t.Errorf("mysql: %v", perr)
+				}
+			}
+		})
+	}
+}
+
+// A deployment that leaves the optional database section out produces an
+// all-zero DatabaseConfig, or none at all. New answers both with
+// ErrNotConfigured, rather than with an unsupported-driver error about an
+// empty name or a nil dereference, and dials nothing.
+func TestNewReportsAnAbsentSection(t *testing.T) {
+	t.Parallel()
+	_, app := testConfigs("sqlserver", "secret")
+	for name, cfg := range map[string]*config.DatabaseConfig{
+		"nil":  nil,
+		"zero": {},
+	} {
+		db, err := New(cfg, app)
+		if db != nil {
+			_ = db.Close()
+			t.Errorf("%s: New returned a pool", name)
+		}
+		if !errors.Is(err, ErrNotConfigured) {
+			t.Errorf("%s: err = %v, want ErrNotConfigured", name, err)
+		}
+	}
+}
+
+// A nil AppConfig is refused with an error rather than dereferenced inside
+// the DSN builder, which reads the application's name and location on both
+// branches. It is not ErrNotConfigured: the database section is present,
+// and what is missing is the wiring.
+func TestNewRefusesANilAppConfig(t *testing.T) {
+	t.Parallel()
+	cfg, _ := testConfigs("sqlserver", "secret")
+	db, err := New(cfg, nil)
+	if db != nil {
+		_ = db.Close()
+		t.Error("New returned a pool")
+	}
+	if err == nil || errors.Is(err, ErrNotConfigured) {
+		t.Errorf("err = %v, want an error other than ErrNotConfigured", err)
 	}
 }

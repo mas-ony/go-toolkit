@@ -6,38 +6,69 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/rs/zerolog"
-
 	"github.com/mas-ony/go-toolkit/config"
 	"github.com/mas-ony/go-toolkit/xlsx"
-)
-
-const (
-	// StatusCreated — a new row was written.
-	StatusCreated Status = "created"
-
-	// StatusUpdated — an existing row was matched and rewritten. Only a
-	// dataset with a natural key can produce this.
-	StatusUpdated Status = "updated"
-
-	// StatusSkipped — the row was recognised and deliberately not
-	// written, e.g. already present and unchanged.
-	StatusSkipped Status = "skipped"
-
-	// StatusFailed — the row was not written and needs attention.
-	StatusFailed Status = "failed"
-
-	// StatusDryRun — nothing was written because -dry-run was given.
-	StatusDryRun Status = "dry-run"
+	"github.com/rs/zerolog"
 )
 
 // Status is what became of one workbook row. The values are written into
 // the report as-is, so they are the vocabulary an operator reads.
 type Status string
 
+// Outcome records what happened to one workbook row.
+//
+// ExcelRow is the reliable anchor: it points at a cell somebody can open.
+// Label is a convenience for whoever reads the report and is expected to
+// be weak — not unique, and empty on a row whose identifying column would
+// not parse.
+type Outcome struct {
+	// ExcelRow is the sheet row the outcome belongs to, numbered as the
+	// spreadsheet numbers it.
+	ExcelRow int
+
+	// Label identifies the row for whoever reads the report; see the
+	// type for why it is weak.
+	Label string
+
+	// Status is what became of the row.
+	Status Status
+
+	// ID is the key the destination assigned or matched, empty when the
+	// row never reached it. For a dataset that cannot match a stored row
+	// on a re-run, it is the only record of what the run created; see
+	// WriteReport.
+	ID string
+
+	// Notes are the row's warnings and failure reasons, one line each, in
+	// the order they arose. A row carrying any is listed in the summary
+	// even when it did not fail.
+	Notes []string
+
+	// Fields carries the dataset's own report columns, keyed by the
+	// names in ReportShape.Fields. A key with no value is written as an
+	// empty cell rather than omitted, so every line has the same shape.
+	Fields map[string]string
+}
+
+// ReportShape describes the dataset's columns in the CSV report.
+type ReportShape struct {
+	// Label heads the Outcome.Label column.
+	Label string
+
+	// ID heads the Outcome.ID column.
+	ID string
+
+	// Fields are the dataset's own columns, in the order they are
+	// written, matching the keys it sets through Outcome.Set.
+	Fields []string
+}
+
 // Counter is one named tally, rendered in the summary.
 type Counter struct {
-	Name  string
+	// Name is the label the summary prints.
+	Name string
+
+	// Value is the tally.
 	Value int
 
 	// Always prints the line even at zero, for a counter whose zero is
@@ -45,10 +76,20 @@ type Counter struct {
 	Always bool
 }
 
-// Counters tallies a run. The five fixed fields are the outcomes every
-// dataset has; anything else a dataset wants to count is named.
+// Counters tallies a run. The five fixed fields are the tallies every
+// dataset has; anything else a dataset wants to count is named, through
+// Inc, Add or Declare.
+//
+// The zero value is ready to use: the maps behind the named counters are
+// made on first use.
 type Counters struct {
-	Parsed  int
+	// Parsed is the number of importable rows Prepare found. Execute sets
+	// it, before any -limit applies, so a limited run still reports how
+	// big the workbook was.
+	Parsed int
+
+	// Created, Updated, Skipped and Failed count rows by Status. The
+	// dataset moves them; see Dataset.Import for why nothing else does.
 	Created int
 	Updated int
 	Skipped int
@@ -57,6 +98,40 @@ type Counters struct {
 	names  []string
 	values map[string]int
 	always map[string]bool
+}
+
+// Info names a dataset for the operator.
+type Info struct {
+	// Name is the value of -dataset that selects it.
+	Name string
+
+	// Describe is the one-line summary shown by -dataset list.
+	Describe string
+
+	// Caveat is a warning printed on the summary banner, most usefully
+	// that a re-run duplicates. Empty for a dataset that can match a
+	// stored row and is therefore safe to run twice.
+	Caveat string
+}
+
+// Transport is what the connection flags supply: the same
+// fiber.client.* section a service loads from YAML, plus the two
+// deadlines a client does not set for itself.
+//
+// A dataset that writes over HTTP builds its client from this —
+// httpclient.New(&t.ClientConfig, httpclient.Options{...}) — and one that
+// writes anywhere else ignores it. Embedding the config type rather than
+// a shape of this package's own is what lets a flag-built transport and a
+// YAML-built one be the same thing.
+type Transport struct {
+	config.ClientConfig
+
+	// Timeout bounds a metadata call.
+	Timeout time.Duration
+
+	// UploadTimeout bounds a request carrying a file, which crosses an
+	// office network with megabytes on it and deserves longer.
+	UploadTimeout time.Duration
 }
 
 // Options is what the generic flags supply.
@@ -89,85 +164,37 @@ type Options struct {
 	Limit int
 }
 
-// Transport is what the connection flags supply: the same
-// fiber.client.* section a service loads from YAML, plus the two
-// deadlines a client does not set for itself.
-//
-// A dataset that writes over HTTP builds its client from this —
-// httpclient.New(&t.ClientConfig, httpclient.Options{...}) — and one that
-// writes anywhere else ignores it. Embedding the config type rather than
-// a shape of this package's own is what lets a flag-built transport and a
-// YAML-built one be the same thing.
-type Transport struct {
-	config.ClientConfig
-
-	// Timeout bounds a metadata call.
-	Timeout time.Duration
-
-	// UploadTimeout bounds a request carrying a file, which crosses an
-	// office network with megabytes on it and deserves longer.
-	UploadTimeout time.Duration
-}
-
-// Info names a dataset for the operator.
-type Info struct {
-	// Name is the value of -dataset that selects it.
-	Name string
-
-	// Describe is the one-line summary shown by -dataset list.
-	Describe string
-
-	// Caveat is a warning printed on the summary banner, most usefully
-	// that a re-run duplicates. Empty for a dataset that can match a
-	// stored row and is therefore safe to run twice.
-	Caveat string
-}
-
 // Run is the state one import shares with its dataset.
 type Run struct {
-	Log   zerolog.Logger
-	Opt   Options
+	// Log receives the run's own messages — a skipped header check, an
+	// early stop under -limit, an interruption — and is the logger a
+	// dataset writes its rows through.
+	Log zerolog.Logger
+
+	// Opt is what the command's flags resolved to. Execute writes one
+	// field back: Layout.Sheet, once the workbook has named the sheet the
+	// layout left to its default.
+	Opt Options
+
+	// Count is the run's tallies. A pointer, so the command, Execute and
+	// the dataset all move one set of numbers.
 	Count *Counters
-}
-
-// Outcome records what happened to one workbook row.
-//
-// ExcelRow is the reliable anchor: it points at a cell somebody can open.
-// Label is a convenience for whoever reads the report and is expected to
-// be weak — not unique, and empty on a row whose identifying column would
-// not parse.
-type Outcome struct {
-	ExcelRow int
-	Label    string
-	Status   Status
-	ID       string
-	Notes    []string
-
-	// Fields carries the dataset's own report columns, keyed by the
-	// names in ReportShape.Fields. A key with no value is written as an
-	// empty cell rather than omitted, so every line has the same shape.
-	Fields map[string]string
-}
-
-// ReportShape describes the dataset's columns in the CSV report.
-type ReportShape struct {
-	// Label heads the Outcome.Label column.
-	Label string
-
-	// ID heads the Outcome.ID column.
-	ID string
-
-	// Fields are the dataset's own columns, in the order they are
-	// written, matching the keys it sets through Outcome.Set.
-	Fields []string
 }
 
 // Dataset is one workbook shape and where its rows go.
 //
-// The methods are called in the order they are listed, once each per run
-// except Import. A dataset may hold state across them — a parsed row
-// slice, a lookup cache, an index of a scan directory — because exactly
-// one run uses one instance.
+// The methods are listed in the order a run reaches them. The command calls
+// Info, Flags and Validate while it reads its command line, Layout while it
+// builds the Options, Connect before it starts the import, and Report when
+// it writes the CSV. Execute calls the rest: Columns for the header check,
+// HeaderAdvice only when that check fails and -skip-header-check is not
+// given, Prepare, Len, and Import once per importable row. PrintSummary asks
+// for Info again for its banner. Apart from Import, and Info with its second
+// caller, every method is called at most once per run.
+//
+// A dataset may hold state across them — a parsed row slice, a lookup
+// cache, an index of a scan directory — because exactly one run uses one
+// instance.
 type Dataset interface {
 	// Info names the dataset and states whether a re-run is safe.
 	Info() Info
@@ -196,9 +223,10 @@ type Dataset interface {
 	HeaderAdvice(err error) error
 
 	// Connect opens whatever the dataset writes to and proves it is
-	// reachable. It runs before the workbook is parsed, so a wrong URL
-	// or a rejected token fails in a second rather than after a
-	// three-thousand-row parse.
+	// reachable. The command calls it before Execute, so it runs before
+	// the workbook is parsed: a wrong URL or a rejected token fails in a
+	// second rather than after a three-thousand-row parse. Execute does
+	// not call it, since the Transport is the command's to build.
 	Connect(ctx context.Context, t Transport, run *Run) error
 
 	// Prepare parses the sheet and does any whole-run work: batch
@@ -224,6 +252,27 @@ type Dataset interface {
 	// Report describes the dataset's columns in the CSV.
 	Report() ReportShape
 }
+
+// The statuses a row can end in. Only StatusFailed decides the exit status;
+// see Outcome.Failed.
+const (
+	// StatusCreated — a new row was written.
+	StatusCreated Status = "created"
+
+	// StatusUpdated — an existing row was matched and rewritten. Only a
+	// dataset with a natural key can produce this.
+	StatusUpdated Status = "updated"
+
+	// StatusSkipped — the row was recognised and deliberately not
+	// written, e.g. already present and unchanged.
+	StatusSkipped Status = "skipped"
+
+	// StatusFailed — the row was not written and needs attention.
+	StatusFailed Status = "failed"
+
+	// StatusDryRun — nothing was written because -dry-run was given.
+	StatusDryRun Status = "dry-run"
+)
 
 // registry holds every dataset the command can run, keyed by the value of
 // -dataset that selects it.
@@ -264,12 +313,40 @@ func (o *Outcome) Note(format string, args ...any) {
 	o.Notes = append(o.Notes, fmt.Sprintf(format, args...))
 }
 
-// Set records one of the dataset's report fields.
-func (o *Outcome) Set(field, value string) {
-	if o.Fields == nil {
-		o.Fields = make(map[string]string, 4)
+// Names lists the registered datasets in registration order.
+func Names() []string {
+	out := make([]string, len(order))
+	copy(out, order)
+	return out
+}
+
+// Extras returns the named counters in declaration order.
+func (c *Counters) Extras() []Counter {
+	out := make([]Counter, 0, len(c.names))
+	for _, n := range c.names {
+		out = append(out, Counter{
+			Name:   n,
+			Value:  c.values[n],
+			Always: c.always[n],
+		})
 	}
-	o.Fields[field] = value
+	return out
+}
+
+// Value reads a named counter.
+func (c *Counters) Value(name string) int { return c.values[name] }
+
+// Only returns the single registered dataset's name, when there is
+// exactly one.
+//
+// It is what lets a command with a single dataset accept no -dataset
+// at all, so a one-dataset importer keeps the command line it would
+// have had without a registry behind it.
+func Only() (string, bool) {
+	if len(order) != 1 {
+		return "", false
+	}
+	return order[0], true
 }
 
 // Failed reports whether the row needs attention, which is what the
@@ -287,6 +364,14 @@ func (c *Counters) Declare(names ...string) {
 	}
 }
 
+// Set records one of the dataset's report fields.
+func (o *Outcome) Set(field, value string) {
+	if o.Fields == nil {
+		o.Fields = make(map[string]string, 4)
+	}
+	o.Fields[field] = value
+}
+
 // Lookup constructs the named dataset.
 func Lookup(name string) (Dataset, bool) {
 	newDataset, ok := registry[name]
@@ -295,16 +380,6 @@ func Lookup(name string) (Dataset, bool) {
 	}
 	return newDataset(), true
 }
-
-// Names lists the registered datasets in registration order.
-func Names() []string {
-	out := make([]string, len(order))
-	copy(out, order)
-	return out
-}
-
-// Value reads a named counter.
-func (c *Counters) Value(name string) int { return c.values[name] }
 
 // Add adds n to a named counter.
 func (c *Counters) Add(name string, n int) {
@@ -315,32 +390,6 @@ func (c *Counters) Add(name string, n int) {
 // Inc adds one to a named counter, declaring it on first use. A counter
 // that arrives this way is printed only when it is non-zero.
 func (c *Counters) Inc(name string) { c.Add(name, 1) }
-
-// Extras returns the named counters in declaration order.
-func (c *Counters) Extras() []Counter {
-	out := make([]Counter, 0, len(c.names))
-	for _, n := range c.names {
-		out = append(out, Counter{
-			Name:   n,
-			Value:  c.values[n],
-			Always: c.always[n],
-		})
-	}
-	return out
-}
-
-// Only returns the single registered dataset's name, when there is
-// exactly one.
-//
-// It is what lets a command with a single dataset accept no -dataset
-// at all, so a one-dataset importer keeps the command line it would
-// have had without a registry behind it.
-func Only() (string, bool) {
-	if len(order) != 1 {
-		return "", false
-	}
-	return order[0], true
-}
 
 // Register adds a dataset under the given name. A duplicate name panics:
 // it is a programming error, and the alternative is one of the two
@@ -354,6 +403,10 @@ func Register(name string, newDataset func() Dataset) {
 }
 
 // Execute runs one import: open, check, parse, then one row at a time.
+//
+// It expects the dataset connected already: Connect is the command's to
+// call first, with the Transport only the command holds, so a dataset that
+// cannot reach its destination never gets as far as the workbook.
 //
 // The header check comes before any parsing because everything
 // downstream of a moved column is confidently wrong rather than visibly

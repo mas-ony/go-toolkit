@@ -3,7 +3,7 @@
 // A handler returns either a Response for a single result, or a Response
 // whose Data field holds a Paginated value for a list. Nothing here writes
 // to a connection, imports a web framework, or knows what an HTTP status
-// code is: the envelope is a pair of structs and three constructors, and
+// code is: the envelope is a pair of structs and four constructors, and
 // the caller decides how it reaches the wire.
 //
 //	return c.Status(200).JSON(response.OK("", user))
@@ -37,10 +37,11 @@
 //     body's size. The server answers and closes as soon as it has read
 //     past the limit. A client that finished sending by then reads the
 //     413 envelope; one still sending gets a connection reset instead.
-//     Against a 32-byte limit on loopback, 512-byte and 64 KiB bodies got
-//     the envelope and a 4 MiB body got a reset. Uploads are the large
-//     case, so an upload endpoint's clients should expect a transport
-//     error rather than the envelope when they exceed the limit.
+//     Against a 32-byte limit on loopback, a 512-byte or 64 KiB body gets
+//     the envelope and one of several megabytes usually gets a reset,
+//     depending on socket buffers. Uploads are the large case, so an
+//     upload endpoint's clients should expect a transport error rather
+//     than the envelope when they exceed the limit.
 //
 // # Status and Success say the same thing twice, deliberately
 //
@@ -93,8 +94,9 @@
 // # What the tests hold in place
 //
 // The unit suite covers the envelope shape as JSON — which keys appear,
-// which are omitted, and every arm of the trap above — plus NewPaginated's
-// normalisation and its generic instantiation.
+// which are omitted, and every arm of the trap above — plus the
+// normalisation OKList and NewPaginated each perform, and Paginated's
+// generic instantiation.
 //
 // response_integration_test.go covers the universality claim, which no
 // amount of struct testing can reach: it mounts these constructors as a

@@ -1,10 +1,29 @@
-# Service configuration, read by internal/config through the typed sections
-# of github.com/mas-ony/go-toolkit/config.
+# Service configuration, read at startup by internal/config (config.New)
+# into the typed sections of github.com/mas-ony/go-toolkit/config.
+#
+# config.New validates every section in use, then the rules no single
+# section can check (pairings across sections, and fiber.body_limit
+# against the upload size cap), and returns every problem in one error,
+# so a single restart lists everything to fix. Config.Log then writes a
+# "configuration source" line naming the file, noting when it was not
+# found, and one "configuration loaded" line per section with passwords,
+# tokens and secrets masked; a section not in use is shown as
+# <not configured> or <inactive: reason>.
 #
 # Every key can be overridden by an environment variable named after its
 # path, upper-cased with dots as underscores: fiber.limiter.max is
 # FIBER_LIMITER_MAX. An empty variable does not blank a value. A list may
 # be a YAML sequence here and a comma-separated string in the environment.
+# A missing file is tolerated, so the environment alone can configure a
+# deployment; a file that does not parse is refused.
+#
+# database, notification, fiber.auth and fiber.client may be left out.
+# fiber.auth.mode switches between fiber.session and fiber.jwt, and
+# notification.channels switches the channel sections: a switched-on
+# section is validated even when absent, a switched-off one is skipped even
+# when present. Leaving fiber.auth.mode out switches both auth sections
+# off, as leaving notification.channels out switches off both channels.
+# Every other section is always validated.
 #
 # Secrets stay out of this file and come from the environment:
 #   DATABASE_USERNAME, DATABASE_PASSWORD
@@ -14,156 +33,1077 @@
 # Durations always carry a unit (30s, 5m, 8h): a bare number is read as
 # nanoseconds.
 
+# -----------------------------------------------------------------------------
+# app — service identity, runtime environment and bind address
+# -----------------------------------------------------------------------------
 app:
+  # Service name. Required.
+  #
+  # NewFiberConfig joins it with app.version into Fiber's AppName, shown in
+  # the startup banner and in the "configuration loaded" log line. On SQL
+  # Server the database package also sends it as the connection's
+  # "app name", so the service's sessions can be picked out in Activity
+  # Monitor (sys.dm_exec_sessions.program_name). Any character is safe
+  # there: the connection string is built in URL form, which escapes ";"
+  # and reads it back intact.
+  #
+  # It is not the Server response header; see fiber.server_header.
   name: example-service
+
+  # Version string. Required, and quoted so YAML keeps it a string: an
+  # unquoted 1.0 would be read as a number and print as "1".
+  #
+  # AppName is name + " " + version, then "." + a build stamp when the
+  # binary is linked with one:
+  #
+  #   MOD=github.com/mas-ony/go-toolkit/config
+  #   go build -ldflags "-X $MOD.buildTime=$(date -u +%Y%m%d%H%M%S)" .
+  #
+  # giving "example-service 1.0.0.20260805120000". MOD is the toolkit's
+  # config package, not this service's module, and it must be exact: go
+  # build accepts -X for a symbol that does not exist without complaint,
+  # so a wrong path yields a binary with no build stamp and no error.
   version: "1.0.0"
-  env: development          # development | staging | production
-  host: ""                  # empty binds every interface; the socket
-                            # path when fiber.listen.listener_network
-                            # is unix
+
+  # Runtime environment, which chooses the log format and level:
+  #
+  #   development  coloured console output at DEBUG
+  #   staging      JSON at INFO
+  #   production   JSON at INFO, the same logger as staging
+  #
+  # Matched exactly, with no trimming or case folding, so "Production" is
+  # refused at startup. That strictness is deliberate: the logger treats
+  # any unrecognised value as production, so a typo that got through
+  # would silently switch debug logging off. It also sets the floor that
+  # fiber.zerolog.levels is checked against.
+  #
+  # Allowed values: development | staging | production
+  env: development
+
+  # Bind address. Empty binds every interface, the right choice in a
+  # container whose network boundary is enforced outside it; "127.0.0.1"
+  # accepts local connections only, for a service reached through a proxy
+  # on the same host. Write an IPv6 address bare, e.g. "::1": Config.Addr
+  # adds the brackets when it joins the port.
+  #
+  # When fiber.listen.listener_network is unix this is the socket PATH
+  # instead, e.g. "/run/example-service.sock": Config.Addr passes it to
+  # Listen verbatim, with no port. An empty value is refused at startup in
+  # that case rather than failing inside net.Listen.
+  host: ""
+
+  # TCP port, 1 to 65535. Required, even on a unix socket, where it is
+  # never bound.
   port: 3000
-  location: Asia/Jakarta    # IANA zone; also the database driver's zone
-  reports_base_url: ""      # scheme://host[:port] only, no path
-  upload_dir: ./uploads
 
+  # IANA time zone, e.g. "UTC", "Asia/Jakarta", "Europe/Berlin". Required.
+  #
+  # Two independent consumers read it. Startup assigns it to time.Local,
+  # so log timestamps and every time.Time built without an offset land in
+  # this zone. And the database package hands it to the driver
+  # ("timezone=" on SQL Server, Loc on MySQL) as the zone DATE, DATETIME,
+  # DATETIME2 and TIME values are read in; without it SQL Server values
+  # would be read as UTC.
+  #
+  # Changing it therefore shifts how every stored date is read back, not
+  # just the log timestamps, so it has to match the zone the database
+  # writes its local timestamps in.
+  #
+  # Only presence is checked here. time.LoadLocation at startup refuses an
+  # unknown name, as does a host with no time-zone database unless the
+  # binary embeds time/tzdata.
+  location: Asia/Jakarta
+
+# -----------------------------------------------------------------------------
+# database — connection, table naming and connection pool
+# -----------------------------------------------------------------------------
 database:
-  driver: sqlserver         # sqlserver | mssql | mysql
-  host: 127.0.0.1
-  port: 1433
-  catalog: app2026          # the database the connection opens
-  schema: dbo               # required on SQL Server, empty on MySQL
-  username: ""              # DATABASE_USERNAME
-  password: ""              # DATABASE_PASSWORD
-  encrypt: "true"           # disable | false | true | strict; true and
-                            # strict need a certificate the client trusts
-  max_open_conns: 25        # per process: divide by the core count
-                            # before turning on fiber.listen.enable_prefork
-  max_idle_conns: 25        # equal to max_open_conns: a fixed-size pool
-  conn_max_lifetime: 30m
-  conn_max_idle_time: 5m    # below any firewall idle timeout on the path
+  # Driver. mssql and sqlserver select the same SQL Server driver. Case
+  # and surrounding spaces are ignored.
+  #
+  # Allowed values: sqlserver | mssql | mysql
+  driver: sqlserver
 
+  # Server hostname or IP address. Required.
+  #
+  # 127.0.0.1 suits a binary running on the database's own machine. Inside
+  # a container it means the container itself, never the database, so
+  # override it there with DATABASE_HOST: the database container's name on
+  # the shared network, or the host's address.
+  host: 127.0.0.1
+
+  # Server TCP port: 1433 for SQL Server, 3306 for MySQL. Required. Only
+  # zero is refused here; an out-of-range port fails when the pool opens.
+  port: 1433
+
+  # The database the connection opens, called "catalog" to stay
+  # driver-neutral. Required; surrounding spaces are trimmed.
+  #
+  # It also leads every qualified table name:
+  #
+  #   sqlserver / mssql   <catalog>.<schema>.<table>
+  #   mysql               <catalog>.<table>
+  #
+  # Because it always comes first, the repository layer can point a query
+  # at a sibling database (another year, another tenant) by rewriting that
+  # one segment, so this value is the default rather than the only
+  # database reachable. Validation does not check that it exists;
+  # connecting does.
+  catalog: app2026
+
+  # The level between the database and the table.
+  #
+  #   sqlserver / mssql   required; "dbo" unless the migrations ran as a
+  #                       principal with a different default schema
+  #   mysql               must be empty: MySQL has no schema level, and a
+  #                       three-part name is a syntax error
+  #
+  # There is deliberately no default, so a driver switch that leaves this
+  # behind fails at startup naming this key rather than at the first
+  # query. Surrounding spaces are trimmed.
+  schema: dbo
+
+  # Login name and password. Both required. Leave them empty here and
+  # supply DATABASE_USERNAME and DATABASE_PASSWORD from the environment,
+  # so a committed file never carries a working login. Neither is trimmed,
+  # and neither appears in the startup log.
+  #
+  # Any character is safe in the password: the connection string is built
+  # by a constructor that owns the escaping on both drivers, and a string
+  # the driver rejects is reported without the driver's own text, so the
+  # password cannot leak through that error either. The one exception is
+  # a ":" in the username on mysql, which that driver's DSN format cannot
+  # escape; database.New refuses such a username at startup, naming this
+  # key.
+  username: ""
+  password: ""
+
+  # Transport encryption. Required on both drivers; case and surrounding
+  # spaces are ignored.
+  #
+  #   disable  no TLS at all
+  #   false    TLS for the login only; queries and results then travel in
+  #            clear text. SQL Server's own default.
+  #   true     TLS for the whole session, server certificate verified
+  #   strict   TDS 8.0 (SQL Server 2022 and later): TLS before the TDS
+  #            handshake, certificate always verified
+  #
+  # The names are SQL Server's. The database package translates them for
+  # whichever driver is configured:
+  #
+  #   database.encrypt   sqlserver encrypt=   mysql tls=
+  #   disable            disable              false
+  #   false              false                preferred
+  #   true               true                 true
+  #   strict             strict               true
+  #
+  # What the table does not show:
+  #   - "false" is weaker on MySQL. "preferred" is opportunistic and
+  #     unverified, so a server offering no TLS gets a plaintext session.
+  #   - "true" and "strict" are the same on MySQL; they stay distinct so a
+  #     deployment can change engines without editing this key.
+  #   - The verifying values need a server certificate the client already
+  #     trusts, and no key here adds a private CA, so a self-signed or
+  #     private-CA certificate fails to connect on "true" and "strict".
+  #
+  # Other spellings the SQL Server driver would take on its own ("1", "0",
+  # "t", "f") are refused, because the value must also mean something to
+  # MySQL.
+  #
+  # "disable" is defensible only where the database is reachable solely
+  # from a private network segment.
+  #
+  # Allowed values: disable | false | true | strict
+  encrypt: "disable"
+
+  # Most open connections, in use plus idle; this is also the ceiling on
+  # concurrent queries. 0 means unlimited, and an ABSENT key reads as 0,
+  # so always set it; negative values are refused. Too high and the
+  # server's own connection limit becomes the bottleneck; too low and
+  # requests queue inside database/sql with no error, only latency.
+  #
+  # The cap is per process: preforking multiplies it by the worker count
+  # (see fiber.listen.enable_prefork).
+  max_open_conns: 25
+
+  # Idle connections kept for reuse. At most max_open_conns when that is
+  # above 0; negative values are refused. An ABSENT key reads as 0, which
+  # is not database/sql's default of 2 but no idle pool at all: a fresh
+  # connection and login for every query. Equal to max_open_conns, as
+  # here, gives a fixed-size pool that neither grows nor churns.
+  max_idle_conns: 25
+
+  # Longest a connection lives before it is replaced, busy or idle.
+  # Required, and at least 1s. It is what lets a password rotation or a
+  # failover reach a running service, since only a fresh login picks
+  # either up. Keep it well above conn_max_idle_time so idle eviction gets
+  # to act first; nothing checks that ordering.
+  conn_max_lifetime: 30m
+
+  # Longest a connection may sit idle before it is closed. Required, and
+  # at least 1s. Keep it below the shortest idle timeout of any firewall
+  # or load balancer between the service and the database: one that
+  # silently drops an idle connection makes the next query on it fail with
+  # a reset. Cloud defaults are short — Azure Load Balancer drops an idle
+  # flow after 4 minutes, an AWS NAT gateway after 350 seconds.
+  conn_max_idle_time: 3m
+
+# -----------------------------------------------------------------------------
+# notification — which channels send notifications, and how
+# -----------------------------------------------------------------------------
 notification:
-  channels: []              # whatsapp, email, both, or none
+  # Channels in use: whatsapp, email, both, or none. Case and surrounding
+  # spaces are ignored; any other name is refused at startup, since a
+  # misspelled channel would never send and nothing would say so.
+  #
+  # Each channel is configured by the section named after it, below. A
+  # listed channel has its section validated even if the section is
+  # absent; an unlisted one has its section skipped even if present, and
+  # marked inactive in the startup log. Switching a channel off is
+  # therefore one word here, and its section can stay.
+  #
+  # As written the list is empty, so nothing is sent and both sections
+  # below are inactive. An absent key means the same. From the
+  # environment: NOTIFICATION_CHANNELS=whatsapp,email
+  #
+  # Allowed values: [] | [whatsapp] | [email] | [whatsapp, email]
+  channels: []
+
+  # ---------------------------------------------------------------------------
+  # whatsapp — how WhatsApp notifications are sent
+  # ---------------------------------------------------------------------------
+  # Nothing here configures the WhatsApp account: the whatsapp package
+  # pairs a device on its first run and keeps the session in its own
+  # store.
   whatsapp:
-    async: true             # send in the background
-  email:
-    host: smtp.example.go.id
-    port: 587               # 587 with starttls, 465 with implicit
-    tls: starttls           # starttls | implicit | none
-    insecure: false         # true skips certificate checks
-    username: ""            # NOTIFICATION_EMAIL_USERNAME
-    password: ""            # NOTIFICATION_EMAIL_PASSWORD
-    from: "Notifikasi <noreply@example.go.id>"
-    timeout: 30s            # bounds one whole send, attachments included
+    # Whether a send runs on the request that triggered it or in the
+    # background. The same trade applies to email.async.
+    #
+    #   true   the request returns once its record is committed, and the
+    #          send runs in a detached goroutine. Fire-and-forget: a
+    #          failed send is logged but never reaches the response, and a
+    #          send still in flight at shutdown is lost.
+    #   false  the request waits until the send finishes or fails, so
+    #          saving takes at least one provider round trip.
+    #
+    # The service treats delivery as best-effort in both modes (send
+    # errors are logged, never returned), so apart from a send still in
+    # flight at shutdown, true gives up no guarantee that false provides.
+    # The whatsapp package sets no deadline of its own, so the code
+    # starting a background send must give it one. Absent means false.
     async: true
 
-fiber:
-  # Limits and timeouts
-  body_limit: 22020096      # 21 MiB: fileutil.MaxFileBytes (20 MiB) plus
-                            # 1 MiB of multipart envelope; less is refused
-  concurrency: 262144
-  read_buffer_size: 4096
-  write_buffer_size: 4096
-  read_timeout: 60s         # a whole request, upload included
-  write_timeout: 60s
-  idle_timeout: 75s         # above the load balancer's idle timeout
-  max_ranges: 16
+  # ---------------------------------------------------------------------------
+  # email — the SMTP relay outgoing mail is handed to
+  # ---------------------------------------------------------------------------
+  email:
+    # Relay hostname. Required. Under starttls and implicit it is also the
+    # name the relay's certificate must be issued for, so an IP address
+    # works only with a certificate that lists that IP.
+    host: smtp.example.go.id
 
-  # Client IP behind a gateway: trust_proxy needs an allowlist, and
-  # proxy_header needs trust_proxy
-  trust_proxy: false
-  proxy_header: ""          # e.g. X-Forwarded-For
-  enable_ip_validation: false
-  trust_proxy_config:
-    proxies: []             # the gateway's own addresses or CIDRs
-    loopback: false
-    link_local: false
-    private: false
-    unix_socket: false
+    # Relay port, 1 to 65535. Required.
+    #
+    #   587  submission, with tls: starttls
+    #   465  submission, with tls: implicit
+    #   25   relay between servers; internally often with tls: none
+    #
+    # 465 must pair with implicit, and 587 cannot use it; both mismatches
+    # are refused at startup. Left unchecked, the 465 mismatch would hang
+    # every send until the timeout.
+    port: 587
 
-  # Routing
-  request_methods: [GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS]
-  case_sensitive: false
-  strict_routing: false
-  unescape_path: false
-  skip_unmatched_routes: false  # true: unmatched requests skip logging
-  disable_head_auto_register: false
-  get_only: false           # always false; true is refused
+    # How the connection is secured. Required, with no default and nothing
+    # inferred from the port; case and surrounding spaces are ignored.
+    #
+    #   starttls  connect in clear text, then upgrade. Strict: a relay that
+    #             does not offer STARTTLS fails the send rather than
+    #             carrying on in clear text.
+    #   implicit  TLS from the first byte ("SSL/TLS" in mail clients)
+    #   none      never encrypted; only for a relay on the same host or a
+    #             closed network segment. Credentials are refused with it
+    #             unless host is localhost, 127.0.0.1 or ::1.
+    #
+    # Allowed values: starttls | implicit | none
+    tls: starttls
 
-  # Usually left alone
-  server_header: ""         # empty sends no Server header
-  immutable: false
-  stream_request_body: false
-  reduce_memory_usage: false
-  disable_keepalive: false
-  disable_default_date: false
-  disable_default_content_type: false
-  disable_header_normalizing: false
-  disable_pre_parse_multipart_form: false
-  enable_splitting_on_parsers: false
-  pass_locals_to_context: false
-  pass_locals_to_views: false
-  views_layout: ""
-
-  auth:
-    mode: session           # session | jwt; only its section is used
-
-  jwt:
-    secret: ""              # FIBER_JWT_SECRET, openssl rand -hex 32
-    expiry: 8h
-
-  session:
-    absolute_timeout: 8h    # hard ceiling, activity or not
-    idle_timeout: 30m       # at most absolute_timeout
-    cookie_same_site: Lax   # Strict | Lax | None (None needs secure)
-    cookie_secure: true     # false only for plain HTTP off localhost
-    cookie_http_only: true
-    cookie_session_only: true
-    cookie_domain: ""       # empty: the request host
-    cookie_path: /
-
-  client:
-    base_url: ""            # e.g. https://api.example.go.id/api/v1
-    token: ""               # FIBER_CLIENT_TOKEN
-    retries: 2
-    no_retry_methods: [POST]  # [] replays every method, POST included
+    # true skips verification of the relay's certificate. Only for an
+    # internal relay with a self-signed or mismatched certificate; a relay
+    # reachable from outside should fix its certificate instead. Inert
+    # under tls: none, but it takes effect the day tls changes.
     insecure: false
 
+    # SMTP login, sent with PLAIN when the relay offers it and LOGIN
+    # otherwise. Set both or neither: a relay that accepts mail by network
+    # position needs none. Supply them as NOTIFICATION_EMAIL_USERNAME and
+    # NOTIFICATION_EMAIL_PASSWORD. Not trimmed; the startup log shows only
+    # whether they are set.
+    username: ""
+    password: ""
+
+    # Sender of every message: a bare address or "Name <address>".
+    # Required, and must parse as an address. The address is also the
+    # envelope sender, where bounces go. A relay that authenticates often
+    # requires it to be the login's own address or an alias of it, and
+    # may refuse or rewrite anything else.
+    from: "Notifikasi <noreply@example.go.id>"
+
+    # Upper bound on one whole send: connect, TLS, login and upload,
+    # attachments included. Required, and at least 1s. It is the only
+    # bound a background send has, so size it for the largest attachment
+    # over the slowest link.
+    timeout: 30s
+
+    # Background or on-request sending; see notification.whatsapp.async
+    # for the trade. timeout bounds the send in both modes.
+    async: true
+
+# -----------------------------------------------------------------------------
+# fiber — HTTP server settings, then the middleware sections nested in it
+# -----------------------------------------------------------------------------
+fiber:
+  # Largest request body accepted, in bytes; a larger one is answered 413.
+  #
+  # It bounds the whole multipart request, not just the file inside it,
+  # so config.New requires at least fileutil.MaxFileBytes plus 1 MiB of
+  # envelope (boundaries, part headers, other form fields). Keeping this
+  # the looser of the two lets the handler refuse an oversized file with
+  # a message naming the limit, instead of Fiber's generic 413.
+  #
+  # With the default 20 MiB file cap the floor is 22020096 (21 MiB),
+  # exactly the value below, so raising the file cap means raising this
+  # too. A service that changes fileutil.MaxFileBytes does so before
+  # config.New; 0 there removes the per-file cap and leaves a 1 MiB
+  # floor. An absent key reads as 0, which Fiber turns into 4 MiB, and
+  # that 4 MiB is what is held against the floor: refused under the
+  # default file cap, accepted under one of 3 MiB or less.
+  body_limit: 22020096
+
+  # true treats "/Foo" and "/foo" as different routes.
+  case_sensitive: false
+
+  # Most connections served at once. 262144 (256 × 1024) is also what
+  # Fiber uses for 0 or less, so this line states the number rather than
+  # changing it. The real ceiling is usually the file-descriptor limit
+  # (ulimit -n).
+  concurrency: 262144
+
+  # true stops Fiber adding a Content-Type header to responses that set
+  # none. Only for handlers that always set their own.
+  disable_default_content_type: false
+
+  # true drops the Date response header. Saves a little CPU; most clients
+  # and proxies expect it.
+  disable_default_date: false
+
+  # true stops Fiber answering HEAD for every GET route automatically.
+  # HTTP/1.1 requires HEAD support, so set it only when HEAD routes are
+  # registered by hand.
+  disable_head_auto_register: false
+
+  # true leaves header names as received instead of normalising them to
+  # canonical form ("content-type" is not rewritten to "Content-Type").
+  # Keep false: header names would then match only as spelled, which can
+  # stop an inbound X-Request-ID being adopted and leave the requestId
+  # log field empty, silently.
+  disable_header_normalizing: false
+
+  # true closes the connection after every response. For debugging only.
+  disable_keepalive: false
+
+  # true stops Fiber parsing multipart bodies up front. Set it when
+  # handlers parse multipart themselves, e.g. to stream uploads, to avoid
+  # parsing twice.
+  disable_pre_parse_multipart_form: false
+
+  # true makes Fiber validate addresses read from proxy headers. With
+  # proxy_header set on the trusted path, c.IP() then scans the header from
+  # the right and returns the nearest address that is not itself a trusted
+  # proxy; with false it returns the header's raw value, comma list and
+  # all. A gateway that appends to X-Forwarded-For passes on whatever the
+  # client put in front, so with false the client chooses its own "ip" log
+  # field and its own rate-limit key. Set true whenever trust_proxy is on
+  # with a header the gateway appends to. c.IPs() reads X-Forwarded-For
+  # even with trust_proxy off, and this filters its invalid entries too.
+  enable_ip_validation: false
+
+  # true splits comma-separated query, body and header values into slices
+  # while binding ("?foo=a,b" gives foo = [a, b]).
+  enable_splitting_on_parsers: false
+
+  # Must stay false; true is refused at startup. It makes fasthttp reject
+  # every method except GET and HEAD while reading the request, before
+  # routing and before any middleware, so every write route would answer
+  # a well-formed 405 with nothing naming this key, while
+  # enable_print_routes still listed them. Narrowing request_methods to
+  # match does not help: registering a PUT route would then panic. It
+  # suits only a read-only mirror or cache.
+  get_only: false
+
+  # How long a keep-alive connection may sit idle between requests. 0
+  # falls back to read_timeout, and means no limit only if that is 0 too.
+  # Keep it above the idle timeout of any load balancer in front (often
+  # 60s), so the balancer closes idle connections first instead of
+  # reusing one this server has just closed.
+  idle_timeout: 75s
+
+  # true makes values taken from the request (params, query, body) copies
+  # that stay valid after the handler returns, at the cost of Fiber's
+  # zero-allocation path. Needed only when such values are kept by
+  # goroutines that outlive the handler.
+  immutable: false
+
+  # Most sub-ranges parsed from one Range header; requests with more are
+  # rejected. 0 or less means Fiber's default, 16. Range support cannot be
+  # switched off here.
+  max_ranges: 16
+
+  # true copies c.Locals into the request's context.Context, so code that
+  # takes a plain context.Context (services, repositories) can read them.
+  # The practical case is the request id, which the requestid middleware
+  # keeps in c.Locals: with this on, a repository can log it next to a
+  # failed query. Costs one context.WithValue per request.
+  pass_locals_to_context: false
+
+  # true passes c.Locals to the view engine as template variables. Inert
+  # without a view engine, as in a JSON API.
+  pass_locals_to_views: false
+
+  # Header to take the client IP from, e.g. "X-Forwarded-For",
+  # "X-Real-IP" or "CF-Connecting-IP". Read only on the trusted path,
+  # which needs trust_proxy and a matching trust_proxy_config entry; set
+  # while trust_proxy is false, it is refused at startup.
+  proxy_header: ""
+
+  # Per-connection read buffer, in bytes. It also caps the total size of
+  # the request headers, so raise it on "small read buffer" errors (many
+  # cookies, a long Authorization header). 0 means Fiber's default, 4096.
+  read_buffer_size: 4096
+
+  # Longest time to read a whole request, headers and body; 0 means no
+  # limit. It covers upload time, so it has to fit the largest upload
+  # over the slowest client link while still cutting off clients that
+  # send deliberately slowly.
+  read_timeout: 60s
+
+  # true makes fasthttp release per-connection buffers aggressively,
+  # trading CPU for memory. Worth it mainly with many idle keep-alive
+  # connections.
+  reduce_memory_usage: false
+
+  # HTTP methods the router accepts. A request with any other method is
+  # answered 501 Not Implemented before routing.
+  #
+  # The list replaces Fiber's default entirely. That default is GET, HEAD,
+  # POST, PUT, DELETE, CONNECT, OPTIONS, TRACE, PATCH and QUERY, so this
+  # list drops CONNECT, TRACE (a cross-site tracing risk) and QUERY on
+  # purpose. HEAD has to stay. Omitting the key, or an empty list, means
+  # the default.
+  #
+  # Each entry must be a single upper-case method name: one holding a
+  # comma, a space or a lower-case letter is refused at load, since Fiber
+  # upper-cases a route's method before looking it up here. Registering a
+  # route for a method not listed panics at startup ("add: invalid http
+  # method"), so a typo such as GTE for GET stops the service at its first
+  # GET route. A misspelled extra entry is accepted and never matches.
+  # From the environment commas or spaces both work:
+  # FIBER_REQUEST_METHODS=GET,HEAD,POST
+  request_methods:
+    - GET
+    - HEAD
+    - POST
+    - PUT
+    - DELETE
+    - OPTIONS
+    - PATCH
+
+  # Value of the Server response header. Empty sends none, which avoids
+  # advertising the stack. Unrelated to app.name.
+  server_header: ""
+
+  # true answers a request that matches no route with 404 (405 when the
+  # path exists for another method) before any app.Use middleware runs,
+  # so bots and scanners cost almost nothing.
+  #
+  # The price is everything that middleware does. With the recommended
+  # stack (zerolog, requestid, recover and limiter, all registered with
+  # app.Use), an unmatched request is then never logged, gets no request
+  # id and is not counted by the rate limiter: free to hammer and
+  # invisible. Middleware that answers unregistered paths itself (static
+  # files, a catch-all 404 page, a proxy or rewrite) stops working;
+  # without any, the response is the same either way. CORS preflight
+  # requests are exempt.
+  #
+  # Keep false behind a public gateway unless the 404 volume is real and
+  # something upstream (gateway, WAF) keeps the record this would drop.
+  # true is refused while request_methods lists more than 64 methods,
+  # where Fiber abandons this fast path without saying so.
+  skip_unmatched_routes: false
+
+  # true hands the body to the handler as a stream instead of buffering
+  # it whole first. fasthttp then passes on a body larger than body_limit
+  # instead of refusing it, so a streaming handler has to enforce its own
+  # limit.
+  stream_request_body: false
+
+  # true treats "/foo" and "/foo/" as different routes.
+  strict_routing: false
+
+  # Whether to believe X-Forwarded-For, X-Forwarded-Proto,
+  # X-Forwarded-Host and proxy_header. Fiber honours them only for
+  # requests arriving from a peer trust_proxy_config allows:
+  #
+  #   trust_proxy: false                  headers ignored
+  #   true, trust_proxy_config all off    headers ignored all the same
+  #   true, request from a trusted peer   headers honoured
+  #
+  # The middle row is refused at startup: it reads as on and acts as off,
+  # leaving c.IP(), the "ip" log field and the rate limiter's key at the
+  # gateway's address for every client.
+  #
+  # Behind a gateway, set this true and list the gateway below; without
+  # it every client shares one rate-limit quota. With a proxy_header the
+  # gateway appends to, such as X-Forwarded-For, also set
+  # enable_ip_validation, or each client picks its own quota.
+  trust_proxy: false
+
+  # Which peers may set forwarding headers. Ignored while trust_proxy is
+  # false, which is why everything here can stay off.
+  trust_proxy_config:
+    # The gateway's own egress addresses or CIDR ranges, not the
+    # clients', e.g. [10.42.0.7, 10.42.1.0/24]. Prefer this to the class
+    # switches below wherever the gateway's address is stable. From the
+    # environment: FIBER_TRUST_PROXY_CONFIG_PROXIES=10.42.0.7,10.42.1.0/24
+    proxies: []
+
+    # Trust every loopback address (127.0.0.0/8, ::1), for a reverse
+    # proxy on the same host.
+    loopback: false
+
+    # Trust every link-local address (169.254.0.0/16, fe80::/10). Rarely
+    # wanted.
+    link_local: false
+
+    # Trust every private range (10/8, 172.16/12, 192.168/16, fc00::/7).
+    # The quick setting for a gateway on the same cluster network, and the
+    # widest: right only if nothing else on that network can reach this
+    # service directly.
+    private: false
+
+    # Trust requests arriving over a unix socket. Only meaningful when
+    # fiber.listen.listener_network is unix.
+    unix_socket: false
+
+  # true decodes percent-encoded characters in the path before routing,
+  # so "/caf%C3%A9" reaches the route "/café".
+  unescape_path: false
+
+  # Default layout template for the view engine. Inert without one, as in
+  # a JSON API.
+  views_layout: ""
+
+  # Per-connection write buffer, in bytes. Raise it for large responses
+  # or server-sent events. 0 means Fiber's default, 4096.
+  write_buffer_size: 4096
+
+  # Longest time to write a whole response; 0s means no limit, so a
+  # client that stops reading can hold its connection indefinitely. A
+  # positive value, such as read_timeout's 60s, releases it.
+  write_timeout: 60s
+
+  # ---------------------------------------------------------------------------
+  # auth — authentication mode
+  # ---------------------------------------------------------------------------
+  # One key chooses the mechanism for every protected route, and with it
+  # which of fiber.session and fiber.jwt is validated and used; the other
+  # is skipped even when present.
+  #
+  #   session  server-side session: the id travels in a cookie and is
+  #            looked up on every request. For a single-page app served
+  #            from the same domain as the API.
+  #   jwt      stateless HS256-signed bearer token, returned by the login
+  #            response and sent back as "Authorization: Bearer <token>";
+  #            only its signature and expiry are checked, with no lookup.
+  #            For mobile apps, API clients, and frontends on another
+  #            domain. The session middleware is not registered at all.
+  #
+  # Optional. Left out, or empty, it selects no authentication mechanism:
+  # fiber.session and fiber.jwt are both skipped, and preforking is
+  # allowed. Set it for any service with routes to protect. The
+  # environment cannot switch a mode set here off, because an empty
+  # FIBER_AUTH_MODE is not a value: delete the key instead.
+  #
+  # Matched exactly: "Session" or "JWT" is refused, and so is "none".
+  #
+  # Allowed values: session | jwt (leave unset for none)
+  auth:
+    mode: ""
+
+  # ---------------------------------------------------------------------------
+  # jwt — token settings, used only when fiber.auth.mode is jwt
+  # ---------------------------------------------------------------------------
+  jwt:
+    # HMAC-SHA256 signing key, at least 32 bytes. Anyone holding it can
+    # forge a valid token for any user, so it belongs with the database
+    # password: leave it empty here and supply FIBER_JWT_SECRET. Generate
+    # one with: openssl rand -hex 32
+    #
+    # Only the length is checked, not how random it is. Changing it
+    # invalidates every issued token at once, logging every user out.
+    secret: ""
+
+    # How long a token stays valid after it is issued; after that the
+    # client has to log in again. Required, and at least 1s. Shorter is
+    # safer and longer is more convenient; 15m to 24h is the usual range.
+    # Write a unit, e.g. "8h", or "168h" for 7 days.
+    expiry: 24h
+
+  # ---------------------------------------------------------------------------
+  # session — cookie sessions, used only when fiber.auth.mode is session
+  # ---------------------------------------------------------------------------
+  # Sessions live in process memory: a restart logs everyone out, replicas
+  # do not share them, and preforking is refused because each worker
+  # would hold its own store. The cookie is named session_id; the name is
+  # not configurable here.
+  session:
+    # Hard ceiling on a session's life, however active it is. Required,
+    # and at least 1s: zero or a negative value would let a continuously
+    # active session live forever. Must be at least idle_timeout, or the
+    # session middleware panics at startup; config.New refuses that
+    # pairing first.
+    absolute_timeout: 24h
+
+    # Domain attribute of the cookie. Empty means the request host only;
+    # a parent domain such as ".example.go.id" shares the session across
+    # its subdomains.
+    cookie_domain: ""
+
+    # true hides the cookie from page JavaScript (HttpOnly), which blunts
+    # cookie theft through XSS. An ABSENT key reads as false. The browser
+    # attaches the cookie by itself, so true costs nothing unless page
+    # script genuinely has to read it.
+    cookie_http_only: true
+
+    # Path attribute of the cookie. Empty means "/", the whole site; a
+    # sub-path such as "/api" narrows it.
+    cookie_path: ""
+
+    # When the browser sends the cookie on cross-site requests. Required;
+    # case-insensitive.
+    #
+    #   Strict  never cross-site; the tightest, but can break sign-in
+    #           flows that arrive from another site
+    #   Lax     top-level navigations only; the usual choice
+    #   None    always; requires cookie_secure: true
+    #
+    # Anything else is refused, because the middleware would silently
+    # treat a typo as Lax.
+    #
+    # Allowed values: Strict | Lax | None
+    cookie_same_site: Lax
+
+    # true sends the cookie over HTTPS only. Set it true wherever the
+    # service is reached over HTTPS, production above all: this cookie is
+    # the credential for every request, and without Secure the browser
+    # also sends it over plain HTTP. false is for local plain-HTTP work.
+    #
+    # Nothing checks it against app.env, so a production deployment with
+    # false starts without complaint. The one enforced pairing is with
+    # cookie_same_site: None, which requires true.
+    cookie_secure: false
+
+    # true omits Max-Age and Expires, so the browser drops the cookie when
+    # it closes and the user must log in again, even if the server-side
+    # session is still valid. Safer on shared devices; false keeps the
+    # login across browser restarts until a timeout ends it.
+    cookie_session_only: true
+
+    # Inactivity timeout: a session with no request for this long ends.
+    # Required, since zero or a negative value would silently mean the
+    # middleware's own 30m; at least 1s, and at most absolute_timeout.
+    idle_timeout: 30m
+
+  # ---------------------------------------------------------------------------
+  # client — outbound HTTP client
+  # ---------------------------------------------------------------------------
+  # Settings for an outbound client built with httpclient.New. The section
+  # may be left out; once any key of it is supplied, from this file or the
+  # environment, all of it is validated.
+  client:
+    # Root of the far service: scheme, host, optional port and path prefix,
+    # e.g. "https://api.example.go.id/api/v1". Surrounding spaces and a
+    # trailing slash are trimmed. Empty means no client: config.New
+    # accepts that, and httpclient.New refuses it. When set it must use
+    # http or https, name a host, and carry no user info: a credential
+    # goes in token, since this value is logged on every start.
+    base_url: https://api.example.go.id/api/v1
+
+    # true skips verification of the far service's TLS certificate, so any
+    # certificate is accepted, expired or forged alike. Only for a private
+    # CA on an internal network. Inert under an http:// base_url, but it
+    # takes effect the day the URL gains its "s".
+    insecure: false
+
+    # Methods that get exactly one attempt whatever the failure. Three
+    # settings, not two:
+    #
+    #   absent   the client's default, POST alone
+    #   a list   exactly the methods listed
+    #   []       none: every method is replayed, POST included
+    #
+    # Replaying a POST whose first attempt landed writes a second record,
+    # so leave POST in unless the endpoint rejects duplicates. Entries must
+    # be HTTP method names, in any case; a typo is refused, since it would
+    # match nothing and leave that method retried. An empty
+    # FIBER_CLIENT_NO_RETRY_METHODS reads as unset, so from the environment
+    # [] is written as a lone comma: FIBER_CLIENT_NO_RETRY_METHODS=,
+    no_retry_methods:
+      - POST
+
+    # Additional attempts after a transport error or a 429, 500, 502, 503
+    # or 504; any other status gets one attempt. 0 means no retry, as does
+    # an absent key, and negative is refused, since httpclient.New would
+    # quietly run it as 0. Waits between attempts double from 500ms up to
+    # 8s, so 2 retries can add 1.5s to a failing call and 5 can add 15.5s.
+    retries: 2
+
+    # Bearer token, sent as "Authorization: Bearer <token>" on every
+    # request. Optional: a far service that trusts network position needs
+    # none. Supply it as FIBER_CLIENT_TOKEN; the startup log shows only
+    # whether it is set.
+    token: ""
+
+  # ---------------------------------------------------------------------------
+  # limiter — per-client rate limit, applied before every route
+  # ---------------------------------------------------------------------------
+  # Clients are told apart by c.IP(). Behind a gateway without trust_proxy
+  # that is the gateway's address, so every client shares one quota.
+  # Counters live in process memory: a restart resets them, and each
+  # replica or prefork worker counts separately, so the service-wide
+  # ceiling is max times the number of processes. Health and readiness
+  # probes are counted too, so a max low enough for them to reach can
+  # take a replica out of rotation.
   limiter:
-    max: 100
-    expiration: 1m
-    strategy: sliding       # fixed | sliding
-    skip_failed_requests: false
-    skip_successful_requests: false
+    # true omits the rate-limit headers: X-RateLimit-Limit, -Remaining and
+    # -Reset on allowed requests, Retry-After on a 429. That hides the
+    # exact limit from probing clients and takes the back-off signal away
+    # from well-behaved ones.
+    #
+    # Under strategy: sliding it is not only cosmetic: headers on cost a
+    # second read and write of the counter on every request, negligible
+    # while counters are in memory.
     disable_headers: false
+
+    # true writes limiter keys (client IPs) in clear text in the limiter's
+    # own error messages; false masks them. Inert while counters are in
+    # memory, where those errors cannot occur. It matters only once a
+    # shared store is wired in code, and then only for debugging that
+    # store, where the logs may carry client IPs. Unrelated to the headers
+    # above.
     disable_value_redaction: false
-    # Keyed on the client IP: behind a gateway without trust_proxy, every
-    # client shares one quota.
 
+    # Window each quota is counted over. Required, at least 1s, and
+    # counted in whole seconds: 1500ms is a one-second window. A bare 60
+    # is 60 nanoseconds and is refused, where the middleware would
+    # silently swap it for its own 1m.
+    expiration: 1m
+
+    # Requests one client may make per window before getting 429.
+    # Required and positive: the middleware turns 0 or a negative into 5
+    # per window, not "unlimited". The limiter is switched off by not
+    # registering it, never through this key.
+    max: 1000
+
+    # true stops responses with status 400 or above counting against the
+    # quota, so clients are not penalised for failures they did not cause
+    # (5xx).
+    skip_failed_requests: false
+
+    # true stops responses below 400 counting. With skip_failed_requests
+    # false, that limits only failing requests, e.g. brute-force logins
+    # answered 401.
+    #
+    # Both true is refused at startup: every hit would be taken back once
+    # its status is known, leaving a cap on concurrent requests per client
+    # instead of a rate limit.
+    skip_successful_requests: false
+
+    # How hits are counted. Required, and matched exactly: "Fixed" is
+    # refused rather than corrected.
+    #
+    #   fixed    one count per client, discarded when the window ends. A
+    #            client can send max just before a boundary and max again
+    #            just after it: 2 × max within moments, no window
+    #            exceeded.
+    #   sliding  the previous window's count is carried into the current
+    #            one, fading out across it, so that burst is refused and
+    #            the budget returns gradually. Costs a second counter read
+    #            and write per request while headers are on, and keeps
+    #            each client's entry for up to two windows.
+    #
+    # Switching is safe at any time; nothing needs flushing.
+    #
+    # Allowed values: fixed | sliding
+    strategy: sliding
+
+  # ---------------------------------------------------------------------------
+  # listen — listener, TLS, shutdown and prefork
+  # ---------------------------------------------------------------------------
   listen:
-    listener_network: tcp4  # tcp | tcp4 | tcp6 | unix
-    shutdown_timeout: 10s   # below the orchestrator's kill grace period
-    disable_startup_message: false  # true in production
-    enable_print_routes: false
-    enable_prefork: false   # not with session auth; see max_open_conns
-    prefork_recover_interval: 1s
-    prefork_recover_threshold: 0      # 0: max(1, GOMAXPROCS/2)
-    prefork_shutdown_grace_period: 15s  # at least shutdown_timeout
-    cert_file: ""           # set both to serve TLS directly
-    cert_key_file: ""
-    cert_client_file: ""    # CA for client certificates (mTLS)
-    tls_min_version: 771    # 771 is TLS 1.2, 772 is TLS 1.3
-    unix_socket_file_mode: 0770  # keep the leading zero
+    # CA certificate used to verify client certificates (mutual TLS).
+    # Empty accepts clients without one. Meaningful only together with
+    # cert_file and cert_key_file; on its own it does nothing, and is not
+    # refused.
+    cert_client_file: ""
 
+    # Server certificate and private key, PEM. Both empty serves plain
+    # HTTP, the usual case behind a TLS-terminating gateway; setting only
+    # one is refused at startup, since Fiber would otherwise serve plain
+    # HTTP without saying so. Only the pairing is checked here; the files
+    # are read when the listener starts. Keep the key's path out of
+    # anything public.
+    cert_file: ""
+    cert_key_file: ""
+
+    # true suppresses Fiber's startup banner and its "listening on" line.
+    # The banner goes to stdout unstructured, which a JSON log pipeline
+    # cannot parse, and prints the app name, version, PID and bind address
+    # outside any log redaction. Keep true wherever logs are shipped;
+    # false is handy in local development. AppName appears in the
+    # "configuration loaded" log line either way.
+    disable_startup_message: false
+
+    # true forks one worker process per CPU core, sharing the port through
+    # SO_REUSEPORT. Each worker is a full copy of the service, so:
+    #   - It is refused while fiber.auth.mode is session: every worker has
+    #     its own in-memory session store, so a request landing on another
+    #     worker arrives logged out.
+    #   - database.max_open_conns applies per worker: 25 on an 8-core host
+    #     allows 200 connections. Divide it by the core count first.
+    #   - Rate-limit counters are per worker too, multiplying the quota.
+    #   - listener_network must be tcp4 or tcp6.
+    #   - systemd or Docker must send SIGTERM to the whole process group,
+    #     or the workers are killed outright while the parent drains.
+    #   - The prefork_* keys below need setting in the same change.
+    enable_prefork: false
+
+    # true prints every registered route at startup. Handy in development,
+    # noise in production.
+    enable_print_routes: false
+
+    # Listener network. Empty means Fiber's default, tcp4.
+    #
+    #   tcp4  IPv4 only
+    #   tcp6  IPv6 only
+    #   tcp   dual-stack, for a service that must be reachable over IPv6
+    #   unix  unix socket; app.host becomes the socket path
+    #
+    # Matched exactly: "UNIX" is refused rather than treated as tcp.
+    #
+    # Allowed values: tcp | tcp4 | tcp6 | unix
+    listener_network: tcp4
+
+    # How long in-flight requests may finish once graceful shutdown
+    # starts. Required. Fiber installs no signal handler: the service
+    # turns SIGTERM or SIGINT into the cancellation that starts the
+    # drain, and this key does nothing if it does not.
+    #
+    # 0 is refused, because here it would mean waiting forever rather than
+    # Fiber's 10s default, and so is anything under 1s: a bare number is
+    # nanoseconds and would make shutdown instant. Size it above the
+    # slowest request (usually an upload) and below the orchestrator's kill
+    # deadline (30s by default on Kubernetes).
+    shutdown_timeout: 10s
+
+    # Oldest TLS version accepted, as a number: 771 is TLS 1.2, 772 is TLS
+    # 1.3, and 0 means Fiber's default, TLS 1.2. Anything else is refused
+    # at startup, since Fiber would panic on it; that includes 769 (TLS
+    # 1.0) and 770 (TLS 1.1). Hex such as 0x0303 also parses, but error
+    # messages print decimal, so decimal is kept here. Used only when this
+    # server terminates TLS itself.
+    tls_min_version: 771
+
+    # Permissions of the unix socket file. Used only when listener_network
+    # is unix; set here so switching to a socket needs no second change.
+    #
+    # Write it in octal, with the leading zero. 0770 gives the socket's
+    # owner and group full access and everyone else none, which suits a
+    # reverse proxy running in the owner's group. 0 means Fiber's
+    # default, also 0770. Anything above 0777 is refused, which catches a
+    # bare 770: that is decimal and would leave the socket at mode 0402,
+    # where only accounts outside its owner and group could connect.
+    #
+    # A mistyped digit such as 0778 is caught in this file but not from
+    # the environment, where it silently becomes the default.
+    unix_socket_file_mode: 0770
+
+    # Delay before the prefork master respawns a crashed worker, applied
+    # per worker. Used only when enable_prefork is true. 0, Fiber's
+    # default, respawns at once, so a worker that crashes during startup
+    # burns the whole restart budget in milliseconds; set something like
+    # 1s when turning prefork on. Negative values are refused.
+    prefork_recover_interval: 1s
+
+    # How many worker exits the master tolerates before it exits with an
+    # error. Used only when enable_prefork is true. Every exit counts, a
+    # clean one as much as a crash; the count is lifetime and never
+    # resets, and the master gives up once it EXCEEDS this value: 1
+    # restarts a worker once and gives up on the second exit. 0 means
+    # Fiber's default, max(1, GOMAXPROCS/2). Under an orchestrator a small
+    # number is better, so the platform restarts the container; a large
+    # one keeps a crash loop out of sight. Negative values are refused.
+    prefork_recover_threshold: 0
+
+    # How long the prefork master waits after sending SIGTERM to its
+    # workers before killing the rest, which it does when its own loop
+    # ends: once worker exits pass prefork_recover_threshold, or when a
+    # respawn fails. Used only when enable_prefork is true.
+    #
+    # This is the master's deadline; shutdown_timeout is each worker's
+    # own. With prefork on it must be at least shutdown_timeout, or
+    # workers are killed while still draining, so startup refuses a
+    # shorter value. 0 means fasthttp's 5s, which is below the 10s above
+    # and so is refused too. Negative values are refused. Ignored on
+    # Windows, where workers are killed outright.
+    prefork_shutdown_grace_period: 15s
+
+  # ---------------------------------------------------------------------------
+  # recover — panic recovery in handlers
+  # ---------------------------------------------------------------------------
   recover:
+    # Whether a recovered panic is logged with its stack trace. Panics are
+    # caught and answered 500 either way. With false, the request's log
+    # line and the error handler's line still appear, but nothing records
+    # WHERE the panic happened. true costs one stack capture, a few KB of
+    # log, per panic, on a path that should never run.
     enable_stack_trace: true
 
+  # ---------------------------------------------------------------------------
+  # requestid — per-request correlation id
+  # ---------------------------------------------------------------------------
   requestid:
-    header: X-Request-ID    # the access log reads only this name
+    # Header carrying the id, in both directions. Required, and it must be
+    # a valid header name: letters, digits and !#$%&'*+-.^_`|~ only.
+    #
+    # An inbound id in this header is adopted if it is printable ASCII;
+    # otherwise one is generated: 43 characters of base64url, not a UUID.
+    # Behind a gateway that stamps ids this ties both hops together;
+    # exposed directly, it lets a client choose the id that appears in the
+    # logs. The id is sent back on every response and logged with every
+    # request.
+    #
+    # It must be exactly X-Request-ID while requestId is in
+    # fiber.zerolog.fields: the access log reads that fixed header name,
+    # so a renamed header would log the id empty. Renaming it means taking
+    # requestId out of that list in the same change. Casing counts too: a
+    # re-cased name works only while fiber.disable_header_normalizing is
+    # false, so startup refuses it rather than depend on that key.
+    header: X-Request-ID
 
+  # ---------------------------------------------------------------------------
+  # zerolog — structured request log, one line per request
+  # ---------------------------------------------------------------------------
   zerolog:
-    fields: [error, status, url, method, ip, latency, requestId]
+    # Fields on each request line, in this order. Required and non-empty;
+    # both are refused because the middleware would silently log its own
+    # default list for an absent key, and no fields at all for an empty
+    # one. Unknown names are ignored, so a typo drops a field without an
+    # error.
+    #
+    # Available fields (gofiber/contrib/v3/zerolog):
+    #   error          handler error, only when there is one
+    #   status         response status code
+    #   url            request target as received: path and query
+    #                  string, no scheme or host; a query string can
+    #                  carry tokens or personal data
+    #   path           request path without query string
+    #   route          matched route pattern, e.g. /api/users/:id
+    #   method         request method
+    #   ip             client IP: the proxy header on the trusted path
+    #                  (see fiber.trust_proxy and enable_ip_validation),
+    #                  otherwise the socket peer
+    #   ips            raw X-Forwarded-For, not gated on trust_proxy, so
+    #                  whatever the client sent
+    #   host           Host header without the port; X-Forwarded-Host
+    #                  on the trusted path (see fiber.trust_proxy)
+    #   port           the CLIENT's port, not the server's; "" on a unix
+    #                  socket
+    #   protocol       HTTP version from the request line, e.g. HTTP/1.1;
+    #                  not the scheme
+    #   referer, ua    Referer and User-Agent headers
+    #   latency        time taken to handle the request
+    #   requestId      id from the X-Request-ID response header; always
+    #                  present, "" when there is none
+    #   queryParams    query-string parameters
+    #   bytesReceived  request body size
+    #   bytesSent      response body size
+    #   body           request body; may carry credentials or personal
+    #                  data
+    #   resBody        response body; doubles peak memory on large ones
+    #   reqHeaders     every request header, credential headers masked
+    #   resHeaders     every response header, Set-Cookie masked
+    #   pid            process id
+    #
+    # The header fields mask only nine well-known names (authorization,
+    # proxy-authorization, cookie, set-cookie, location, x-api-key,
+    # x-auth-token, x-csrf-token, x-xsrf-token); a token in any other
+    # header is logged verbatim, and body and resBody are not masked at
+    # all. Keep all four out of production unless the log pipeline scrubs
+    # them.
+    #
+    # The list below records what was asked, what happened, how long it
+    # took, who asked, and which request it was.
+    fields:
+      - error
+      - status
+      - url
+      - method
+      - ip
+      - latency
+      - requestId
+
+    # true renames the seven camelCase fields (resBody, queryParams,
+    # bytesReceived, bytesSent, requestId, reqHeaders, resHeaders) to
+    # snake_case in the output. With the list above, that turns requestId
+    # into request_id and nothing else. The list itself is always written
+    # in camelCase. error cannot be renamed.
+    #
+    # The application's error handler and stack-trace handler follow it
+    # when they take the field name from cfg.Zerolog.RequestIDField(), as
+    # they should; so should any other code that logs the id, rather than
+    # a literal "requestId".
     fields_snake_case: false
+
+    # true nests reqHeaders and resHeaders under their own keys instead of
+    # one top-level key per header. Inert with the list above, which has
+    # neither.
     wrap_headers: false
-    messages: ["Server error", "Client error", "Success"]
-    levels: [error, warn, info]   # nothing below info outside development
+
+    # Message text of each line, by response class: status 500 and above,
+    # 400 and above, everything else. Optional; absent means these same
+    # three. When present it needs exactly three non-blank entries.
+    #
+    # Saved searches, dashboards and alerts that match this text break
+    # silently when it changes. From the environment use commas, since the
+    # entries contain spaces:
+    #   FIBER_ZEROLOG_MESSAGES="Server error,Client error,Success"
+    messages:
+      - Server error
+      - Client error
+      - Success
+
+    # Log level of each line, by the same three classes. Optional; absent
+    # means error, warn, info. When present it needs exactly three of
+    # trace, debug, info, warn and error, in any case.
+    #
+    # fatal and panic are refused because the first response in that
+    # class would stop the process; disabled, an empty entry and bare
+    # numbers because the class would silently stop being logged.
+    # config.New also refuses any level below what the logger writes for
+    # app.env (debug in development, info elsewhere), since those lines
+    # would be dropped: [error, warn, debug] passes in development and
+    # fails in production.
+    levels:
+      - error
+      - warn
+      - info

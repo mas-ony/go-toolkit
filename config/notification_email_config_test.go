@@ -1,6 +1,13 @@
 package config
 
 // Tests for notification_email_config.go.
+//
+// What the section promises: every required key reported by name; a port
+// in range; a TLS mode from the allowlist, held to the two ports whose
+// mode is fixed; a sender that parses as an address; credentials set as a
+// pair, and sent in clear text to loopback alone; a timeout of at least a
+// second; and a log line that says whether credentials are set without
+// printing either of them.
 
 import (
 	"strings"
@@ -10,6 +17,9 @@ import (
 	"github.com/spf13/viper"
 )
 
+// emailBase is a configuration the email section accepts: a submission
+// relay on 587 with STARTTLS and no login. Each rule case changes it one
+// key at a time.
 var emailBase = map[string]any{
 	"notification.email.host":    "smtp.example.com",
 	"notification.email.port":    587,
@@ -18,8 +28,14 @@ var emailBase = map[string]any{
 	"notification.email.timeout": "30s",
 }
 
+// buildEmail adapts NewEmailConfig to the constructor shape runRules
+// takes.
 func buildEmail(v *viper.Viper) SectionConfig { return NewEmailConfig(v) }
 
+// TestEmailValidate holds the section's rules, each beside the value that
+// satisfies it: the required keys, the port range, the TLS modes and the
+// two ports whose mode is fixed, the sender's shape, the credential pair,
+// clear-text credentials only over loopback, and the timeout floor.
 func TestEmailValidate(t *testing.T) {
 	t.Parallel()
 	runRules(t, emailBase, buildEmail, []ruleCase{
@@ -29,6 +45,8 @@ func TestEmailValidate(t *testing.T) {
 			"notification.email.port": nil}, "notification.email.port"},
 		{"a port out of range", map[string]any{
 			"notification.email.port": 70000}, "between 1 and 65535"},
+		{"a negative port", map[string]any{
+			"notification.email.port": -25}, "between 1 and 65535"},
 		{"no TLS mode", map[string]any{
 			"notification.email.tls": nil},
 			"notification.email.tls is required"},
@@ -79,6 +97,15 @@ func TestEmailValidate(t *testing.T) {
 			"notification.email.tls":      "none",
 			"notification.email.username": "app",
 			"notification.email.password": "s3cret"}, ""},
+		// Loopback is matched exactly, as the send path matches it, so a
+		// capitalised spelling is refused though it reaches the same
+		// interface.
+		{"credentials in clear text to LOCALHOST", map[string]any{
+			"notification.email.host":     "LOCALHOST",
+			"notification.email.port":     25,
+			"notification.email.tls":      "none",
+			"notification.email.username": "app",
+			"notification.email.password": "s3cret"}, "clear text"},
 		{"no timeout", map[string]any{
 			"notification.email.timeout": nil},
 			"notification.email.timeout is required"},

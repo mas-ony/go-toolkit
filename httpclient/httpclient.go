@@ -7,60 +7,14 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/gofiber/fiber/v3/client"
-	"github.com/rs/zerolog"
-
 	"github.com/mas-ony/go-toolkit/config"
-)
-
-// Backoff between attempts: doubling from the first value, never past
-// the second. The cap matters more than the curve, since waiting
-// minutes between attempts turns a transient blip into an apparent
-// hang. No jitter is applied, so callers that fail together retry
-// together.
-//
-// maxBackoffShift bounds the doubling itself rather than only its
-// result. firstBackoff << n overflows int64 for a large enough n, and a
-// negative or zero duration makes time.After fire immediately, so a
-// caller that set Retries high would get a hot retry loop instead of the
-// cap above. Five doublings already carry firstBackoff past maxBackoff,
-// so clamping there shortens no wait the cap would have left alone.
-const (
-	firstBackoff    = 500 * time.Millisecond
-	maxBackoff      = 8 * time.Second
-	maxBackoffShift = 5
-)
-
-// maxErrorBody bounds how much of a non-2xx body is copied out of the
-// response, not how much is read. The transport buffers the whole thing
-// before send sees any of it, so nothing here keeps a pathological body
-// from arriving; what the cap rules out is carrying it past resp.Close()
-// and holding it for the length of the error path. One mebibyte is far
-// more than an envelope or a proxy's error page needs, and the message a
-// caller sees is shorter still: see maxMessageRunes.
-const maxErrorBody = 1 << 20
-
-// maxMessageRunes bounds the message carried on an Error, whether it came
-// from the envelope or from a body that is not one. A message cut here
-// gains an ellipsis, so the cap is on the text and not on the length of
-// the result. See messageFrom.
-const maxMessageRunes = 200
-
-// Sentinel errors for the three statuses a caller is likely to branch
-// on rather than merely report. Error.Unwrap reaches them, so errors.Is
-// works on anything Do returns.
-//
-// What each one means is the caller's to document: a 404 from one
-// endpoint is a stale id and from another a missing row, and only the
-// caller knows which endpoint it just addressed.
-var (
-	ErrNotFound      = errors.New("not found")
-	ErrConflict      = errors.New("conflict")
-	ErrUnprocessable = errors.New("unprocessable")
+	"github.com/rs/zerolog"
 )
 
 // Envelope is the success/message/data shape the service answers in.
@@ -98,7 +52,8 @@ type Envelope[T any] struct {
 // absolute URL that URL built rather than a bare path. It is rendered
 // verbatim in Error, and Do's retry log line carries the same value at
 // debug level, so a caller that puts a credential in a query parameter
-// puts it in both places.
+// puts it in both places. A credential in the base's userinfo cannot get
+// there: parseBase refuses one.
 type Error struct {
 	Status int
 	Method string
@@ -111,15 +66,16 @@ type Error struct {
 // trimmed, no headers beyond the default Accept, and nothing logged.
 //
 // Each is absent from the fiber.client.* section for its own reason, and
-// NewClientConfig carries the argument in full. In short: a header map is
-// a shape the key-per-leaf config tests cannot express and the
+// NewClientConfig carries the argument in full. In short: a header map is a
+// shape Viper flattens into keys no constructor can list in advance, and the
 // environment cannot carry at all; a route prefix is a fact about the far
-// service's routes rather than a deployment setting, so it belongs beside
-// the constant the paths are built from; and a logger is not a value any
-// YAML could hold.
+// service's routes rather than a deployment setting, so it belongs beside the
+// constant the paths are built from; and a logger is not a value any YAML
+// could hold.
 type Options struct {
-	// TrimPathSuffix is stripped from the end of the configured base
-	// URL's path when present, e.g. "/api/v1". Pasting a URL out of a
+	// TrimPathSuffix is stripped from the end of the base URL's path
+	// when present, e.g. "/api/v1", both for the configured base and
+	// for any base passed to WithBaseURL. Pasting a URL out of a
 	// browser is the obvious thing to do, and silently doubling the
 	// prefix produces 404s that look like a missing route rather than a
 	// bad setting. A trailing slash on it is tolerated.
@@ -140,20 +96,135 @@ type Options struct {
 	Log zerolog.Logger
 }
 
-// Client is an HTTP client bound to one service.
+// Client is an HTTP client bound to one service at one base URL.
+// WithBaseURL derives a client for another base that shares this one's
+// transport.
 //
-// It is safe for concurrent use. Nothing on it is written after New
-// returns, and each request is taken fresh off the transport, so one
-// client is meant to be shared rather than built per call. Building one
-// per call would also throw away the connection pool behind it.
+// It is safe for concurrent use. Nothing on it is written after New or
+// WithBaseURL returns, and each request is taken fresh off the
+// transport, so one client is meant to be shared rather than built per
+// call. Building one per call would also throw away the connection pool
+// behind it.
 type Client struct {
 	base *url.URL
 	hc   *client.Client
+
+	// suffix is Options.TrimPathSuffix as New was given it, kept so
+	// that WithBaseURL trims a base the way New trimmed the first.
+	suffix string
 
 	retries int
 	noRetry map[string]bool
 
 	log zerolog.Logger
+}
+
+// maxErrorBody bounds how much of a non-2xx body is copied out of the
+// response, not how much is read. The transport buffers the whole thing
+// before send sees any of it, so nothing here keeps a pathological body
+// from arriving; what the cap rules out is carrying it past resp.Close()
+// and holding it for the length of the error path. One mebibyte is far
+// more than an envelope or a proxy's error page needs, and the message a
+// caller sees is shorter still: see maxMessageRunes.
+const maxErrorBody = 1 << 20
+
+// maxMessageRunes bounds the message carried on an Error, whether it came
+// from the envelope or from a body that is not one. A message cut here
+// gains an ellipsis, so the cap is on the text and not on the length of
+// the result. See messageFrom.
+const maxMessageRunes = 200
+
+// Backoff between attempts: doubling from the first value, never past
+// the second. The cap matters more than the curve, since waiting
+// minutes between attempts turns a transient blip into an apparent
+// hang. No jitter is applied, so callers that fail together retry
+// together.
+//
+// maxBackoffShift bounds the doubling itself rather than only its
+// result. firstBackoff << n overflows int64 for a large enough n, and a
+// negative or zero duration makes time.After fire immediately, so a
+// caller that set Retries high would get a hot retry loop instead of the
+// cap above. Five doublings already carry firstBackoff past maxBackoff,
+// so clamping there shortens no wait the cap would have left alone.
+const (
+	firstBackoff    = 500 * time.Millisecond
+	maxBackoff      = 8 * time.Second
+	maxBackoffShift = 5
+)
+
+// quotedFragment matches one double-quoted Go string literal, escaped
+// characters included. That is the form strconv.Quote and the %q verb
+// produce, and the form in which url.Parse repeats part of its input inside
+// the cause it reports.
+var quotedFragment = regexp.MustCompile(`"(?:[^"\\]|\\.)*"`)
+
+// Sentinel errors for the three statuses a caller is likely to branch
+// on rather than merely report. Error.Unwrap reaches them, so errors.Is
+// works on anything Do returns.
+//
+// What each one means is the caller's to document: a 404 from one
+// endpoint is a stale id and from another a missing row, and only the
+// caller knows which endpoint it just addressed.
+var (
+	ErrNotFound      = errors.New("not found")
+	ErrConflict      = errors.New("conflict")
+	ErrUnprocessable = errors.New("unprocessable")
+)
+
+// retryableStatus reports whether a status is worth another attempt.
+func retryableStatus(code int) bool {
+	switch code {
+	case fiber.StatusTooManyRequests,
+		fiber.StatusInternalServerError,
+		fiber.StatusBadGateway,
+		fiber.StatusServiceUnavailable,
+		fiber.StatusGatewayTimeout:
+		return true
+	}
+	return false
+}
+
+// redactUserinfo returns raw with any userinfo replaced by "***", so a
+// base URL can be quoted in an error without the credential it may carry:
+// "https://u:p@host/x" becomes "https://***@host/x".
+//
+// It works on the string rather than on a parsed *url.URL because it is
+// needed most where url.Parse has FAILED, and a password with a space in
+// it is enough to get there. The LAST "@" is taken to end the userinfo,
+// since a password may contain "@", "/" or "?" of its own. A URL whose
+// path or query happens to hold an "@" therefore has everything before it
+// masked, host included, which costs a less readable message rather than a
+// password in the log. The config package masks fiber.client.base_url with
+// a helper of the same shape.
+func redactUserinfo(raw string) string {
+	at := strings.LastIndex(raw, "@")
+	if at < 0 {
+		return raw
+	}
+	prefix := ""
+	if i := strings.Index(raw[:at], "://"); i >= 0 {
+		prefix = raw[:i+len("://")]
+	}
+	return prefix + "***" + raw[at:]
+}
+
+// parseCause returns what url.Parse objected to, without any of the input
+// it objected to.
+//
+// The *url.Error carries the whole raw URL, userinfo included, so its own
+// message is never used. The cause it wraps names the problem, but several
+// causes quote a fragment of the input too, and the fragment can be the
+// credential: a "/", "?" or "#" inside a password ends the authority early,
+// so for "https://u:secret/x@host" the host is "u:secret" and the cause
+// reads `invalid port ":secret" after host`. Every quoted fragment is
+// therefore masked, which keeps the shape of the message and loses what it
+// quoted. The config package guards fiber.client.base_url the same way.
+func parseCause(err error) error {
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		err = ue.Err
+	}
+	return errors.New(quotedFragment.ReplaceAllString(err.Error(), `"***"`))
 }
 
 // contextErr reports a cancelled or expired context as an error that
@@ -178,17 +249,19 @@ func attempts(n int) string {
 	return fmt.Sprintf("%d attempts", n)
 }
 
-// retryableStatus reports whether a status is worth another attempt.
-func retryableStatus(code int) bool {
-	switch code {
-	case fiber.StatusTooManyRequests,
-		fiber.StatusInternalServerError,
-		fiber.StatusBadGateway,
-		fiber.StatusServiceUnavailable,
-		fiber.StatusGatewayTimeout:
-		return true
+// backoff is the wait before the given attempt, counting the first retry
+// as attempt 1: firstBackoff, doubled once for every retry before it, and
+// never more than maxBackoff. The shift is clamped before it is applied,
+// which is what keeps a long retry budget from overflowing into a zero or
+// negative wait; see maxBackoffShift. An attempt below 1 waits
+// firstBackoff rather than shifting by a negative count, which panics.
+func backoff(attempt int) time.Duration {
+	shift := min(max(attempt-1, 0), maxBackoffShift)
+	wait := firstBackoff << shift
+	if wait > maxBackoff {
+		wait = maxBackoff
 	}
-	return false
+	return wait
 }
 
 // condense folds a message onto one line and caps its length.
@@ -208,11 +281,11 @@ func retryableStatus(code int) bool {
 // the cap. The fold before it is not: strings.Fields walks the whole
 // body and allocates a slice header per token, so maxErrorBody is what
 // sets the peak here. A body that is not text at all still has to leave
-// here as something a JSON log line can carry, and it returns
-// the string untouched when there is nothing to repair. It replaces a
-// run of invalid bytes with one character rather than one apiece, so a
-// binary body reads as a mark where the text stopped making sense
-// instead of as a wall of them.
+// here as something a JSON log line can carry, which is what ToValidUTF8
+// is for; it returns the string untouched when there is nothing to
+// repair. It replaces a run of invalid bytes with one character rather
+// than one apiece, so a binary body reads as a mark where the text stopped
+// making sense instead of as a wall of them.
 func condense(s string) string {
 	s = strings.Join(strings.Fields(s), " ")
 	n := 0
@@ -251,6 +324,73 @@ func messageFrom(payload []byte) string {
 		}
 	}
 	return condense(string(payload))
+}
+
+// parseBase checks a base URL and takes suffix off the end of its path.
+// New and WithBaseURL both go through it, so a base that arrives at run
+// time passes exactly the checks one read from configuration does.
+//
+// The errors name no key and no flag, for the reason New gives. A base
+// passed to WithBaseURL may come from a table or a request as easily as
+// from config.yaml, and only the caller knows which.
+//
+// No error quotes a credential. A base carrying userinfo is refused, and
+// every message quotes the base with any userinfo masked, including the
+// one for a base url.Parse cannot read.
+func parseBase(raw, suffix string) (*url.URL, error) {
+	trimmed := strings.TrimRight(strings.TrimSpace(raw), "/")
+	if trimmed == "" {
+		return nil, errors.New("base URL is required")
+	}
+	shown := redactUserinfo(raw)
+	u, err := url.Parse(trimmed)
+	if err != nil {
+		// url.Parse copies its whole input into the error it returns, and
+		// the cause it wraps can quote the password as well; parseCause
+		// keeps the cause and masks what it quotes.
+		return nil, fmt.Errorf("invalid base URL %q: %w", shown,
+			parseCause(err))
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return nil, fmt.Errorf(
+			"base URL must start with http:// or https:// (got %q)",
+			shown)
+	}
+	// A scheme on its own clears the check above. TrimRight takes both
+	// slashes off "https://", leaving "https:", which parses as a
+	// scheme with an empty host and an empty path. URL then builds
+	// "https:///items", and every request fails in the transport with
+	// a message that names neither the setting nor the reason.
+	if u.Host == "" {
+		return nil, fmt.Errorf("base URL names no host (got %q)", shown)
+	}
+	// Refused rather than sent. Every URL built on this base carries the
+	// userinfo, and Error, the retry log line and a cancellation each
+	// quote that URL in full, so a password here reaches the logs on the
+	// first failure. A credential belongs in the section's token or in
+	// Options.Headers, neither of which is ever printed.
+	if u.User != nil {
+		return nil, fmt.Errorf("base URL must not carry userinfo (got %q): "+
+			"every URL built on it is quoted in errors and logs, so send "+
+			"the credential as the token or through Options.Headers",
+			shown)
+	}
+
+	// The suffix comes off the parsed path rather than the raw string,
+	// so at worst it shortens the path: trimming the string would let a
+	// suffix that also matches the tail of the host eat part of the
+	// host. Trailing slashes come off both sides because "/api/v1/" and
+	// "/api/v1" name the same prefix, but only the second one matches a
+	// path that has already lost its slash, so leaving them on would
+	// strip nothing and produce exactly the doubled prefix
+	// Options.TrimPathSuffix exists to prevent.
+	suffix = strings.TrimRight(strings.TrimSpace(suffix), "/")
+	if suffix != "" {
+		u.Path = strings.TrimRight(
+			strings.TrimSuffix(u.Path, suffix), "/")
+		u.RawPath = ""
+	}
+	return u, nil
 }
 
 // send makes one attempt and hands back the status and a copy of the
@@ -308,10 +448,10 @@ func (c *Client) send(
 // cfg is the fiber.client.* section; opt carries the three settings that
 // section cannot hold, and its zero value is usable.
 //
-// The errors below name no key and no flag, because the same cfg can
-// arrive from config.yaml, from the environment, or from a struct literal
-// a command filled out of its own flags. A caller that knows which should
-// wrap them.
+// The errors it returns name no key and no flag, because the same cfg
+// can arrive from config.yaml, from the environment, or from a struct
+// literal a command filled out of its own flags. A caller that knows
+// which should wrap them.
 //
 // ClientConfig.Validate deliberately lets an EMPTY base URL through: a
 // deployment that calls nothing is a correct configuration, and refusing
@@ -322,44 +462,9 @@ func New(cfg *config.ClientConfig, opt Options) (*Client, error) {
 		return nil, errors.New("client config was not initialised")
 	}
 
-	raw := strings.TrimRight(strings.TrimSpace(cfg.BaseURL), "/")
-	if raw == "" {
-		return nil, errors.New("base URL is required")
-	}
-	u, err := url.Parse(raw)
+	u, err := parseBase(cfg.BaseURL, opt.TrimPathSuffix)
 	if err != nil {
-		return nil, fmt.Errorf(
-			"invalid base URL %q: %w", cfg.BaseURL, err)
-	}
-	if u.Scheme != "http" && u.Scheme != "https" {
-		return nil, fmt.Errorf(
-			"base URL must start with http:// or https:// (got %q)",
-			cfg.BaseURL)
-	}
-	// A scheme on its own clears the check above. TrimRight takes both
-	// slashes off "https://", leaving "https:", which parses as a
-	// scheme with an empty host and an empty path. URL then builds
-	// "https:///items", and every request fails in the transport with
-	// a message that names neither the setting nor the reason.
-	if u.Host == "" {
-		return nil, fmt.Errorf(
-			"base URL names no host (got %q)", cfg.BaseURL)
-	}
-
-	// The suffix comes off the parsed path rather than the raw string,
-	// so at worst it shortens the path: trimming the string would let a
-	// suffix that also matches the tail of the host eat part of the
-	// host. Trailing slashes come off both sides because "/api/v1/" and
-	// "/api/v1" name the same prefix, but only the second one matches a
-	// path that has already lost its slash, so leaving them on would
-	// strip nothing and produce exactly the doubled prefix this field
-	// exists to prevent.
-	suffix := strings.TrimRight(
-		strings.TrimSpace(opt.TrimPathSuffix), "/")
-	if suffix != "" {
-		u.Path = strings.TrimRight(
-			strings.TrimSuffix(u.Path, suffix), "/")
-		u.RawPath = ""
+		return nil, err
 	}
 
 	hc := client.New()
@@ -411,10 +516,52 @@ func New(cfg *config.ClientConfig, opt Options) (*Client, error) {
 	return &Client{
 		base:    u,
 		hc:      hc,
+		suffix:  opt.TrimPathSuffix,
 		retries: retries,
 		noRetry: noRetry,
 		log:     opt.Log,
 	}, nil
+}
+
+// WithBaseURL returns a client for another base URL. It shares this
+// client's transport, and with it the connection pool, the headers and
+// token, the TLS setting, the retry budget and the logger; only the
+// base differs. The base is checked as New checks one, and the
+// TrimPathSuffix New was given comes off it as well, since a suffix is
+// a fact about the far service's routes and another deployment of that
+// service has the same ones.
+//
+// This is how a base known only at run time is reached: a region, a
+// tenant or a fiscal year whose root URL is read from a table rather
+// than from config.yaml. Nothing is dialled and the receiver is not
+// written, so a call per request is cheap, and the transport pools its
+// connections per host, so a base visited again reuses them whether or
+// not the derived client was kept.
+//
+// It is not the transport's own SetBaseURL, and cannot be. That sets
+// one base for every request the transport makes, so switching it per
+// call on a shared client sends one goroutine's request to another's
+// base. Do hands the transport an absolute URL, which it sends as it
+// stands, so the base lives here and nowhere else.
+//
+// # The token goes with it
+//
+// The derived client sends the Authorization header and every entry in
+// Options.Headers to the new host, and skips certificate checks there
+// too when ClientConfig.Insecure is set. Derive only for hosts that
+// token is meant for, such as one service deployed per region. A base
+// taken from an inbound request rather than from something an operator
+// maintains lets whoever sent it point the token at a host of their
+// choosing. A service that takes a different token needs a client of
+// its own, built with New.
+func (c *Client) WithBaseURL(raw string) (*Client, error) {
+	u, err := parseBase(raw, c.suffix)
+	if err != nil {
+		return nil, err
+	}
+	d := *c
+	d.base = u
+	return &d, nil
 }
 
 // URL builds an absolute URL for a path under the base.
@@ -462,6 +609,9 @@ func (c *Client) URL(path string, query url.Values) string {
 	return u.String()
 }
 
+// Error renders the method, the URL and the status on one line, followed
+// by the server's message when it sent one. The URL is Path verbatim; see
+// the type for what that means for a credential in a query.
 func (e *Error) Error() string {
 	if e.Msg == "" {
 		return fmt.Sprintf("%s %s: HTTP %d",
@@ -540,7 +690,7 @@ func (e *Error) Unwrap() error {
 // the line anyway: the server gave up reading and may already hold part
 // of the body, so replaying it is a decision for a caller that knows
 // its endpoints, not for a loop that does not. Nor is any method in
-// Config.NoRetryMethods retried, whatever the failure. A 3xx is not
+// ClientConfig.NoRetryMethods retried, whatever the failure. A 3xx is not
 // retried either, and reaches the caller as an *Error like any other
 // status that is not a 2xx.
 //
@@ -573,14 +723,7 @@ func (c *Client) Do(
 
 	for attempt := 0; attempt <= retries; attempt++ {
 		if attempt > 0 {
-			shift := attempt - 1
-			if shift > maxBackoffShift {
-				shift = maxBackoffShift
-			}
-			wait := firstBackoff << shift
-			if wait > maxBackoff {
-				wait = maxBackoff
-			}
+			wait := backoff(attempt)
 			c.log.Debug().Str("url", rawURL).Int("attempt", attempt).
 				Dur("wait", wait).Err(lastErr).Msg("retrying")
 			select {

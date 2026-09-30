@@ -1,5 +1,12 @@
 package document
 
+// Tests for document.go, against a temporary directory: the three Lookup
+// passes and their order, the dotted reference that must not be stripped,
+// case-insensitivity, ambiguity named by path under the root, the dotfile,
+// dot-directory and extension skips, recursion, the size cap read from the
+// stat, and the name cap measured in bytes. What depends on the filesystem,
+// the platform or the process is in document_integration_test.go.
+
 import (
 	"bytes"
 	"errors"
@@ -13,6 +20,7 @@ import (
 	"github.com/mas-ony/go-toolkit/fileutil"
 )
 
+// indexOf builds an Index over dir, failing the test on error.
 func indexOf(t *testing.T, dir string, recursive bool) *Index {
 	t.Helper()
 	idx, err := NewIndex(dir, recursive)
@@ -20,6 +28,19 @@ func indexOf(t *testing.T, dir string, recursive bool) *Index {
 		t.Fatalf("NewIndex(%q, %v): %v", dir, recursive, err)
 	}
 	return idx
+}
+
+// withMaxFileBytes sets the package-wide cap for one test and restores it
+// afterwards.
+//
+// It is a global in fileutil, so a test that changed it and left it changed
+// would silently rewrite what every later test in this file expects. None
+// of these run in parallel, which is what makes borrowing it safe.
+func withMaxFileBytes(t *testing.T, n int) {
+	t.Helper()
+	old := fileutil.MaxFileBytes
+	fileutil.MaxFileBytes = n
+	t.Cleanup(func() { fileutil.MaxFileBytes = old })
 }
 
 // write creates a file under dir with one byte of content, making the parent
@@ -50,19 +71,6 @@ func writeBytes(t *testing.T, dir, rel string, content []byte) string {
 		t.Fatalf("write %s: %v", rel, err)
 	}
 	return path
-}
-
-// withMaxFileBytes sets the package-wide cap for one test and restores it
-// afterwards.
-//
-// It is a global in fileutil, so a test that changed it and left it changed
-// would silently rewrite what every later test in this file expects. None
-// of these run in parallel, which is what makes borrowing it safe.
-func withMaxFileBytes(t *testing.T, n int) {
-	t.Helper()
-	old := fileutil.MaxFileBytes
-	fileutil.MaxFileBytes = n
-	t.Cleanup(func() { fileutil.MaxFileBytes = old })
 }
 
 // Count reports files, not distinct stems. The two differ exactly when one
@@ -228,6 +236,8 @@ func TestLookupDottedReferenceDoesNotReportAmbiguity(t *testing.T) {
 	}
 }
 
+// A blank reference and one naming nothing both come back as ErrNotFound,
+// since to a caller iterating rows they are the same outcome.
 func TestLookupMissAndBlankAreErrNotFound(t *testing.T) {
 	idx := indexOf(t, t.TempDir(), false)
 	for _, ref := range []string{"", "   ", "nope"} {
@@ -274,6 +284,7 @@ func TestNewIndexSkipsDotfiles(t *testing.T) {
 	}
 }
 
+// A flat index sees only the top level; a recursive one descends.
 func TestNewIndexRecursion(t *testing.T) {
 	dir := t.TempDir()
 	write(t, dir, "1.pdf")
@@ -290,6 +301,8 @@ func TestNewIndexRecursion(t *testing.T) {
 	}
 }
 
+// A directory that does not exist, and a path naming a file, both fail
+// NewIndex rather than indexing nothing.
 func TestNewIndexRejectsMissingAndNonDirectory(t *testing.T) {
 	dir := t.TempDir()
 	file := write(t, dir, "1.pdf")
@@ -321,6 +334,7 @@ func TestLoadReturnsBasenameNotReference(t *testing.T) {
 	}
 }
 
+// A zero-byte file is refused rather than returned as a document.
 func TestLoadRejectsEmptyFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "1.pdf")
@@ -395,6 +409,7 @@ func TestReadFileRejectsDisallowedType(t *testing.T) {
 	}
 }
 
+// A blank path is ErrNotFound, and a directory is refused.
 func TestReadFileRejectsBlankPathAndDirectory(t *testing.T) {
 	if _, _, err := ReadFile(""); !errors.Is(err, ErrNotFound) {
 		t.Errorf(`ReadFile(""): got %v, want ErrNotFound`, err)
@@ -404,6 +419,8 @@ func TestReadFileRejectsBlankPathAndDirectory(t *testing.T) {
 	}
 }
 
+// ReadFile reads a file with an accepted extension, a dotted stem
+// included, and returns the file's own name.
 func TestReadFileAcceptsAllowedType(t *testing.T) {
 	dir := t.TempDir()
 	path := write(t, dir, "35.002.pdf")
@@ -419,10 +436,6 @@ func TestReadFileAcceptsAllowedType(t *testing.T) {
 		t.Error("data is empty")
 	}
 }
-
-// ----------------------------------------------------------------------------
-// The size cap
-// ----------------------------------------------------------------------------
 
 // The size cap is checked from the STAT, before the read, which is the
 // whole reason it is worth having: an archive holding one enormous file
@@ -501,10 +514,6 @@ func TestADisabledSizeCapAdmitsEverything(t *testing.T) {
 	}
 }
 
-// ----------------------------------------------------------------------------
-// Concurrency
-// ----------------------------------------------------------------------------
-
 // An Index is documented as read-only once NewIndex returns, and therefore
 // safe for concurrent Lookup, Load, Count and Skipped from any number of
 // goroutines. Nothing in the type enforces that — the maps are simply
@@ -571,5 +580,31 @@ func TestIndexIsSafeForConcurrentReaders(t *testing.T) {
 	close(errs)
 	for msg := range errs {
 		t.Error(msg)
+	}
+}
+
+// A recursive walk skips a dot-directory whole, the way a dotfile is
+// skipped, so a copy left in a trash or thumbnail folder never resolves —
+// least of all after the original is gone — while an ordinary
+// subdirectory is still descended.
+func TestNewIndexSkipsDotDirectories(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "1.pdf")
+	write(t, dir, "sub/2.pdf")
+	write(t, dir, ".Trash/3.pdf")
+	write(t, dir, "sub/.thumbs/4.jpg")
+
+	idx := indexOf(t, dir, true)
+	if got := idx.Count(); got != 2 {
+		t.Errorf("Count = %d, want 2 (1.pdf and sub/2.pdf)", got)
+	}
+	for _, ref := range []string{"3", "4"} {
+		if _, err := idx.Lookup(ref); !errors.Is(err, ErrNotFound) {
+			t.Errorf("Lookup(%q) = %v, want ErrNotFound", ref, err)
+		}
+	}
+	if got := idx.Skipped(); got != 0 {
+		t.Errorf("Skipped = %d, want 0: a dot-directory is not an "+
+			"extension skip", got)
 	}
 }

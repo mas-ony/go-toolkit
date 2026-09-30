@@ -20,11 +20,12 @@ package response
 //   - Message: omitted from JSON when the string is empty (""). OK() called
 //     with an empty msg string produces no "message" key at all — this is
 //     intentional for responses where the HTTP status code is
-//     self-explanatory (204, 201, etc.).
+//     self-explanatory, a 201 say. A 204 carries no body at all, so it
+//     never carries this envelope either.
 //   - Data: omitted from JSON only when nil, not when it is a zero-value
 //     struct or an empty slice. Always set Data to nil explicitly (not an
 //     empty struct) for no-data responses so the field is absent rather
-//     than present as null.
+//     than present as an empty object.
 //
 // "nil" above means a nil INTERFACE, which is stricter than it sounds: a
 // typed nil is not one. See the interface-nil trap in the package

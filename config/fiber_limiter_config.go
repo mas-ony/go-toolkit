@@ -32,19 +32,6 @@ import (
 	"github.com/spf13/viper"
 )
 
-// Accepted values for fiber.limiter.strategy.
-//
-// Matched EXACTLY — not lowercased, not trimmed. "Fixed" and "sliding " are
-// rejected by name rather than quietly corrected, which is the same choice
-// app.env makes for "Production" and is made for the same reason: a value the
-// process silently repairs is a value config.yaml and the running service
-// disagree about. Validate prints the offending value with %q, so a stray
-// space is visible in the error rather than invisible in the file.
-const (
-	StrategyFixed   = "fixed"
-	StrategySliding = "sliding"
-)
-
 // LimiterConfig wraps limiter.Config so it participates in the standard
 // Validate/String lifecycle used by all other sub-configs.
 //
@@ -157,17 +144,18 @@ const (
 //     crash hands every client a fresh quota, and a second REPLICA has its own
 //     counters from the start — so the effective service-wide limit is Max ×
 //     replicas, not Max.
-//   - fiber.listen.enable_prefork multiplies it again. Each forked worker runs
-//     its own main and its own store, so the per-IP quota becomes Max ×
+//   - fiber.listen.enable_prefork multiplies it again. Each forked worker is
+//     a whole process with its own store, so the per-IP quota becomes Max ×
 //     workers on one host. database.max_open_conns has the same per-process
-//     shape and the same multiplier, though nothing in database_config.go says
-//     so today. Validate cannot check either: the multiplier is the host's
-//     core count and this process cannot know it at config time.
+//     shape and the same multiplier; the enable_prefork field lists both.
+//     Validate cannot check either: the multiplier is the host's core count
+//     and this process cannot know it at config time.
 //
 // A shared backend (Redis, Valkey, or the service's own database) assigned to
-// limiter.Config.Storage addresses all three, and it is Go code at the
-// registration site rather than a key, since fiber.Storage needs a DSN, a
-// driver, and a Close() that something has to own. IT IS NOT A FREE WIN, and
+// limiter.Config.Storage addresses restarts, replicas and prefork workers
+// alike, and it is Go code at the registration site rather than a key, since
+// fiber.Storage needs a DSN, a driver, and a Close() that something has to
+// own. IT IS NOT A FREE WIN, and
 // two properties should be settled before it is reached for:
 //
 //   - It makes the limiter FAIL CLOSED. On the memory path a store operation
@@ -175,10 +163,10 @@ const (
 //     DisableValueRedaction below); on the storage path every get and set can
 //     fail and the handler returns that error, so a backend blip becomes a 500
 //     through the error handler on every request the middleware sees. Next is
-//     nil, so that includes /readyz — a dependency outage would not degrade
-//     the service, it would take the replica out of rotation. A wrapper that
-//     swallows read and write errors is what restores fail-open, and it should
-//     exist before the backend does.
+//     nil, so that includes health checks — a dependency outage would not
+//     degrade the service, it would take the replica out of rotation. A
+//     wrapper that swallows read and write errors is what restores fail-open,
+//     and it should exist before the backend does.
 //   - It cannot make the count EXACT. fiber.Storage is get/set with no INCR
 //     and no compare-and-swap, and the handler's read-modify-write is guarded
 //     by a sync.RWMutex created per handler — one lock for all keys, and only
@@ -225,14 +213,27 @@ type LimiterConfig struct {
 	// instead of reporting a nil interface, and what lets String print the
 	// configured strategy rather than a %T.
 	//
-	// EXPORTED on purpose. An unexported field would be unsettable from a test
-	// in package config_test, which would make it impossible to hand-build a
-	// LimiterConfig that passes Validate — and every fixture in this package's
-	// tests is hand-built. It is the only field here not promoted from the
-	// embedded struct; read it as belonging to the section rather than to the
-	// middleware.
+	// EXPORTED on purpose, so that code outside this package — an
+	// application's own tests, say — can build a LimiterConfig by hand that
+	// passes Validate. Unexported, it could only ever be set through
+	// NewLimiterConfig. It is the only field here not promoted from the
+	// embedded struct; read it as belonging to the section rather than to
+	// the middleware.
 	Strategy string
 }
+
+// Accepted values for fiber.limiter.strategy.
+//
+// Matched EXACTLY — not lowercased, not trimmed. "Fixed" and "sliding " are
+// rejected by name rather than quietly corrected, which is the same choice
+// app.env makes for "Production" and is made for the same reason: a value the
+// process silently repairs is a value config.yaml and the running service
+// disagree about. Validate prints the offending value with %q, so a stray
+// space is visible in the error rather than invisible in the file.
+const (
+	StrategyFixed   = "fixed"
+	StrategySliding = "sliding"
+)
 
 // limiterMiddlewareFor maps a fiber.limiter.strategy value to the Handler that
 // implements it.
@@ -352,7 +353,8 @@ func NewLimiterConfig(v *viper.Viper) *LimiterConfig {
 			// is replaced by the literal "[redacted]".
 			//
 			// Where it is replaced is narrower than the name suggests, and
-			// narrow enough that this key currently does NOTHING. The flag
+			// narrow enough that, with Storage nil as this package leaves
+			// it, the key does NOTHING. The flag
 			// reaches exactly one place: manager.logKey, called only while
 			// formatting the error strings manager.get and manager.set return
 			// when an operation fails. Four of its five call sites sit behind
@@ -366,10 +368,10 @@ func NewLimiterConfig(v *viper.Viper) *LimiterConfig {
 			// setting.
 			//
 			// It becomes live the moment a shared Storage is assigned, and
-			// those strings are RETURNED as errors, so they reach the error handler
-			// and are logged in full. Set it true only then, only when
-			// cleartext keys are needed to debug that backend, and only when
-			// the log pipeline is allowed to carry client IPs.
+			// those strings are RETURNED as errors, so they reach the error
+			// handler and are logged in full. Set it true only then, only
+			// when cleartext keys are needed to debug that backend, and only
+			// when the log pipeline is allowed to carry client IPs.
 			//
 			// Note: this has nothing to do with the X-RateLimit-* headers —
 			// header visibility is controlled solely by DisableHeaders above.
@@ -400,12 +402,11 @@ func NewLimiterConfig(v *viper.Viper) *LimiterConfig {
 			// return it. From this key, the 1m substitution is the reachable
 			// behaviour and the 1s floor is not.
 			//
-			// Note this is the OPPOSITE shape to
-			// fiber.listen.shutdown_timeout, where a bare number survives into
-			// Fiber unchanged and makes shutdown effectively instant. Here it
-			// is discarded. Both end up running a number the file does not
-			// state; only one of them runs the number the file appears to
-			// state.
+			// Validate refuses a bare number here and on
+			// fiber.listen.shutdown_timeout for opposite reasons. There,
+			// Fiber would run the nanoseconds exactly as written; here, the
+			// middleware would discard them for its own minute. Either way,
+			// what runs is not the number the file appears to state.
 			//
 			// Whole seconds are all that survive either way: the handler
 			// computes uint64(d.Seconds()) for the window, so 1500ms is a one
@@ -555,14 +556,15 @@ func (c *LimiterConfig) Validate() error {
 	// misspelled, and the key can be right while the INSTALLED handler is not
 	// the one it names.
 	//
-	// The second case is not hypothetical paranoia — it is the same shape as the
-	// MaxFunc trap on the constructor. What it CANNOT catch is an override
-	// applied after this method runs: the application copies the struct long
-	// after config load, so a LimiterMiddleware assigned there is invisible here,
-	// in exactly the way a MaxFunc assigned there is. This check binds the key to
-	// the handler at CONSTRUCTION time — it catches a hand-built config and a
-	// future edit that updates one of the two and not the other, and it says
-	// nothing about what the registration site does afterwards.
+	// The second case is not hypothetical paranoia — it is the same shape as
+	// the MaxFunc trap on the constructor. What it CANNOT catch is an
+	// override applied after this method runs: the application copies the
+	// struct long after config load, so a LimiterMiddleware assigned there is
+	// invisible here, in exactly the way a MaxFunc assigned there is. This
+	// check binds the key to the handler at CONSTRUCTION time — it catches a
+	// hand-built config, and an edit that updates one of the two and not the
+	// other, and it says nothing about what the registration site does
+	// afterwards.
 	switch c.Strategy {
 	case "":
 		errs = append(errs, fmt.Errorf("fiber.limiter.strategy is required: "+
@@ -642,13 +644,15 @@ func (c *LimiterConfig) Validate() error {
 // Printing a value copy (%v on LimiterConfig, not &LimiterConfig) bypasses it
 // and dumps the struct fields directly.
 //
-// The nil check is TWO-PART, mirroring Validate's. zerolog reaches this method
-// through fmt.Stringer, and its own guard — `if val == nil` in
-// internal/json.AppendStringer — is an INTERFACE nil, which neither a typed
-// nil pointer nor a wrapper around a nil embedded pointer satisfies. So it
-// calls String on both, and without the second half the half-built one panics
-// inside the startup log line rather than rendering a placeholder.
-// The section list carries the argument.
+// The nil check is TWO-PART, mirroring Validate's. A logger's own guard, such
+// as zerolog's `if val == nil` before it calls a Stringer, compares an
+// INTERFACE with nil, which neither a typed nil pointer nor a wrapper around
+// a nil embedded pointer satisfies. Without the second half, the half-built
+// one would panic inside the startup log line instead of rendering a
+// placeholder.
+//
+// Strategy is printed with %q, so a stray space in a rejected value shows in
+// the log exactly as it does in the error.
 func (c *LimiterConfig) String() string {
 	if c == nil {
 		return "<nil LimiterConfig>"

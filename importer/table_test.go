@@ -14,9 +14,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/shopspring/decimal"
-
 	"github.com/mas-ony/go-toolkit/datetime"
+	"github.com/shopspring/decimal"
 )
 
 // grid is a Source backed by maps, keyed "row:col".
@@ -37,6 +36,7 @@ type row struct {
 	Target string
 }
 
+// newGrid returns an empty grid on the 1900 epoch.
 func newGrid() *grid {
 	return &grid{
 		cells: map[string]string{},
@@ -44,20 +44,7 @@ func newGrid() *grid {
 	}
 }
 
-func (g *grid) set(row int, col, text string) *grid {
-	g.cells[key(row, col)] = text
-	return g
-}
-
-func (g *grid) link(row int, col, target string) *grid {
-	g.links[key(row, col)] = target
-	return g
-}
-
-func key(row int, col string) string {
-	return col + ":" + itoa(row)
-}
-
+// itoa formats a non-negative n in decimal.
 func itoa(n int) string {
 	if n == 0 {
 		return "0"
@@ -70,19 +57,36 @@ func itoa(n int) string {
 	return string(b)
 }
 
+// key is the map key a cell is stored under.
+func key(row int, col string) string {
+	return col + ":" + itoa(row)
+}
+
+// set stores a cell's text and returns the grid, so fixtures chain.
+func (g *grid) set(row int, col, text string) *grid {
+	g.cells[key(row, col)] = text
+	return g
+}
+
+// link stores a cell's hyperlink target and returns the grid, so fixtures
+// chain.
+func (g *grid) link(row int, col, target string) *grid {
+	g.links[key(row, col)] = target
+	return g
+}
+
+// Cell returns the text stored for the cell, or "" for none.
 func (g *grid) Cell(row int, col string) string {
 	return g.cells[key(row, col)]
 }
 
+// Hyperlink returns the target stored for the cell, or "" for none.
 func (g *grid) Hyperlink(row int, col string) string {
 	return g.links[key(row, col)]
 }
 
+// Date1904 reports the epoch the test set on the grid.
 func (g *grid) Date1904() bool { return g.date1904 }
-
-// ----------------------------------------------------------------------------
-// Columns
-// ----------------------------------------------------------------------------
 
 // Every field reaches the contract, Expect entries included. That is what
 // makes the blank-row skip safe: DataRows tests the columns the caller
@@ -108,10 +112,8 @@ func TestColumnsIncludesFieldsWithNoSetter(t *testing.T) {
 	}
 }
 
-// ----------------------------------------------------------------------------
-// Validate
-// ----------------------------------------------------------------------------
-
+// A table with valid, distinct letters and a caption on every field
+// validates.
 func TestValidateAcceptsAWellFormedTable(t *testing.T) {
 	tbl := Table[row]{
 		Text("A", "name", 50, func(r *row) **string { return &r.Name },
@@ -244,10 +246,6 @@ func TestValidateAcceptsLowercaseColumnLetters(t *testing.T) {
 		t.Errorf("Plain = %q, want value", dst.Plain)
 	}
 }
-
-// ----------------------------------------------------------------------------
-// Apply
-// ----------------------------------------------------------------------------
 
 // The central rule: a cell that will not coerce is a WARNING and the row
 // goes on. A record whose one numeric cell holds a stray note is still
@@ -422,10 +420,6 @@ func TestApplyCarriesTheCellAddress(t *testing.T) {
 		t.Errorf("warnings = %v, want the setter's own message", warns)
 	}
 }
-
-// ----------------------------------------------------------------------------
-// Constructors
-// ----------------------------------------------------------------------------
 
 // Each constructor's contract in one place: what an empty cell does, what
 // a good value does, and what a bad one does. The empty case is the one
@@ -617,10 +611,6 @@ func TestModifiersOnlyChangeTheirOwnFlag(t *testing.T) {
 	}
 }
 
-// ----------------------------------------------------------------------------
-// NewSource
-// ----------------------------------------------------------------------------
-
 // The override only ever forces the 1904 epoch ON. A workbook that
 // declares its own setting is believed, because getting this wrong shifts
 // every date by four years and a day and every resulting date still looks
@@ -637,5 +627,30 @@ func TestNewSourceOnlyForcesTheEpochOn(t *testing.T) {
 	// workbook substitutes.
 	if got := (epoch1904{}).Date1904(); !got {
 		t.Error("the epoch1904 wrapper must always report true")
+	}
+}
+
+// A padded letter reads as an empty cell on every row, since the cell
+// lookup trims nothing, so Validate refuses one rather than trimming the
+// typo away and passing it. A lower-case letter names the same column as
+// its capital and is accepted, and the two collide as a duplicate.
+func TestValidateChecksTheLetterAsWritten(t *testing.T) {
+	set := func(r *row, c Cell) error { r.Plain = c.Text; return nil }
+
+	if err := (Table[row]{Custom[row](" C", "code", set,
+		"Code")}).Validate(); err == nil {
+		t.Error("a padded column letter validated")
+	}
+	if err := (Table[row]{Custom[row]("c", "code", set,
+		"Code")}).Validate(); err != nil {
+		t.Errorf("a lower-case letter was refused: %v", err)
+	}
+	err := (Table[row]{
+		Custom[row]("c", "code", set, "Code"),
+		Custom[row]("C", "name", set, "Name"),
+	}).Validate()
+	if err == nil || !strings.Contains(err.Error(), "more than once") {
+		t.Errorf("err = %v, want \"c\" and \"C\" reported as one "+
+			"column mapped twice", err)
 	}
 }

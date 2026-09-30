@@ -1,5 +1,10 @@
 package datetime
 
+// Tests for datetime.go, all of them offline: every layout in, one shape
+// out, emptiness collapsing to null at both boundaries, the receiver split,
+// and each source type Scan accepts. What the drivers do with Value's output
+// is datetime_integration_test.go's.
+
 import (
 	"database/sql"
 	"database/sql/driver"
@@ -439,10 +444,10 @@ func TestRoundTripIsStableAfterOnePass(t *testing.T) {
 // TestShadowingBeatsTimeTimeStrictness is the whole reason this type exists.
 //
 // The same JSON that a time.Time field rejects must be accepted by a Datetime
-// field. Renaming the embedded field — the hazard called out in the type's
-// doc comment — un-shadows time.Time's RFC 3339-only UnmarshalJSON and this
-// test is where that shows up, rather than in a browser form three
-// environments later.
+// field. Misspelling or renaming Datetime's own UnmarshalJSON — the hazard
+// called out in the type's doc comment — brings back time.Time's
+// RFC 3339-only version, and this test is where that shows up, rather than
+// in a browser form three environments later.
 func TestShadowingBeatsTimeTimeStrictness(t *testing.T) {
 	t.Parallel()
 

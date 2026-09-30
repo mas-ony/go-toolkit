@@ -34,9 +34,9 @@ package config
 // notification.channels; this section says where it goes and whether the
 // request waits for it.
 //
-// The prefix also keeps these variables out of other stacks' way.
-// MAIL_HOST, MAIL_PORT and SMTP_HOST are what several frameworks already
-// export, and a section behind either spelling would be switched on by a
+// The prefix also keeps these variables out of other stacks' way. Several
+// frameworks export MAIL_HOST, MAIL_PORT or SMTP_HOST for mailers of their
+// own, so a section prefixed mail or smtp would be switched on by a
 // variable meant for something else. NOTIFICATION_EMAIL_* is nobody else's.
 //
 // notification.email.username and notification.email.password belong in
@@ -52,42 +52,6 @@ import (
 
 	"github.com/spf13/viper"
 )
-
-// The values notification.email.tls accepts. Compare against these rather
-// than bare literals; the email package does.
-const (
-	// EmailTLSStartTLS connects in clear text and upgrades with STARTTLS
-	// before anything else is said. Conventionally port 587.
-	EmailTLSStartTLS = "starttls"
-
-	// EmailTLSImplicit speaks TLS from the first byte, which mail clients
-	// label "SSL/TLS". Conventionally port 465.
-	EmailTLSImplicit = "implicit"
-
-	// EmailTLSNone never negotiates TLS. For a relay on the same host or a
-	// closed network segment, and never with credentials to anything but
-	// loopback; see EmailConfig.Validate.
-	EmailTLSNone = "none"
-)
-
-// validEmailTLS is the allowlist checked by EmailConfig.Validate. The
-// empty-struct value is the idiomatic set, the same shape validEnvs in
-// app_config.go uses.
-var validEmailTLS = map[string]struct{}{
-	EmailTLSStartTLS: {},
-	EmailTLSImplicit: {},
-	EmailTLSNone:     {},
-}
-
-// loopbackHosts are the host spellings a credential may cross to in clear
-// text. They are the three net/smtp's PlainAuth accepts, and the email
-// package applies the same three when it logs in, so a configuration
-// Validate passes is one the send path will not refuse on this ground.
-var loopbackHosts = map[string]struct{}{
-	"localhost": {},
-	"127.0.0.1": {},
-	"::1":       {},
-}
 
 // EmailConfig holds the SMTP relay outbound mail is handed to, and the
 // sender every message carries. String omits the credentials; see the
@@ -108,10 +72,12 @@ type EmailConfig struct {
 	//	25   relay between servers; for an internal relay, typically
 	//	     with tls: none or starttls
 	//
-	// Validate holds 587 and 465 to those pairings. The mismatch on 465
-	// does not fail, it HANGS: the client waits for a greeting while the
-	// server waits for a TLS handshake, so every send sits out the whole
-	// timeout and then reports a deadline that names neither key.
+	// Validate refuses the two pairings on those ports that cannot work,
+	// 465 without implicit and 587 with implicit, and leaves every other
+	// mode on any port to the deployment. The mismatch on 465 does not
+	// fail, it HANGS: the client waits for a greeting while the server
+	// waits for a TLS handshake, so every send sits out the whole timeout
+	// and then reports a deadline that names neither key.
 	Port int
 
 	// TLS selects how the connection is secured: starttls, implicit or
@@ -139,14 +105,15 @@ type EmailConfig struct {
 	// line.
 	Insecure bool
 
-	// Username authenticates to the relay, with PLAIN or LOGIN, whichever
-	// the server offers. Set together with Password or not at all: a
-	// relay that accepts mail by network position rather than by login is
-	// a real deployment, and leaving both empty is how it is configured.
+	// Username authenticates to the relay, with PLAIN when the server
+	// offers it and LOGIN otherwise. Set together with Password or not at
+	// all: a relay that accepts mail by network position rather than by
+	// login is a real deployment, and leaving both empty is how it is
+	// configured.
 	//
 	// Neither is trimmed, because a password may begin or end with a
-	// space, and under tls: none both are refused unless Host is loopback.
-	// See Validate.
+	// space. Under tls: none both are refused unless Host is loopback; see
+	// Validate.
 	Username string
 
 	// Password is Username's pair. Required when Username is set, and
@@ -186,6 +153,46 @@ type EmailConfig struct {
 	// is waiting to end it. The email package documentation says how to
 	// hand a send to a goroutine without it reading freed request memory.
 	Async bool
+}
+
+// The values notification.email.tls accepts. Compare against these rather
+// than bare literals; the email package does.
+const (
+	// EmailTLSStartTLS connects in clear text and upgrades with STARTTLS
+	// before anything else is said. Conventionally port 587.
+	EmailTLSStartTLS = "starttls"
+
+	// EmailTLSImplicit speaks TLS from the first byte, which mail clients
+	// label "SSL/TLS". Conventionally port 465.
+	EmailTLSImplicit = "implicit"
+
+	// EmailTLSNone never negotiates TLS. For a relay on the same host or a
+	// closed network segment, and never with credentials to anything but
+	// loopback; see EmailConfig.Validate.
+	EmailTLSNone = "none"
+)
+
+// validEmailTLS is the allowlist checked by EmailConfig.Validate. The
+// empty-struct value is the idiomatic set, the same shape validEnvs in
+// app_config.go uses.
+var validEmailTLS = map[string]struct{}{
+	EmailTLSStartTLS: {},
+	EmailTLSImplicit: {},
+	EmailTLSNone:     {},
+}
+
+// loopbackHosts are the host spellings a credential may cross to in clear
+// text. They are the three net/smtp's PlainAuth accepts, and the email
+// package applies the same three when it logs in, so a configuration
+// Validate passes is one the send path will not refuse on this ground.
+//
+// Matched EXACTLY, as net/smtp matches them. "LOCALHOST" and "127.0.0.2"
+// both reach the loopback interface, yet credentials in clear text to
+// either are refused here, because the send path would refuse them too.
+var loopbackHosts = map[string]struct{}{
+	"localhost": {},
+	"127.0.0.1": {},
+	"::1":       {},
 }
 
 // NewEmailConfig reads EmailConfig fields from the provided Viper instance.

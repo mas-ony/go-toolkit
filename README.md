@@ -61,7 +61,7 @@ Sections, and the key prefix each is nested behind:
 | WhatsApp     | `notification.whatsapp` | Sync or async sending             |
 | Email        | `notification.email`    | SMTP relay, TLS, sender, async    |
 | Fiber        | `fiber`                 | Server and router settings        |
-| Auth         | `fiber.auth`            | Auth mode                         |
+| Auth         | `fiber.auth`            | Session, JWT, or none             |
 | JWT          | `fiber.jwt`             | Secret and expiry                 |
 | Client       | `fiber.client`          | Outbound base URL, token, retries |
 | Limiter      | `fiber.limiter`         | Rate limit max, window, strategy  |
@@ -83,6 +83,18 @@ the recover middleware from `cfg.Recover.WithStackTraceHandler(h)`.
 Skipping either is not an error: the middleware falls back to its own
 stderr writer, and the service logs in two formats.
 
+The four middleware sections assume one order, outermost first, and each
+section's documentation says which guarantee its position carries: every
+request logged, a panic's stack trace carrying the request id, a panic in
+the limiter recovered.
+
+```go
+app.Use(fiberzerolog.New(cfg.Zerolog.WithLogger(log)))
+app.Use(requestid.New(*cfg.RequestID.Config))
+app.Use(fiberrecover.New(cfg.Recover.WithStackTraceHandler(onPanic)))
+app.Use(limiter.New(*cfg.Limiter.Config))
+```
+
 ### Environment spelling
 
 A key's environment name is the key uppercased with dots replaced by
@@ -96,7 +108,8 @@ which keys exist at all.
 ### Only what a deployment supplies
 
 `SuppliedSections` reports which sections some source actually supplied a
-key for, reading both the file and the process environment. Swapping an
+key for, reading both the process environment and every key registered on
+the Viper — the file's, and any set or defaulted in code. Swapping an
 unsupplied section for `AbsentSection` spares it validation and keeps its
 zero values out of the startup log, where `expiration=0s` reads as a
 setting somebody chose rather than as no setting at all.
@@ -131,10 +144,18 @@ for i, s := range sections {
         sections[i].Value = config.AbsentSection{}
     }
 }
+
+// Validate everything before failing, so one restart lists every problem.
+var errs []error
 for _, s := range sections {
     if err := s.Value.Validate(); err != nil {
-        log.Fatal().Err(err).Str("section", s.Name).Send()
+        errs = append(errs, err)
     }
+}
+if err := errors.Join(errs...); err != nil {
+    log.Fatal().Err(err).Msg("invalid configuration")
+}
+for _, s := range sections {
     log.Info().Str("section", s.Name).
         Str("config", s.Value.String()).Send()
 }
@@ -146,8 +167,8 @@ environment alone; one that will not parse is not.
 A list value may be written as a YAML sequence or as a comma-separated
 string, and both parse the same way. That is not cosmetic: Viper splits a
 bare environment string on whitespace, so `FIBER_REQUEST_METHODS=GET,POST`
-would otherwise register one method nobody sends and answer 405 to
-everything.
+would otherwise leave the router one method nobody sends, and the first
+`GET` route registered would panic at startup.
 
 ### Example
 
@@ -295,7 +316,11 @@ database.NamespaceForYear("app2026.dbo", 2025) // app2025.dbo
 
 `NamespaceForYear` rewrites the database segment for a deployment that
 keeps one database per year, `app2025` beside `app2026`, so a request can
-read the year it asks for.
+read the year it asks for. It needs the whole prefix configured: given the
+schema alone it rewrites the schema, and given an empty prefix it has
+nothing to rewrite, so a request for another year silently reads the
+current one. Pass `Configure` what `DatabaseConfig.Namespace` builds, as
+above.
 
 ### Clause builders and allowlists
 
@@ -436,11 +461,16 @@ ceiling of 8s, with no jitter. POST gets one attempt unless
 `fiber.client.no_retry_methods` says otherwise, because a replayed create
 whose first attempt landed writes a second row.
 
-A non-2xx yields an `*httpclient.Error` carrying the status, the path and
-whatever message the envelope held; `errors.Is` reaches `ErrNotFound`,
-`ErrConflict` and `ErrUnprocessable`, the statuses worth branching on.
-Error bodies are capped on the way out, and the message carried on the
-error is capped shorter still.
+A non-2xx yields an `*httpclient.Error` carrying the status, the method,
+the path and whatever message the envelope held; `errors.Is` reaches
+`ErrNotFound`, `ErrConflict` and `ErrUnprocessable`, the statuses worth
+branching on. Error bodies are capped on the way out, and the message
+carried on the error is capped shorter still.
+
+A base URL carrying a credential is refused, and no error repeats one,
+including the fragment of a malformed URL that `url.Parse` would quote,
+which for a password holding a `/` is the whole password. A credential
+belongs in `fiber.client.token` or a header.
 
 ## Spreadsheets
 
@@ -489,6 +519,13 @@ hyperlink against the workbook's own directory, not the working
 directory; `ResolveLink` does the same for a target and a directory the
 caller supplies, and `ErrNotAFile` separates a link to a web page or
 another cell from a broken one.
+
+Three readings are rules rather than certainties, and each can be wrong
+without an error: text dates are read day-first only, so `03/04/2005` is
+3 April; a lone `.` or `,` in a number is a decimal point, so `1,234` is
+1.234; and the 1904 epoch is taken from the workbook, where a wrong one
+shifts every date by four years and a day. Read the package documentation
+before importing a workbook from another locale.
 
 ### importer
 
@@ -688,14 +725,20 @@ path, so two services started from one directory need not share a
 device. `ErrNotPaired` separates that first-run state from a broken
 store or network, so a caller can carry on with notifications off.
 
+While a code is on screen it is also logged at info level under `qr`, as
+a fallback for a terminal that cannot draw it. That line is the whole
+pairing credential, so pair where the log is not shared.
+
 A number starts with its country code. `+`, spaces and hyphens are
 stripped, and anything else left over is `ErrInvalidPhone`; a number that
 is empty once stripped is a silent no-op, so an unfilled column needs no
 guard. `SendTextContext` and `SendDocumentContext` take a context, the
 only bound on a send, and worth passing for a document, whose upload is
 the slowest call here. Under `notification.whatsapp.async` no request is
-left to end a send, so give it a deadline of its own:
-`context.WithTimeout(context.WithoutCancel(ctx), time.Minute)`.
+left to end a send, so give it a deadline of its own, derived from
+`c.Context()` before the goroutine starts rather than from the `fiber.Ctx`
+the framework recycles:
+`context.WithTimeout(context.WithoutCancel(c.Context()), time.Minute)`.
 
 ### email
 
@@ -723,14 +766,16 @@ which is fatal where email is chosen. A nil `*Service` returns the same
 error from every send rather than panic, so call sites need no guard.
 `tls` is `starttls`, `implicit` or `none`, with no fallback: under
 `starttls`, a relay that does not offer the upgrade fails the send.
-Credentials go only over TLS or to a relay on loopback, with PLAIN or
-LOGIN.
+Credentials go only over TLS or to a relay on loopback, with PLAIN, or
+LOGIN where the relay offers LOGIN but not PLAIN.
 
 Every send is bounded by `notification.email.timeout` and by the
-context. Under `notification.email.async`, send on
-`context.WithoutCancel(ctx)` and build the `Message` from copies before
-the goroutine starts, since Fiber reuses request memory once the handler
-returns.
+context. Under `notification.email.async`, take
+`context.WithoutCancel(c.Context())` and build the `Message` from copies
+before the goroutine starts, since Fiber reuses request memory once the
+handler returns. The detached context keeps only the values stored in
+it, and the request id is among them only while
+`fiber.pass_locals_to_context` is on.
 
 A nil error means the relay accepted the message; a missing mailbox is a
 bounce, later. A refused recipient fails the whole send before anything
@@ -752,6 +797,13 @@ without it:
 go test -tags integration -run Integration ./...
 ```
 
+Several of them check that one value is safe to share between
+goroutines, which only the race detector can hold them to:
+
+```
+go test -race -tags integration -run Integration ./...
+```
+
 `database` and `datetime` share two DSN variables, and each test runs
 once per engine whose DSN is set, skipping when neither is:
 
@@ -768,8 +820,14 @@ suite, since it is the misconfiguration the package exists to expose.
 `database` passes with or without them.
 
 These tests create and drop their own tables. Point the DSNs at a scratch
-database, never at one holding data. `fileutil`'s integration suite also
-carries a `unix` build constraint, so it runs only on Unix-like systems.
+database, never at one holding data.
+
+`fileutil`'s suites, unit and integration alike, carry a `unix` build
+constraint, because the permission tests need `syscall.Umask`, so they run
+only on Unix-like systems. A test that needs what the machine cannot
+provide — a case-sensitive filesystem, an unprivileged user, symlinks, a
+zone other than UTC, a DSN — skips rather than fails, so a skip means the
+claim was not checked there.
 
 An integration file here does not mean "the same tests, now with real
 I/O". The unit suites already write real workbooks, serve real HTTP and

@@ -11,7 +11,7 @@ package document
 // assert because the answer depends on which filesystem the directory
 // sits on and which user the process runs as.
 //
-// Three of them:
+// Four of them:
 //
 //   - Case. The package exists because "1.PDF" and "1.pdf" are one file
 //     on Windows and two on Linux. A test that creates both and expects
@@ -25,6 +25,9 @@ package document
 //   - Symlinks. A link named like a document is indexed and read through,
 //     which the package documents as a deliberate non-boundary. Creating
 //     one needs a filesystem and a platform that allows it.
+//   - The snapshot. A file added after the walk is invisible and one
+//     removed after it still resolves, which needs the tree to change
+//     under an Index already built.
 //
 // Each skips rather than fails where the environment cannot produce the
 // precondition. A skipped test says the claim was not checked here; a
@@ -48,19 +51,6 @@ func requireUnprivileged(t *testing.T) {
 	}
 }
 
-// writeFile creates dir/rel with some content and returns its full path.
-func writeFile(t *testing.T, dir, rel string) string {
-	t.Helper()
-	path := filepath.Join(dir, rel)
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, []byte("content of "+rel), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	return path
-}
-
 // caseSensitiveDir reports whether dir distinguishes two names that differ
 // only in case, by asking the filesystem rather than by guessing from
 // runtime.GOOS — a Linux box can mount a case-insensitive volume and a Mac
@@ -75,6 +65,20 @@ func caseSensitiveDir(t *testing.T, dir string) bool {
 
 	_, err := os.Stat(filepath.Join(dir, ".CASE-PROBE"))
 	return err != nil
+}
+
+// writeFile creates dir/rel with some content and returns its full path.
+func writeFile(t *testing.T, dir, rel string) string {
+	t.Helper()
+	path := filepath.Join(dir, rel)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	err := os.WriteFile(path, []byte("content of "+rel), 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return path
 }
 
 // The premise of the whole package: a directory carrying the same stem in

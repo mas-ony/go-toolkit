@@ -17,35 +17,6 @@ type mergedRange struct {
 	value          string
 }
 
-// File is an open spreadsheet and its resolved layout.
-type File struct {
-	file   *excelize.File
-	rows   [][]string
-	merges []mergedRange
-	layout Layout
-
-	// dir is the directory holding the workbook; a relative hyperlink
-	// resolves against it, not against the working directory.
-	dir string
-
-	// date1904 is the workbook's own epoch setting.
-	date1904 bool
-}
-
-// LayoutError is the result of a failed header check: every column whose
-// caption was not what the caller expected, in the order the caller
-// listed them.
-//
-// It is a type rather than a formatted string so a caller can add the
-// advice only it can give — where its column constants live, which flag
-// skips the check — by wrapping it.
-type LayoutError struct {
-	Sheet     string
-	HeaderRow int
-	GroupRow  int
-	Problems  []string
-}
-
 // Layout describes where the data is in a particular workbook.
 type Layout struct {
 	// Sheet is the sheet to read. Empty means the first one in the
@@ -68,6 +39,29 @@ type Layout struct {
 	// LastRow is the final row to read. Zero means to the end of the
 	// sheet.
 	LastRow int
+}
+
+// LayoutError is the result of a failed header check: every column whose
+// caption was not what the caller expected, in the order the caller
+// listed them.
+//
+// It is a type rather than a formatted string so a caller can add the
+// advice only it can give — where its column constants live, which flag
+// skips the check — by wrapping it.
+type LayoutError struct {
+	// Sheet is the sheet that was checked.
+	Sheet string
+
+	// HeaderRow is the row the captions were read from.
+	HeaderRow int
+
+	// GroupRow is the row the group captions were read from, or 0 when
+	// the sheet has none.
+	GroupRow int
+
+	// Problems holds one line per mismatched column, in the order the
+	// caller listed the columns.
+	Problems []string
 }
 
 // Column is one column of the expected layout: where it is, what it
@@ -93,101 +87,37 @@ type Column struct {
 	Purpose string
 }
 
+// File is an open spreadsheet and its resolved layout.
+type File struct {
+	// file is the open workbook. Hyperlink and Link read through it, and
+	// everything else reads the grid below.
+	file *excelize.File
+
+	// rows is the whole sheet, read once at Open: one slice per row, each
+	// as long as its last populated cell, so a short row is the norm.
+	rows [][]string
+
+	// merges are the sheet's merged blocks, resolved once at Open for
+	// Caption.
+	merges []mergedRange
+
+	// layout is the Layout Open was given, with Sheet filled in when it
+	// was left to default.
+	layout Layout
+
+	// dir is the directory holding the workbook; a relative hyperlink
+	// resolves against it, not against the working directory.
+	dir string
+
+	// date1904 is the workbook's own epoch setting.
+	date1904 bool
+}
+
 // contains reports whether a 1-based row and column index fall inside the
 // range.
 func (m mergedRange) contains(row, col int) bool {
 	return row >= m.minRow && row <= m.maxRow &&
 		col >= m.minCol && col <= m.maxCol
-}
-
-// hyperlinkFormulaTarget extracts the link target from a HYPERLINK()
-// formula, returning "" for anything else.
-//
-// Only a literal first argument is understood —
-// HYPERLINK("documents/1.pdf","1"). A computed one,
-// HYPERLINK(CONCATENATE(...),...), would need a formula engine to
-// evaluate and is left to the caller rather than half-interpreted.
-func hyperlinkFormulaTarget(formula string) string {
-	f := strings.TrimSpace(formula)
-	if f == "" {
-		return ""
-	}
-	f = strings.TrimPrefix(f, "=")
-	if !strings.HasPrefix(strings.ToUpper(f), "HYPERLINK(") {
-		return ""
-	}
-	open := strings.Index(f, "(")
-	rest := strings.TrimSpace(f[open+1:])
-	if !strings.HasPrefix(rest, `"`) {
-		return "" // a computed argument — not a literal path
-	}
-	rest = rest[1:]
-	end := strings.Index(rest, `"`)
-	if end < 0 {
-		return ""
-	}
-	return strings.TrimSpace(rest[:end])
-}
-
-// normaliseCaption lowercases a caption and collapses runs of whitespace
-// so comparison ignores the trailing spaces and stray non-breaking
-// characters that accumulate in hand-maintained headers.
-func normaliseCaption(s string) string {
-	return strings.ToLower(
-		strings.Join(strings.Fields(Trim(s)), " "))
-}
-
-// foldCaption is normaliseCaption with the remaining spaces removed, for
-// comparing captions rather than displaying them.
-//
-// Interior spacing around punctuation is not a difference anybody means:
-// one sheet writes "A/B" in one column and "C/ D" in another, and pads a
-// third with trailing spaces. Folding lets one accepted spelling cover
-// the lot instead of listing every place a maintainer might have pressed
-// the space bar.
-func foldCaption(s string) string {
-	return strings.ReplaceAll(normaliseCaption(s), " ", "")
-}
-
-// readMerges resolves the sheet's merged ranges to coordinates.
-//
-// A failure yields no ranges rather than an error. The merge list is only
-// used to resolve header captions, and a sheet whose merges cannot be
-// read still imports correctly — the header check simply reports the
-// columns whose caption lives in a neighbouring cell, which is a far
-// better outcome than refusing to open the file.
-func readMerges(f *excelize.File, sheet string) []mergedRange {
-	cells, err := f.GetMergeCells(sheet)
-	if err != nil {
-		return nil
-	}
-
-	out := make([]mergedRange, 0, len(cells))
-	for _, mc := range cells {
-		// MergeCell is []string{"C5:E5", "value"}. GetEndAxis indexes
-		// into the half after the colon, so a malformed entry without
-		// one is skipped rather than allowed to panic on a file nobody
-		// can then open.
-		if len(mc) < 2 || !strings.Contains(mc[0], ":") {
-			continue
-		}
-		minCol, minRow, err := excelize.CellNameToCoordinates(
-			mc.GetStartAxis())
-		if err != nil {
-			continue
-		}
-		maxCol, maxRow, err := excelize.CellNameToCoordinates(
-			mc.GetEndAxis())
-		if err != nil {
-			continue
-		}
-		out = append(out, mergedRange{
-			minCol: minCol, minRow: minRow,
-			maxCol: maxCol, maxRow: maxRow,
-			value: mc.GetCellValue(),
-		})
-	}
-	return out
 }
 
 // uses1904 reports whether the workbook counts dates from 1904 rather
@@ -235,6 +165,26 @@ func (w *File) captionAt(row int, col string) string {
 	return Trim(w.mergedValue(row, col))
 }
 
+// normaliseCaption lowercases a caption and collapses runs of whitespace
+// so comparison ignores the trailing spaces and stray non-breaking
+// characters that accumulate in hand-maintained headers.
+func normaliseCaption(s string) string {
+	return strings.ToLower(
+		strings.Join(strings.Fields(Trim(s)), " "))
+}
+
+// foldCaption is normaliseCaption with the remaining spaces removed, for
+// comparing captions rather than displaying them.
+//
+// Interior spacing around punctuation is not a difference anybody means:
+// one sheet writes "A/B" in one column and "C/ D" in another, and pads a
+// third with trailing spaces. Folding lets one accepted spelling cover
+// the lot instead of listing every place a maintainer might have pressed
+// the space bar.
+func foldCaption(s string) string {
+	return strings.ReplaceAll(normaliseCaption(s), " ", "")
+}
+
 // quoteAny renders the accepted captions for an error message.
 func quoteAny(captions []string) string {
 	quoted := make([]string, 0, len(captions))
@@ -242,6 +192,76 @@ func quoteAny(captions []string) string {
 		quoted = append(quoted, fmt.Sprintf("%q", c))
 	}
 	return strings.Join(quoted, " or ")
+}
+
+// hyperlinkFormulaTarget extracts the link target from a HYPERLINK()
+// formula, returning "" for anything else.
+//
+// Only a literal first argument is understood —
+// HYPERLINK("documents/1.pdf","1"). A computed one,
+// HYPERLINK(CONCATENATE(...),...), would need a formula engine to
+// evaluate and is left to the caller rather than half-interpreted.
+func hyperlinkFormulaTarget(formula string) string {
+	f := strings.TrimSpace(formula)
+	if f == "" {
+		return ""
+	}
+	f = strings.TrimPrefix(f, "=")
+	if !strings.HasPrefix(strings.ToUpper(f), "HYPERLINK(") {
+		return ""
+	}
+	open := strings.Index(f, "(")
+	rest := strings.TrimSpace(f[open+1:])
+	if !strings.HasPrefix(rest, `"`) {
+		return "" // a computed argument — not a literal path
+	}
+	rest = rest[1:]
+	end := strings.Index(rest, `"`)
+	if end < 0 {
+		return ""
+	}
+	return strings.TrimSpace(rest[:end])
+}
+
+// readMerges resolves the sheet's merged ranges to coordinates.
+//
+// A failure yields no ranges rather than an error. The merge list is only
+// used to resolve header captions, and a sheet whose merges cannot be
+// read still imports correctly — the header check simply reports the
+// columns whose caption lives in a neighbouring cell, which is a far
+// better outcome than refusing to open the file.
+func readMerges(f *excelize.File, sheet string) []mergedRange {
+	cells, err := f.GetMergeCells(sheet)
+	if err != nil {
+		return nil
+	}
+
+	out := make([]mergedRange, 0, len(cells))
+	for _, mc := range cells {
+		// MergeCell is []string{"C5:E5", "value"}. GetEndAxis indexes
+		// into the half after the colon, so a malformed entry without
+		// one is skipped rather than allowed to panic on a file nobody
+		// can then open.
+		if len(mc) < 2 || !strings.Contains(mc[0], ":") {
+			continue
+		}
+		minCol, minRow, err := excelize.CellNameToCoordinates(
+			mc.GetStartAxis())
+		if err != nil {
+			continue
+		}
+		maxCol, maxRow, err := excelize.CellNameToCoordinates(
+			mc.GetEndAxis())
+		if err != nil {
+			continue
+		}
+		out = append(out, mergedRange{
+			minCol: minCol, minRow: minRow,
+			maxCol: maxCol, maxRow: maxRow,
+			value: mc.GetCellValue(),
+		})
+	}
+	return out
 }
 
 // Dir returns the absolute directory holding the workbook. A relative
@@ -289,19 +309,6 @@ func (w *File) Cell(row int, col string) string {
 		return ""
 	}
 	return cells[idx-1]
-}
-
-// Caption returns a column's effective label: the sub-caption when it has
-// one, and the group caption otherwise.
-//
-// Both are resolved through the merge list, so a column whose caption is
-// stored in the top-left of a merged block reports that caption rather
-// than an empty string.
-func (w *File) Caption(col string) string {
-	if v := w.captionAt(w.layout.HeaderRow, col); v != "" {
-		return v
-	}
-	return w.captionAt(w.GroupRow(), col)
 }
 
 // Error renders every mismatch, one per line.
@@ -400,6 +407,16 @@ func (w *File) GroupRow() int {
 	return 0
 }
 
+// LastDataRow resolves the final row to read, honouring an explicit
+// Layout.LastRow and otherwise running to the end of the sheet.
+func (w *File) LastDataRow() int {
+	last := len(w.rows)
+	if w.layout.LastRow > 0 && w.layout.LastRow < last {
+		return w.layout.LastRow
+	}
+	return last
+}
+
 // DataRows returns the numbers of the rows worth reading: every row in
 // the data range carrying something in at least one of cols.
 //
@@ -425,14 +442,17 @@ func (w *File) DataRows(cols []Column) []int {
 	return out
 }
 
-// LastDataRow resolves the final row to read, honouring an explicit
-// Layout.LastRow and otherwise running to the end of the sheet.
-func (w *File) LastDataRow() int {
-	last := len(w.rows)
-	if w.layout.LastRow > 0 && w.layout.LastRow < last {
-		return w.layout.LastRow
+// Caption returns a column's effective label: the sub-caption when it has
+// one, and the group caption otherwise.
+//
+// Both are resolved through the merge list, so a column whose caption is
+// stored in the top-left of a merged block reports that caption rather
+// than an empty string.
+func (w *File) Caption(col string) string {
+	if v := w.captionAt(w.layout.HeaderRow, col); v != "" {
+		return v
 	}
-	return last
+	return w.captionAt(w.GroupRow(), col)
 }
 
 // Open opens the file, resolves the sheet, and reads every row.
@@ -445,12 +465,13 @@ func (w *File) LastDataRow() int {
 //
 // RawCellValue is the load-bearing option: without it excelize applies
 // the cell's number format, so a date comes back as whatever string the
-// sheet happens to display it as rather than as the serial underneath. It
-// also means a formula cell yields its CACHED result rather than the
-// formula text, which matters for every generated column. A workbook
-// saved by a script rather than by Excel carries no cached values at all,
-// and those cells read as empty — worth knowing before treating a blank
-// as a missing value in the source data.
+// sheet happens to display it as rather than as the serial underneath.
+//
+// A formula cell yields its CACHED result rather than the formula text,
+// with or without that option, which matters for every generated column.
+// A workbook saved by a script rather than by Excel carries no cached
+// values at all, and those cells read as empty — worth knowing before
+// treating a blank as a missing value in the source data.
 func Open(path string, layout Layout) (*File, error) {
 	f, err := excelize.OpenFile(path)
 	if err != nil {
@@ -487,11 +508,6 @@ func Open(path string, layout Layout) (*File, error) {
 		dir:      dir,
 		date1904: uses1904(f),
 	}, nil
-}
-
-// Close releases the workbook's temporary resources.
-func (w *File) Close() error {
-	return w.file.Close()
 }
 
 // VerifyHeaders checks that every column carries the caption it is
@@ -534,4 +550,9 @@ func (w *File) VerifyHeaders(cols []Column) error {
 		GroupRow:  w.GroupRow(),
 		Problems:  problems,
 	}
+}
+
+// Close releases the workbook's temporary resources.
+func (w *File) Close() error {
+	return w.file.Close()
 }

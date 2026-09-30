@@ -9,6 +9,9 @@
 //	func main() {
 //		ds, _ := importer.Lookup(*dataset)
 //		run := &importer.Run{Log: log, Opt: opt, Count: &importer.Counters{}}
+//		if err := ds.Connect(ctx, transport, run); err != nil {
+//			...
+//		}
 //		outcomes, err := importer.Execute(ctx, ds, path, run)
 //		...
 //		importer.PrintSummary(os.Stdout, path, ds, run, outcomes)
@@ -29,9 +32,14 @@
 // into, and an importer that refused the file would never import anything.
 //
 // So the unit of failure is the ROW, not the run, and the output is a
-// report rather than an error. Only three things stop a run: the workbook
-// will not open, the header check fails, or the dataset's own Prepare
-// gives up.
+// report rather than an error. Once Execute has it, only three things stop
+// a run: the workbook will not open, the header check fails, or the
+// dataset's own Prepare gives up. Connect failing stops it earlier, before
+// Execute is called at all.
+//
+// A cancelled context ends a run early without failing it. Execute stops
+// between rows, never inside one, and returns every outcome it already has,
+// so the report still names each row that was written.
 //
 // # The header check is the one gate
 //

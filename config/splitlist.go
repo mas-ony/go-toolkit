@@ -31,17 +31,29 @@ import (
 // what that costs depends on the key. For fiber.zerolog.fields the
 // middleware ignores names it does not recognise and Validate only rejects
 // an empty list, so the service runs with none of the requested fields and
-// no error anywhere. For fiber.request_methods it is worse: len() is 1, so
-// Fiber does NOT fall back to DefaultMethods — it builds a router whose only
-// registered method is a string no client will ever send, and answers 405 to
-// everything. That is why this helper exists rather than a comment telling
-// operators to use spaces.
+// no error anywhere. For fiber.request_methods it is louder and no clearer:
+// len() is 1, so Fiber does NOT fall back to DefaultMethods, and the one
+// method its router knows is a string no client sends. Registering the
+// first GET route panics at startup with "add: invalid http method GET",
+// naming neither the key nor the comma, and a request that reaches the
+// router anyway is answered 501 Not Implemented. That is why this helper
+// exists rather than a comment telling operators to use spaces.
+//
+// A comma-separated string written in config.yaml as a plain scalar takes
+// the same path as one from the environment, so the file accepts that
+// spelling too.
 //
 // Detection is by comma rather than by asking Viper where the value came
 // from, because Viper does not expose that. GetString on a sequence fails
 // its cast and returns "", which contains no comma, so a file value falls
 // through to GetStringSlice untouched. A whitespace-separated environment
 // value has no comma either and is handled by the same fallback.
+//
+// The comma path drops empty elements, and the whitespace fallback never
+// produces one, so neither string spelling can smuggle in a "". A YAML
+// sequence is passed through as written, though: an empty string written
+// there as an element survives, and it is the section's Validate that has
+// to judge it. An absent key yields no elements at all.
 func splitList(v *viper.Viper, key string) []string {
 	raw := v.GetString(key)
 	if !strings.Contains(raw, ",") {

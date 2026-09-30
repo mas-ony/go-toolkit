@@ -6,7 +6,6 @@ import (
 	"strings"
 
 	"github.com/gofiber/fiber/v3"
-
 	"github.com/mas-ony/go-toolkit/database"
 )
 
@@ -84,9 +83,10 @@ func ID(c fiber.Ctx, param string) (int, error) {
 // caller can test len(ids) == 0 and leave its IN clause out.
 //
 // Each value becomes one bound parameter downstream, and SQL Server refuses
-// a statement carrying more than 2100 of them. A deployment that raises the
-// server's read-buffer size enough to accept a list that long needs a limit
-// of its own.
+// a statement carrying more than 2100 of them. Fiber's default 4 KiB read
+// buffer turns a query string that long away before it gets here, so the
+// ceiling matters only to a deployment that raises fiber.read_buffer_size,
+// and that deployment needs a limit of its own.
 func IDs(c fiber.Ctx, param string) []int {
 	var ids []int
 	for _, token := range splitList(c.Query(param)) {

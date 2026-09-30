@@ -7,19 +7,23 @@ package config
 // default reader SILENTLY: cast.ToStringSlice splits a bare string on
 // whitespace, so "a,b,c" becomes the single element "a,b,c". For
 // fiber.request_methods that means a router whose only method is a string
-// no client sends, answering 405 to everything.
+// no client sends: the first route registered panics at startup, and any
+// request that reaches the router is answered 501.
 //
 // The file shape and the comma shape are both reachable in memory — Set
 // puts a bare string where an environment variable would put one — so
 // none of this needs a real variable.
 
 import (
-	"reflect"
+	"slices"
 	"testing"
 
 	"github.com/spf13/viper"
 )
 
+// Every shape a list key arrives in reads as the same elements: a YAML
+// sequence, a comma-separated string with or without stray spaces and
+// empty elements, and a whitespace-separated one.
 func TestSplitList(t *testing.T) {
 	t.Parallel()
 
@@ -83,7 +87,7 @@ func TestSplitList(t *testing.T) {
 			v.Set("zqunit.list", tc.value)
 
 			got := splitList(v, "zqunit.list")
-			if !reflect.DeepEqual(got, tc.want) {
+			if !slices.Equal(got, tc.want) {
 				t.Errorf("splitList = %#v, want %#v", got, tc.want)
 			}
 		})
@@ -104,5 +108,29 @@ func TestSplitListHasNoPhantomElements(t *testing.T) {
 	v.Set("zqunit.commas", ",,,")
 	if got := splitList(v, "zqunit.commas"); len(got) != 0 {
 		t.Errorf("a value of only commas = %#v, want no elements", got)
+	}
+}
+
+// An absent key and a stated empty list both have length zero and mean
+// different things: nil lets a middleware substitute its own default,
+// while a made-but-empty list is taken as written. The zerolog field and
+// level lists and fiber.client.no_retry_methods all turn on that
+// difference, so it is pinned here rather than assumed of spf13/cast.
+func TestSplitListKeepsAbsentAndEmptyApart(t *testing.T) {
+	t.Parallel()
+
+	if got := splitList(viper.New(), "zqunit.absent"); got != nil {
+		t.Errorf("an absent key = %#v, want nil", got)
+	}
+
+	commas := viper.New()
+	commas.Set("zqunit.list", ",")
+	for name, v := range map[string]*viper.Viper{
+		"a YAML []":   yamlViper(t, "zqunit:\n  list: []\n"),
+		"only commas": commas,
+	} {
+		if got := splitList(v, "zqunit.list"); got == nil || len(got) != 0 {
+			t.Errorf("%s = %#v, want a non-nil empty list", name, got)
+		}
 	}
 }

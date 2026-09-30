@@ -54,6 +54,8 @@ func insertID(ctx context.Context, ext sqlx.ExtContext,
 	return err
 }
 
+// A committed write is visible from outside the transaction, and a write
+// followed by fn's error is not, with that error returned untouched.
 func TestIntegrationWithTxCommitsAndRollsBack(t *testing.T) {
 	forEachEngine(t, func(t *testing.T, db *sqlx.DB) {
 		table := txFixture(t, db)

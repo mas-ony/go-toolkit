@@ -46,6 +46,17 @@ import (
 	"github.com/spf13/viper"
 )
 
+// ListenConfig wraps fiber.ListenConfig so it participates in the standard
+// Validate/String lifecycle used by all other sub-configs.
+type ListenConfig struct {
+	// Embedded as a POINTER, so both the wrapper and the embedded struct can
+	// be nil independently — hence the two-part nil check in Validate.
+	// Embedding also promotes the fields (c.ShutdownTimeout, not
+	// c.ListenConfig.ShutdownTimeout), which is why a nil embedded pointer
+	// panics on field access rather than at the method call.
+	*fiber.ListenConfig
+}
+
 // TLS version constants for fiber.listen.tls_min_version.
 //
 // Spelled as untyped decimal rather than tls.VersionTLS12 so this package does
@@ -106,18 +117,18 @@ const maxUnixSocketFileMode = 0o777
 // that silently loses requests. That is the right way round for a guess.
 //
 // Pinning the dependency is what keeps it honest; go.mod holds fasthttp at
-// v1.73.0, where this is 5s.
+// v1.74.0, where this is 5s. Re-read shutdownChildren on every bump.
 const defaultPreforkShutdownGracePeriod = 5 * time.Second
 
 // validListenerNetworks is the allowlist checked by ListenConfig.Validate.
 //
-// Matched exactly, no case folding, because both consumers compare exactly:
-// The application branches on `== "unix"` to decide whether app.Host is a
+// Matched exactly, no case folding, because both consumers compare exactly.
+// An application branches on `== "unix"` to decide whether app.Host is a
 // socket path or a bind address, and Fiber hands the string to net.Listen
-// unchanged. "UNIX" therefore takes the tcp branch in main, gets a ":port"
-// appended, and dies inside net.Listen as an unknown network — a message
-// naming neither key. Cross-section validation explicitly defers this case
-// here.
+// unchanged. "UNIX" would therefore take the tcp branch, get a ":port"
+// appended, and die inside net.Listen as an unknown network — a message
+// naming neither key. The application's cross-section validation leaves
+// this case to Validate here.
 //
 // The empty string is absent deliberately: Fiber normalises "" to NetworkTCP4
 // before use, so an unset key is valid and never reaches this map (see the
@@ -127,17 +138,6 @@ var validListenerNetworks = map[string]struct{}{
 	"tcp4": {},
 	"tcp6": {},
 	"unix": {},
-}
-
-// ListenConfig wraps fiber.ListenConfig so it participates in the standard
-// Validate/String lifecycle used by all other sub-configs.
-type ListenConfig struct {
-	// Embedded as a POINTER, so both the wrapper and the embedded struct can
-	// be nil independently — hence the two-part nil check in Validate.
-	// Embedding also promotes the fields (c.ShutdownTimeout, not
-	// c.ListenConfig.ShutdownTimeout), which is why a nil embedded pointer
-	// panics on field access rather than at the method call.
-	*fiber.ListenConfig
 }
 
 // octalIntent recovers the mode an operator meant when they wrote one without
@@ -185,24 +185,25 @@ func octalIntent(got uint32) (uint32, bool) {
 //     "unset" does not mean the same thing for both. GracefulContext is the
 //     one with teeth, and it IS a true no-hook nil: leave it out and Fiber
 //     never starts its shutdown goroutine, so ShutdownTimeout below is read by
-//     nothing at all. main supplies it. PreforkLogger is NOT a no-hook nil,
-//     despite sitting in the same list. Fiber's prefork path substitutes its
-//     own preforkLogger{}, which forwards to Fiber's log.Infof — so the
-//     master's "child exited, restarting" lines go out through Fiber's
-//     unstructured logger rather than the application's zerolog. That is the
-//     same split-output shape as the recover middleware's stderr fallback, on
-//     the one path whose whole job is reporting a crash loop. Inert while
-//     enable_prefork is false, which is why it is not wired; wiring it means
-//     Go code at the Listen call site, since an interface cannot come from a
-//     key here.
+//     nothing at all. The application supplies it. PreforkLogger is NOT a
+//     no-hook nil, despite sitting in the same list. Fiber's prefork path
+//     substitutes its own preforkLogger{}, which forwards to Fiber's
+//     log.Infof — so the master's "child exited, restarting" lines go out
+//     through Fiber's unstructured logger rather than the application's
+//     zerolog. That is the same split-output shape as the recover
+//     middleware's stderr fallback, on the one path whose whole job is
+//     reporting a crash loop. Inert while enable_prefork is false, which is
+//     why it is not wired; wiring it means Go code at the Listen call site,
+//     since an interface cannot come from a key here.
 //   - Two are Go-only for a softer reason. TLSConfig (*tls.Config) and
 //     AutoCertManager (*autocert.Manager) are structs with constructors rather
 //     than literals — TLSConfig's useful part is its GetCertificate hook,
 //     which is a func again, and AutoCertManager is the ACME path. Both are
-//     alternative certificate sources. This service takes its certificate from
-//     cert_file/cert_key_file, terminating in front of a gateway that already
-//     owns renewal, so neither is wired. Adding either means Go code at the
-//     Listen call site, not a key here.
+//     alternative certificate sources. This package reads the certificate
+//     from cert_file and cert_key_file, which suits a service whose
+//     certificate something else renews — a gateway, cert-manager — so
+//     neither is wired. Adding either means Go code at the Listen call site,
+//     not a key here.
 //
 // The zero values are what the section has to explain. Fiber passes both
 // straight through to fasthttp's prefork package, which substitutes a default
@@ -253,8 +254,8 @@ func octalIntent(got uint32) (uint32, bool) {
 // ListenConfig.TLSConfig is nil. A *tls.Config assigned at the Listen call
 // site takes the other branch, where this value is not validated and not used
 // — it is reported as superseded and the tls.Config's own MinVersion decides.
-// Nothing here wires that field (see the seven above), so the branch is not
-// live today.
+// This package never sets that field (see the seven above), so that branch
+// is reachable only from Go code at the Listen call site.
 func NewListenConfig(v *viper.Viper) *ListenConfig {
 	return &ListenConfig{
 		ListenConfig: &fiber.ListenConfig{
@@ -270,7 +271,8 @@ func NewListenConfig(v *viper.Viper) *ListenConfig {
 
 			// CertFile is the path to the server TLS certificate (PEM format).
 			// Leave empty to serve plain HTTP. Must be set together with
-			// CertKeyFile.
+			// CertKeyFile: with only one of the two, Fiber serves plain HTTP
+			// without saying so, which Validate refuses.
 			CertFile: v.GetString("fiber.listen.cert_file"),
 
 			// CertKeyFile is the path to the server TLS private key
@@ -289,23 +291,30 @@ func NewListenConfig(v *viper.Viper) *ListenConfig {
 			DisableStartupMessage: v.GetBool(
 				"fiber.listen.disable_startup_message"),
 
-			// EnablePrefork forks one worker process per CPU core using
-			// SO_REUSEPORT for higher multi-core throughput.
+			// EnablePrefork forks one worker process per CPU core, all
+			// accepting on the same port through SO_REUSEPORT, for higher
+			// multi-core throughput.
 			//
-			// The trade-off that DOES apply is the connection pool. Each
-			// forked worker runs its own main, opens its own *sqlx.DB, and
-			// applies database.max_open_conns independently — so the cap is
-			// per-process, not per-service. max_open_conns: 25 on an 8-core
-			// host becomes up to 200 connections against SQL Server's limit,
-			// and the pool tuning in database_config.go stops describing what
-			// the database actually sees. Divide max_open_conns by the core
-			// count before enabling this, or leave it false.
+			// Every worker is a whole process, so everything a process keeps
+			// in memory is multiplied or split:
 			//
-			// Second trade-off, unchanged: graceful shutdown needs every
-			// forked child to receive SIGTERM. Fiber handles the fork side,
-			// but systemd or Docker must signal the process GROUP rather than
-			// only the parent, or the children are killed outright while the
-			// parent drains.
+			//   - Sessions. Each worker has its own in-memory session store,
+			//     so under fiber.auth.mode: session a request that lands on
+			//     another worker arrives logged out. The application's
+			//     cross-section validation refuses that pairing.
+			//   - The database pool. Each worker opens its own and applies
+			//     database.max_open_conns on its own, so the cap is per
+			//     process: 25 on an 8-core host becomes up to 200
+			//     connections, and the pool tuning in database_config.go
+			//     stops describing what the database sees. Divide
+			//     max_open_conns by the core count before enabling this.
+			//   - The rate limiter. Each worker counts on its own, so the
+			//     per-client quota becomes fiber.limiter.max × workers.
+			//
+			// Graceful shutdown also needs every child to receive SIGTERM.
+			// Fiber handles the fork side, but systemd or Docker must signal
+			// the process GROUP rather than only the parent, or the children
+			// are killed outright while the parent drains.
 			EnablePrefork: v.GetBool("fiber.listen.enable_prefork"),
 
 			// EnablePrintRoutes prints all registered routes to stdout at
@@ -317,8 +326,8 @@ func NewListenConfig(v *viper.Viper) *ListenConfig {
 			//
 			// An empty value falls back to Fiber v3's default, which is "tcp4"
 			// (IPv4 only) — NOT dual-stack. If the service must also be
-			// reachable over IPv6, set "tcp" explicitly. config.yaml currently
-			// sets tcp4 explicitly, which matches the default.
+			// reachable over IPv6, set "tcp" explicitly. The committed
+			// config.yaml states tcp4, which matches the default.
 			// "unix" requires a socket path instead of host:port in
 			// AppConfig.Host.
 			//
@@ -390,6 +399,10 @@ func NewListenConfig(v *viper.Viper) *ListenConfig {
 			// after SIGTERMing its children before SIGKILLing the survivors.
 			// Read only when EnablePrefork is true; inert otherwise.
 			//
+			// The master tears its children down this way when its own
+			// supervision loop ends: when child exits, clean ones included,
+			// exceed prefork_recover_threshold, or when a respawn fails.
+			//
 			// NOT the same deadline as ShutdownTimeout below, despite reading
 			// like one. That key is how long a WORKER drains its own in-flight
 			// requests; this is how long the master tolerates a worker that
@@ -418,15 +431,18 @@ func NewListenConfig(v *viper.Viper) *ListenConfig {
 				"fiber.listen.prefork_shutdown_grace_period"),
 
 			// ShutdownTimeout is how long Fiber lets in-flight requests finish
-			// once a graceful shutdown BEGINS, before it stops waiting.
+			// once a graceful shutdown BEGINS, before it stops waiting. Under
+			// prefork that holds in every worker: Listen starts the shutdown
+			// goroutine before it takes the prefork branch, so each worker
+			// drains on its own context.
 			//
 			// Fiber installs no signal handler. It starts its shutdown
 			// goroutine only when ListenConfig.GracefulContext is non-nil, and
 			// that goroutine blocks on <-ctx.Done(); turning SIGTERM/SIGINT
-			// into that cancellation is main's job. This key is therefore
-			// inert on any path where main stops supplying the context, with
-			// nothing reporting it — the same shape as fiber.trust_proxy
-			// without an allowlist.
+			// into that cancellation is the application's job. This key is
+			// therefore inert on any path where the application stops
+			// supplying the context, with nothing reporting it — the same
+			// shape as fiber.trust_proxy without an allowlist.
 			//
 			// 0 is NOT "use Fiber's default". Fiber's documented 10s default
 			// is only applied when Listen is called with no ListenConfig at
@@ -445,9 +461,11 @@ func NewListenConfig(v *viper.Viper) *ListenConfig {
 			// regardless. Kubernetes defaults terminationGracePeriodSeconds to
 			// 30s, so 10s sits comfortably inside it.
 			//
-			// A bare number here parses as NANOSECONDS and is non-zero, so it
-			// passes Validate and makes shutdown effectively instant. Always
-			// write a unit.
+			// Required, and at least one second. A bare number parses as
+			// NANOSECONDS, and a negative value gives the drain a deadline
+			// that has already passed; either would make shutdown
+			// effectively instant, dropping every request still in flight.
+			// Always write a unit.
 			ShutdownTimeout: v.GetDuration("fiber.listen.shutdown_timeout"),
 
 			// TLSMinVersion is the minimum TLS version the server accepts.
@@ -518,10 +536,10 @@ func NewListenConfig(v *viper.Viper) *ListenConfig {
 //     PEM, or match each other. Only the PAIRING is checked. Reading the files
 //     here would duplicate what tls.LoadX509KeyPair does at Listen time and
 //     would race with a cert-manager rotation between startup and bind.
-//   - Whether main supplies a GracefulContext at all. Without one Fiber never
-//     starts its shutdown goroutine and ShutdownTimeout is read by nothing,
-//     but that field is a context.Context set at the Listen call site — this
-//     package populates neither and cannot see either.
+//   - Whether the application supplies a GracefulContext at all. Without one
+//     Fiber never starts its shutdown goroutine and ShutdownTimeout is read
+//     by nothing, but that field is a context.Context set at the Listen call
+//     site, which this package cannot see.
 //   - EnablePrintRoutes. A bool has no invalid value: both settings are
 //     meaningful and an absent key reads as false, which is the documented
 //     default. There is nothing a check could reject.
@@ -531,11 +549,10 @@ func NewListenConfig(v *viper.Viper) *ListenConfig {
 //     cannot know at config time on the machine that will run it.
 //   - DisableStartupMessage. A bool has no invalid value, the same as
 //     EnablePrintRoutes above. What could go wrong with it is not a value but
-//     an overwrite: main dereferences cfg.Listen.ListenConfig into a local
-//     before calling Listen, and a field assigned on that copy would silently
-//     outrank the key this package read. Nothing assigns one today — the copy
-//     is passed unmodified, and main says so at the line that makes it — but
-//     that is a line of Go in another package, which nothing here can see.
+//     an overwrite: an application that dereferences cfg.Listen.ListenConfig
+//     into a local before calling Listen, and assigns a field on that copy,
+//     silently outranks the key this package read. That is a line of Go in
+//     another package, which nothing here can see.
 //   - CertClientFile on its own. mTLS without server TLS is a useless
 //     combination rather than an invalid one: Fiber ignores it when CertFile
 //     is empty, so nothing breaks and no behaviour is silently wrong.
@@ -550,11 +567,12 @@ func NewListenConfig(v *viper.Viper) *ListenConfig {
 //     switches to a unix socket or turns prefork on later does not inherit a
 //     number nobody ever validated.
 //
-// One check below is the exception to all of that, and the only one gated on
-// another key: ShutdownTimeout against PreforkShutdownGracePeriod, which fires
-// only when EnablePrefork is true. It is not a value check. Both numbers are
-// individually fine and the pairing is what is wrong, and only under prefork,
-// where a master exists to enforce the shorter of the two.
+// Two checks below are the exception to all of that, both gated on
+// EnablePrefork. One is the listener network, which prefork can bind only as
+// tcp4 or tcp6. The other is not a value check at all: ShutdownTimeout
+// against PreforkShutdownGracePeriod, where both numbers are individually
+// fine and the pairing is what is wrong, and only under prefork, where a
+// master exists to enforce the shorter of the two.
 //
 // Every check appends rather than returning early, so one restart surfaces
 // every fiber.listen.* problem at once.
@@ -569,20 +587,35 @@ func (c *ListenConfig) Validate() error {
 
 	// Required rather than defaulted, because 0 is not "ask Fiber" here — it
 	// disables the drain deadline and waits for the last connection forever.
-	// See the field comment in NewListenConfig.
-	if c.ShutdownTimeout == 0 {
+	// Anything else under a second is refused too: a negative deadline has
+	// already passed when the drain starts, and a bare number is
+	// nanoseconds, so both drop every in-flight request. See the field
+	// comment in NewListenConfig.
+	switch {
+	case c.ShutdownTimeout == 0:
 		errs = append(errs, errors.New("fiber.listen.shutdown_timeout is "+
 			"required: 0 does not select Fiber's 10s default, it removes the "+
 			"drain deadline entirely and waits indefinitely for in-flight "+
 			"requests"))
+	case c.ShutdownTimeout < time.Second:
+		errs = append(errs, fmt.Errorf("fiber.listen.shutdown_timeout must "+
+			"be at least 1s (got %s): a shorter drain drops every request "+
+			"still in flight, and if this was meant as seconds, write the "+
+			"unit — a bare number is nanoseconds",
+			c.ShutdownTimeout))
 	}
 
-	// CertFile and CertKeyFile are a pair. Fiber serves plain HTTP when both
-	// are empty and fails at Listen when exactly one is set.
+	// CertFile and CertKeyFile are a pair, and Fiber does not check that
+	// they are. Listen builds a TLS config only when BOTH are set; with one
+	// of them it falls through to the no-TLS branch and serves plain HTTP,
+	// without an error or a log line. So a certificate whose key was left
+	// out of the environment is a silent downgrade rather than a startup
+	// failure, and this check is what turns it into one.
 	if (c.CertFile == "") != (c.CertKeyFile == "") {
 		errs = append(errs, errors.New("fiber.listen.cert_file and "+
 			"fiber.listen.cert_key_file must both be set (to serve TLS) or "+
-			"both be empty (to serve plain HTTP)"))
+			"both be empty (to serve plain HTTP): with only one of them, "+
+			"Fiber serves plain HTTP without saying so"))
 	}
 
 	// Empty is valid because Fiber normalises it to tcp4. So only a non-empty
@@ -642,11 +675,11 @@ func (c *ListenConfig) Validate() error {
 		errs = append(errs, errors.New(msg))
 	}
 
-	// 0 is valid because Fiber normalises it to max(1, GOMAXPROCS/2), positive
-	// one also valid. So only a negative value is checked — and it has to be,
-	// because Fiber's normalisation tests for == 0, not <= 0, so a negative
-	// value is passed straight through to fasthttp as a restart budget the
-	// crash count exceeds immediately.
+	// 0 is valid, because Fiber replaces it with max(1, GOMAXPROCS/2), and so
+	// is any positive count. Only a negative value is checked — and it has to
+	// be, because Fiber's substitution tests for == 0, not <= 0, so a
+	// negative value reaches fasthttp as a restart budget the crash count
+	// exceeds on the first crash.
 	if c.PreforkRecoverThreshold < 0 {
 		errs = append(errs, fmt.Errorf(
 			"fiber.listen.prefork_recover_threshold cannot be negative "+
@@ -692,13 +725,13 @@ func (c *ListenConfig) Validate() error {
 	//
 	// Compared against the EFFECTIVE grace, not the literal value, since 0
 	// here is fasthttp's 5s rather than "no deadline" — see the constant. And
-	// gated on EnablePrefork, unlike every other check in this method, because
-	// without a master there is nobody to enforce the shorter number: an unset
-	// grace against any drain deadline is inert on a single-process
-	// deployment, where fasthttp's substituted 5s is a number nothing ever
-	// reads. Rejecting it there would fail configurations in which neither
-	// value is consulted, and would make a key that is documented as
-	// prefork-only mandatory for everyone.
+	// gated on EnablePrefork, like the network check above, because without a
+	// master there is nobody to enforce the shorter number: an unset grace
+	// against any drain deadline is inert on a single-process deployment,
+	// where fasthttp's substituted 5s is a number nothing ever reads.
+	// Rejecting it there would fail configurations in which neither value is
+	// consulted, and would make a key that is documented as prefork-only
+	// mandatory for everyone.
 	//
 	// A grace period stated above the drain deadline passes this rule with or
 	// without the gate. The gate is what keeps a deployment that never turns
@@ -742,13 +775,14 @@ func (c *ListenConfig) Validate() error {
 // Printing a value copy (%v on ListenConfig, not &ListenConfig) bypasses it
 // and dumps the struct fields directly.
 //
-// The nil check is TWO-PART, mirroring Validate's. zerolog reaches this method
-// through fmt.Stringer, and its own guard — `if val == nil` in
-// internal/json.AppendStringer — is an INTERFACE nil, which neither a typed
-// nil pointer nor a wrapper around a nil embedded pointer satisfies. So it
-// calls String on both, and without the second half the half-built one panics
-// inside the startup log line rather than rendering a placeholder.
-// The section list carries the argument.
+// The nil check is TWO-PART, mirroring Validate's. A logger's own guard, such
+// as zerolog's `if val == nil` before it calls a Stringer, compares an
+// INTERFACE with nil, which neither a typed nil pointer nor a wrapper around
+// a nil embedded pointer satisfies. Without the second half, the half-built
+// one would panic inside the startup log line instead of rendering a
+// placeholder.
+//
+// UnixSocketFileMode prints in octal (%#o), the notation it is written in.
 func (c *ListenConfig) String() string {
 	if c == nil {
 		return "<nil ListenConfig>"

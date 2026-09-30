@@ -127,6 +127,8 @@ func TestIntegrationStartTLSComesBeforeTheLogin(t *testing.T) {
 	}
 }
 
+// Implicit TLS encrypts from the first byte, so the login and the message
+// both travel over TLS.
 func TestIntegrationImplicitTLS(t *testing.T) {
 	t.Parallel()
 	r := (&relay{

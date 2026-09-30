@@ -8,10 +8,10 @@ package datetime
 // everything else is string handling. These two methods cannot: what they
 // are FOR is a disagreement between drivers, and the argument in Value's
 // doc comment — that go-mssqldb sends a value's own offset while
-// go-sql-driver converts to the DSN's location — was read out of driver
-// source rather than observed. This is where it is observed, and each half
-// only on its own engine's run: the MySQL half has been, against MariaDB,
-// and the SQL Server half needs a SQL Server DSN.
+// go-sql-driver converts to the DSN's location — is argued from driver
+// source. This is where it is observed, and each half only on its own
+// engine's run: the MySQL half needs a MySQL or MariaDB DSN, and the SQL
+// Server half a SQL Server one.
 //
 // The DSN variables and the build tag are the database package's, so one
 // scratch server serves both suites:
@@ -54,11 +54,14 @@ type engine struct {
 	quote    func(string) string
 }
 
+// row is one row of the scratch table, both columns scanned through Scan.
 type row struct {
 	D  *Datetime `db:"d"`
 	TS *Datetime `db:"ts"`
 }
 
+// engines lists both servers this suite can run against; forEachEngine
+// runs each one whose DSN is set.
 var engines = []engine{
 	{
 		name:     "mysql",
@@ -80,6 +83,28 @@ var engines = []engine{
 
 // tableSeq keeps scratch table names unique within one run.
 var tableSeq atomic.Int64
+
+// zoneOffsetAt reports time.Local's offset on the given date, which is not
+// today's offset wherever the zone observes DST.
+func zoneOffsetAt(year int, month time.Month, day int) int {
+	_, off := time.Date(year, month, day, 12, 0, 0, 0, time.Local).Zone()
+	return off
+}
+
+// scratchTable creates a two-column table and drops it when the test ends.
+func scratchTable(t *testing.T, e engine, db *sqlx.DB) string {
+	t.Helper()
+	name := e.quote(fmt.Sprintf("datetime_it_%d_%d",
+		time.Now().UnixNano()%1e9, tableSeq.Add(1)))
+	ddl := fmt.Sprintf(
+		"CREATE TABLE %s (id INT NOT NULL PRIMARY KEY, d %s NULL, "+
+			"ts %s NULL)", name, e.dateCol, e.stampCol)
+	if _, err := db.Exec(ddl); err != nil {
+		t.Fatalf("%v\n%s", err, ddl)
+	}
+	t.Cleanup(func() { _, _ = db.Exec("DROP TABLE " + name) })
+	return name
+}
 
 // forEachEngine runs fn once per engine whose DSN is set.
 func forEachEngine(t *testing.T, fn func(t *testing.T, e engine,
@@ -106,19 +131,20 @@ func forEachEngine(t *testing.T, fn func(t *testing.T, e engine,
 	}
 }
 
-// scratchTable creates a two-column table and drops it when the test ends.
-func scratchTable(t *testing.T, e engine, db *sqlx.DB) string {
+// read returns the row with the given id, scanned through Scan.
+func read(t *testing.T, db *sqlx.DB, table string, id int) row {
 	t.Helper()
-	name := e.quote(fmt.Sprintf("datetime_it_%d_%d",
-		time.Now().UnixNano()%1e9, tableSeq.Add(1)))
-	ddl := fmt.Sprintf(
-		"CREATE TABLE %s (id INT NOT NULL PRIMARY KEY, d %s NULL, "+
-			"ts %s NULL)", name, e.dateCol, e.stampCol)
-	if _, err := db.Exec(ddl); err != nil {
-		t.Fatalf("%v\n%s", err, ddl)
+	var got row
+	q, args, err := sqlx.Named(
+		"SELECT d, ts FROM "+table+" WHERE id = :id",
+		map[string]any{"id": id})
+	if err != nil {
+		t.Fatal(err)
 	}
-	t.Cleanup(func() { _, _ = db.Exec("DROP TABLE " + name) })
-	return name
+	if err := db.Get(&got, db.Rebind(q), args...); err != nil {
+		t.Fatalf("read %d: %v", id, err)
+	}
+	return got
 }
 
 // insert writes one row through Value and returns nothing; reading it back
@@ -137,29 +163,6 @@ func insert(t *testing.T, db *sqlx.DB, table string, id int,
 	}
 }
 
-// read returns the row with the given id, scanned through Scan.
-func read(t *testing.T, db *sqlx.DB, table string, id int) row {
-	t.Helper()
-	var got row
-	q, args, err := sqlx.Named(
-		"SELECT d, ts FROM "+table+" WHERE id = :id",
-		map[string]any{"id": id})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := db.Get(&got, db.Rebind(q), args...); err != nil {
-		t.Fatalf("read %d: %v", id, err)
-	}
-	return got
-}
-
-// zoneOffsetAt reports time.Local's offset on the given date, which is not
-// today's offset wherever the zone observes DST.
-func zoneOffsetAt(year int, month time.Month, day int) int {
-	_, off := time.Date(year, month, day, 12, 0, 0, 0, time.Local).Zone()
-	return off
-}
-
 // The headline claim: a value that arrives carrying UTC must not shift a
 // day when it lands in a DATE column.
 //
@@ -171,8 +174,8 @@ func zoneOffsetAt(year int, month time.Month, day int) int {
 // What a pass proves differs by engine, and the difference is the one
 // Value's comment describes. go-sql-driver converts every time.Time to the
 // DSN's location itself, so on MySQL this passes with or without Value's
-// own conversion to time.Local — that was checked by removing it and
-// running against MariaDB. go-mssqldb sends the value's own offset, so on
+// own conversion to time.Local: removing that conversion changes nothing
+// there. go-mssqldb sends the value's own offset, so on
 // SQL Server Value's conversion is the only thing standing between this
 // input and the wrong day. A MySQL-only run therefore confirms the
 // end-to-end agreement, and says nothing about whether Value's conversion

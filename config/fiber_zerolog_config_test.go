@@ -1,14 +1,36 @@
 package config
 
 // Tests for fiber_zerolog_config.go.
+//
+// What the section promises: a field list that is stated, the comma
+// spelling of it from the environment, level names from a short allowlist
+// that leaves out the ones that end the process or drop a class, per-class
+// lists of exactly three when set, a logger installed on a copy, and a
+// request-id key that matches the one the middleware writes.
 
 import (
+	"bytes"
+	"encoding/json"
+	"net/http/httptest"
+	"slices"
 	"testing"
 
 	fiberzerolog "github.com/gofiber/contrib/v3/zerolog"
+	"github.com/gofiber/fiber/v3"
+	"github.com/gofiber/fiber/v3/middleware/requestid"
 	"github.com/rs/zerolog"
 	"github.com/spf13/viper"
 )
+
+// zerologBase is a configuration the zerolog section accepts, which each
+// rule case changes one key at a time.
+var zerologBase = map[string]any{
+	"fiber.zerolog.fields": "status,method,latency",
+}
+
+// buildZerolog adapts NewZerologConfig to the constructor shape runRules
+// takes.
+func buildZerolog(v *viper.Viper) SectionConfig { return NewZerologConfig(v) }
 
 // fatal and panic are refused by name, because zerolog's Fatal exits and
 // Panic panics — as a REQUEST log level, either would end the process on
@@ -32,12 +54,6 @@ func TestParseLevel(t *testing.T) {
 		}
 	}
 }
-
-var zerologBase = map[string]any{
-	"fiber.zerolog.fields": "status,method,latency",
-}
-
-func buildZerolog(v *viper.Viper) SectionConfig { return NewZerologConfig(v) }
 
 // Messages and levels are PER CLASS — success, client error, server
 // error — so when either is set it must name exactly three. Two would
@@ -104,5 +120,59 @@ func TestWithLoggerInstallsOnACopy(t *testing.T) {
 	}
 	if z.String() != before {
 		t.Error("WithLogger modified the section")
+	}
+}
+
+// The comma spelling an operator reaches for in an environment variable is
+// three fields, not one field named "status,method,latency" that the
+// middleware would silently ignore. Set puts a bare string where an
+// environment variable would.
+func TestZerologFieldsFromEnvironment(t *testing.T) {
+	t.Parallel()
+	v := viper.New()
+	v.Set("fiber.zerolog.fields", "status,method,latency")
+	got := NewZerologConfig(v).Fields
+	if !slices.Equal(got, []string{"status", "method", "latency"}) {
+		t.Errorf("Fields = %q, want three fields", got)
+	}
+}
+
+// RequestIDField's snake-case spelling mirrors a constant the middleware
+// keeps unexported, so it is checked against a line the middleware really
+// writes: requestid inside zerolog, one request, and the key read back out
+// of the JSON.
+func TestZerologRequestIDFieldMatchesTheMiddleware(t *testing.T) {
+	t.Parallel()
+	for _, snake := range []bool{false, true} {
+		v := viper.New()
+		v.Set("fiber.zerolog.fields", "requestId")
+		v.Set("fiber.zerolog.fields_snake_case", snake)
+		z := NewZerologConfig(v)
+
+		var buf bytes.Buffer
+		app := fiber.New()
+		app.Use(fiberzerolog.New(z.WithLogger(zerolog.New(&buf))))
+		app.Use(requestid.New())
+		app.Get("/", func(c fiber.Ctx) error {
+			return c.SendStatus(fiber.StatusNoContent)
+		})
+
+		resp, err := app.Test(httptest.NewRequest(fiber.MethodGet, "/",
+			nil))
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = resp.Body.Close()
+
+		var line map[string]any
+		if err := json.Unmarshal(buf.Bytes(), &line); err != nil {
+			t.Fatalf("snake=%t: the log line is not JSON: %v\n%s", snake,
+				err, buf.String())
+		}
+		key := z.RequestIDField()
+		if id, _ := line[key].(string); id == "" {
+			t.Errorf("snake=%t: no %q field in the middleware's line:\n%s",
+				snake, key, buf.String())
+		}
 	}
 }

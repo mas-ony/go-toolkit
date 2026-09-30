@@ -1,6 +1,12 @@
 package xlsx
 
+// Tests for value.go: the separator rules in Decimal, both epochs and every
+// text layout in Date along with the serials no DATE column can hold, the
+// range guards in Int, the byte-measured cap in StrMax, the emptiness rules
+// in Str and Trim, and a date that keeps its day through datetime's Value.
+
 import (
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -98,6 +104,8 @@ func TestDecimalAmbiguousSingleSeparator(t *testing.T) {
 	}
 }
 
+// Date reads an Excel serial under the 1900 epoch and every text layout,
+// day-first; an empty cell is nil, and anything else is an error.
 func TestDate(t *testing.T) {
 	cases := []struct {
 		in   string
@@ -195,6 +203,8 @@ func TestDateAcceptsTheLastRepresentableDay(t *testing.T) {
 	}
 }
 
+// Int accepts a whole number, and a float with no fractional part; a
+// fraction is an error, never a truncation.
 func TestInt(t *testing.T) {
 	if p, err := Int(""); err != nil || p != nil {
 		t.Errorf("Int(\"\") = %v, %v; want nil, nil", p, err)
@@ -226,9 +236,10 @@ func TestInt(t *testing.T) {
 // meets and CI on amd64 does not, so the assertion is written to pin the
 // answer rather than the platform.
 //
-// The last two entries are the boundary. 2^63 is the first float64 no int64
-// holds; 2^63-1024 is the largest one that fits, and it must still parse —
-// a guard written with the wrong comparison rejects both.
+// The last entry and the constant after the loop are the boundary. 2^63 is
+// the first float64 no int64 holds; 2^63-1024 is the largest one that fits,
+// and it must still parse — a guard written with the wrong comparison
+// rejects both.
 func TestIntRejectsNonFiniteAndOutOfRangeValues(t *testing.T) {
 	for _, in := range []string{
 		"NaN", "nan", "Inf", "inf", "+Inf", "-Inf",
@@ -239,17 +250,23 @@ func TestIntRejectsNonFiniteAndOutOfRangeValues(t *testing.T) {
 		}
 	}
 
+	// The boundary is int64's, and means nothing where int is narrower.
+	if strconv.IntSize < 64 {
+		t.Skip("int is narrower than 64 bits on this target")
+	}
 	const largestThatFits = "9223372036854774784" // 2^63 - 1024
 	got, err := Int(largestThatFits)
 	if err != nil || got == nil {
 		t.Fatalf("Int(%q): %v", largestThatFits, err)
 	}
-	if *got != 9223372036854774784 {
+	if int64(*got) != 9223372036854774784 {
 		t.Errorf("Int(%q) = %d, want 9223372036854774784",
 			largestThatFits, *got)
 	}
 }
 
+// StrMax refuses a value longer than its column, and accepts one exactly
+// as long.
 func TestStrMaxRejectsOverlongValue(t *testing.T) {
 	if _, err := StrMax("12345678901", 10, "location"); err == nil {
 		t.Error("expected an error for a value wider than its column")
@@ -347,8 +364,49 @@ func TestTheEpochsAreAFixedDistanceApart(t *testing.T) {
 			"being ignored")
 	}
 
-	gap := right.Time.Sub(wrong.Time)
+	// Counted in calendar days rather than as a Duration between the two
+	// values, because both are local midnights, and a zone that changes its
+	// offset between the two dates would put the Duration an hour out
+	// without either date being wrong.
+	day := func(tm time.Time) time.Time {
+		y, m, d := tm.Date()
+		return time.Date(y, m, d, 0, 0, 0, 0, time.UTC)
+	}
+	gap := day(right.Time).Sub(day(wrong.Time))
 	if want := 1462 * 24 * time.Hour; gap != want {
 		t.Errorf("the epochs differ by %v, want %v", gap, want)
+	}
+}
+
+// A date keeps its day on the way to the driver in any zone.
+// datetime.Datetime.Value converts into time.Local, so Date has to hand back
+// local midnight: midnight UTC would convert to the previous evening west of
+// Greenwich, and a DATE column would record the day before.
+//
+// The zone is set for this test alone, which is safe only because nothing in
+// this package's tests runs in parallel. Both parse paths are checked, since
+// each reaches Day from a UTC value of its own.
+func TestDateKeepsItsDayThroughValueWestOfGreenwich(t *testing.T) {
+	old := time.Local
+	time.Local = time.FixedZone("UTC-5", -5*60*60)
+	t.Cleanup(func() { time.Local = old })
+
+	for _, in := range []string{"36573", "17/02/2000"} {
+		got, err := Date(in, false)
+		if err != nil || got == nil {
+			t.Fatalf("Date(%q): %v", in, err)
+		}
+		v, err := got.Value()
+		if err != nil {
+			t.Fatalf("Value: %v", err)
+		}
+		tm, ok := v.(time.Time)
+		if !ok {
+			t.Fatalf("Value = %T, want time.Time", v)
+		}
+		if day := tm.Format("2006-01-02"); day != "2000-02-17" {
+			t.Errorf("Date(%q) reaches the driver as %s, want 2000-02-17",
+				in, day)
+		}
 	}
 }

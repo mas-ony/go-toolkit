@@ -1,10 +1,19 @@
 package database
 
+// Tests for namespace.go.
+//
+// What the file promises: a plain name stays bare without consulting the
+// dialect, a name reserved on either engine or not a plain identifier is
+// quoted, the pasted word lists keep their shape, and NamespaceForYear
+// rewrites the database segment alone, idempotently for the names it
+// documents.
+
 import (
 	"strings"
 	"testing"
 )
 
+// Configure stores exactly the prefix it is given, the empty one included.
 func TestConfigure(t *testing.T) {
 	prev := DefaultNamespace
 	t.Cleanup(func() { DefaultNamespace = prev })
@@ -33,12 +42,14 @@ func TestQualifyLeavesPlainNamesBare(t *testing.T) {
 	}
 	for _, c := range cases {
 		if got := Qualify(c.ns, c.table); got != c.want {
-			t.Errorf("qualify(%q, %q) = %q, want %q",
+			t.Errorf("Qualify(%q, %q) = %q, want %q",
 				c.ns, c.table, got, c.want)
 		}
 	}
 }
 
+// A reserved word on either engine, and anything that is not a plain
+// ASCII identifier, is quoted in the selected grammar.
 func TestQualifyQuotesNamesThatCannotBeBare(t *testing.T) {
 	cases := []struct {
 		name, ns, table  string
@@ -80,17 +91,19 @@ func TestQualifyQuotesNamesThatCannotBeBare(t *testing.T) {
 	for _, c := range cases {
 		withDialect(t, DialectMySQL)
 		if got := Qualify(c.ns, c.table); got != c.mysql {
-			t.Errorf("%s on MySQL: qualify(%q, %q) = %q, want %q",
+			t.Errorf("%s on MySQL: Qualify(%q, %q) = %q, want %q",
 				c.name, c.ns, c.table, got, c.mysql)
 		}
 		withDialect(t, DialectSQLServer)
 		if got := Qualify(c.ns, c.table); got != c.sqlserver {
-			t.Errorf("%s on SQL Server: qualify(%q, %q) = %q, want %q",
+			t.Errorf("%s on SQL Server: Qualify(%q, %q) = %q, want %q",
 				c.name, c.ns, c.table, got, c.sqlserver)
 		}
 	}
 }
 
+// isPlainName accepts an ASCII letter or underscore followed by letters,
+// digits and underscores, and nothing else.
 func TestIsPlainName(t *testing.T) {
 	cases := map[string]bool{
 		"a":          true,
@@ -158,6 +171,9 @@ func TestReservedWords(t *testing.T) {
 	}
 }
 
+// NamespaceForYear rewrites only the database segment, replacing a year
+// already there, and leaves the prefix alone for an empty prefix or a year
+// below 1.
 func TestNamespaceForYear(t *testing.T) {
 	cases := []struct {
 		name, ns string
@@ -176,7 +192,7 @@ func TestNamespaceForYear(t *testing.T) {
 	}
 	for _, c := range cases {
 		if got := NamespaceForYear(c.ns, c.year); got != c.want {
-			t.Errorf("%s: namespaceForYear(%q, %d) = %q, want %q",
+			t.Errorf("%s: NamespaceForYear(%q, %d) = %q, want %q",
 				c.name, c.ns, c.year, got, c.want)
 		}
 	}
@@ -185,20 +201,22 @@ func TestNamespaceForYear(t *testing.T) {
 // Idempotence is what lets a scoped copy be scoped again without the year
 // compounding into a database nobody created. It holds for four-digit years
 // and names that do not end in a digit before the year; see
-// namespaceForYear for the two exceptions.
+// NamespaceForYear for the two exceptions.
 func TestNamespaceForYearIsIdempotent(t *testing.T) {
 	prefixes := []string{"app2026.dbo", "app2026", "app", "app_v2_2026"}
 	for _, ns := range prefixes {
 		for _, year := range []int{1999, 2025, 9999} {
 			once := NamespaceForYear(ns, year)
 			if twice := NamespaceForYear(once, year); twice != once {
-				t.Errorf("namespaceForYear(%q, %d) = %q, then %q",
+				t.Errorf("NamespaceForYear(%q, %d) = %q, then %q",
 					ns, year, once, twice)
 			}
 		}
 	}
 }
 
+// trimYearSuffix removes exactly four trailing digits after a non-digit,
+// and nothing otherwise.
 func TestTrimYearSuffix(t *testing.T) {
 	cases := []struct{ in, want string }{
 		{"app2026", "app"},

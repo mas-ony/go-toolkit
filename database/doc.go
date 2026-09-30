@@ -36,9 +36,14 @@
 // Configure takes the whole PREFIX a table name is qualified with —
 // catalog.schema on SQL Server, the catalog alone on MySQL — which is what
 // DatabaseConfig.Namespace builds. Passing the schema on its own is the
-// easy mistake: SQL Server would then resolve every table against the
-// login's default database rather than the configured one, and MySQL, where
-// the config refuses a schema, would qualify nothing at all.
+// easy mistake, and a quiet one, because every ordinary query keeps working:
+// the session opened in the configured catalog, which is where "dbo.invoice"
+// and a bare "invoice" both resolve. What breaks is per-year scoping, which
+// rewrites the FIRST segment of the prefix. On SQL Server that segment is now
+// the schema, so a scoped query names a schema that does not exist and fails;
+// on MySQL, where the config refuses a schema, the prefix is empty,
+// NamespaceForYear has nothing to rewrite, and a request for another year
+// silently reads the current one.
 //
 // SetDialect panics on an unknown dialect, and every helper that spells
 // grammar panics until it has run, because a missing call is a wiring
@@ -46,10 +51,13 @@
 // engine. Configure has no such guard: an empty namespace means bare table
 // names, which is a valid deployment.
 //
-// Neither is synchronised against the readers, so calling either while
-// requests are in flight is a data race. One dialect and one prefix per
-// process is a default rather than a limit: a repository reading another
-// namespace receives it through its own WithNamespace method.
+// Call both before serving. Configure writes a plain variable that its
+// readers do not synchronise with, so a call while requests are in flight
+// is a data race. SetDialect stores atomically, so a late call is no race,
+// but a query built across it can mix both grammars. One dialect and one
+// prefix per process is a default rather than a limit: a repository
+// reading another namespace receives it through its own WithNamespace
+// method.
 //
 // # Neither piece of state is mandatory
 //
@@ -81,20 +89,26 @@
 // transactions — each pair a shortcut and an explicit-context form of one
 // function. ParseDialect, SetDialect and Configure for the wiring above.
 // SortField, Dialect and the clause helpers named under the two headings
-// below, each of the engine-dependent ones also a method on Dialect. Five
-// sentinels — ErrUnsupportedDriver, ErrUnsupportedEncryptMode,
-// ErrInvalidCredential, ErrMalformedDSN and ErrNoIdentityValue — each
-// documented where it is declared, and each meant to be matched with
-// errors.Is rather than by message text.
+// below, each of the engine-dependent ones also a method on Dialect. Six
+// sentinels — ErrNotConfigured, ErrUnsupportedDriver,
+// ErrUnsupportedEncryptMode, ErrInvalidCredential, ErrMalformedDSN and
+// ErrNoIdentityValue — each documented where it is declared, and each
+// meant to be matched with errors.Is rather than by message text.
 //
 // # Configuration arrives as two structs and nothing else
 //
-// From config.DatabaseConfig everything, Schema included: New spends the
-// rest on the DSN and the pool, and Configure spends Schema on the prefix
-// Qualify joins to every table name. From config.AppConfig exactly Name and
-// Location — Name to label the session on SQL Server, Location to decide
-// how offsetless time columns are read. Env, Host and the rest of AppConfig
-// are not consulted here.
+// From config.DatabaseConfig everything: New spends all of it but Schema on
+// the DSN and the pool, and Configure spends the catalog and the schema
+// together, through DatabaseConfig.Namespace, on the prefix Qualify joins to
+// every table name. From config.AppConfig exactly Name and Location — Name to
+// label the session on SQL Server, Location to decide how offsetless time
+// columns are read. Env, Host and the rest of AppConfig are not consulted
+// here.
+//
+// The database section may be left out entirely by a service that needs no
+// database. DatabaseConfig.Configured then reports false, which is the
+// place to branch, and New answers such a section with ErrNotConfigured
+// rather than trying to connect.
 //
 // New hands back a *sqlx.DB rather than a wrapper of its own, so the pool
 // belongs to the caller from the moment it is returned: nothing here closes
@@ -106,8 +120,9 @@
 // # The Read contract the query helpers are built for
 //
 //   - Single-row lookup (an id or another unique key is set): sql.ErrNoRows
-//     is normalised to an empty result, so callers check the number of items
-//     instead of inspecting the error.
+//     is normalised to an empty result — GetOne reports it as found ==
+//     false with a nil error — so callers check what came back instead of
+//     inspecting the error.
 //   - Paginated list (a page and a limit are set): count first, then fetch
 //     the page.
 //   - Plain list: every matching row, in a deterministic order.
@@ -126,12 +141,13 @@
 //
 // # Where the engine differences live
 //
-// Nothing outside dialect.go branches on the configured engine. Every
-// clause the two spell differently has a helper there — ApplyLimit,
-// PageClause, NowExpr, RecursiveCTE, QuoteIdent, InsertReturningID,
-// LikeArg and LikePredicate. A new difference belongs there
-// rather than in a conditional at the call site, which is also why the
-// selected dialect is not exported: a repository that can read it will
+// No query builder outside dialect.go branches on the configured engine.
+// Every clause the two spell differently has a helper there — ApplyLimit,
+// PageClause, NowExpr, RecursiveCTE, QuoteIdent and InsertReturningID —
+// and LikeArg and LikePredicate sit beside them because they pick the one
+// LIKE escape both engines read the same way. A new difference belongs
+// there rather than in a conditional at the call site, which is also why
+// the selected dialect is not exported: a repository that can read it will
 // eventually branch on it.
 //
 // The rest is the portable half: clause assembly spelled the same on both
@@ -153,12 +169,16 @@
 // Values are always bound. Only identifiers are ever concatenated, and each
 // has a named boundary that limits it to something chosen in code:
 //
-//	column names in SELECT    SelectClause, through its allowed map
-//	column names in ORDER BY  SortClause, through its allowlist
-//	column names in GROUP BY  GroupClause, through its allowlist
-//	namespace and table names Qualify, from literals in each repository
-//	row caps                  ApplyLimit, from an int the repository passes
-//	subqueries and aliases    ExistsFlag and AsText, from literals
+//	column names in SELECT     SelectClause, through its allowed map
+//	column names in ORDER BY   SortClause, through its allowlist
+//	column names in GROUP BY   GroupClause, through its allowlist
+//	namespace and table names  Qualify, from literals in each repository
+//	row caps                   ApplyLimit, from an int the repository passes
+//	insert targets             InsertReturningID, from literals
+//	LIKE columns               LikePredicate, from literals
+//	CTE names                  RecursiveCTE, from literals
+//	subqueries and aliases     ExistsFlag, from literals
+//	columns cast to text       AsText, from literals
 //
 // Everything else — every filter value, every LIKE pattern, every page
 // offset — is a bound parameter. A helper that concatenates needs the same
@@ -198,6 +218,11 @@
 // undiagnosable without the cause, and carrying no password in either
 // driver.
 //
+// A setting that could never reach a driver is refused before either path.
+// checkTarget rejects a host, a port or a zone the driver's parser would
+// refuse, and names the key, because behind sqlx.Open's dropped cause it
+// would otherwise read only "malformed DSN".
+//
 // # Both drivers are linked in; the config picks one
 //
 // go-mssqldb and go-sql-driver/mysql are compiled into every build, one as
@@ -219,10 +244,10 @@
 // bind table before choosing what a new branch returns; an unrecognised
 // name degrades to UNKNOWN rather than erroring.
 //
-// ParseDialect reads the SAME configured value to pick a grammar, and
-// accepts the same three spellings for SQL Server. Both report an
-// unknown name with ErrUnsupportedDriver, so the two switches cannot
-// disagree about whether a name is known — only about what it maps to.
+// ParseDialect reads the SAME configured value to pick a grammar. It
+// accepts one spelling more than buildDSN does — "azuresql", a name New
+// cannot open — so the two agree on every name New serves, and both refuse
+// a name with ErrUnsupportedDriver.
 //
 // # The property any driver added here must have
 //
@@ -248,8 +273,9 @@
 //   - Time. The sqlserver DSN carries timezone= and the mysql Config gets
 //     ParseTime with Loc, so offsetless columns are labelled with
 //     app.Location rather than UTC on either side.
-//   - Dial deadlines. mysql.Config.Timeout defaults to no timeout at all,
-//     so dialTimeout sets it to the value go-mssqldb already applies.
+//   - Dial deadlines. mysql.Config.Timeout defaults to no deadline of its
+//     own, which leaves the operating system's TCP timeout of minutes, so
+//     dialTimeout sets it to the fifteen seconds go-mssqldb already applies.
 //
 // Each is argued in full where it is set. What matters at this level is
 // that none of them is a tuning knob: changing one changes what identical
@@ -334,10 +360,13 @@
 //
 // What it is FOR is the set of claims above that a string comparison
 // cannot reach: that the clause helpers produce SQL each engine actually
-// accepts, and that the four agreements db.go engineers — TLS, row counts,
-// time zones, dial deadlines — hold against a running server rather than
-// only in the DSN. ClientFoundRows is the clearest case: nothing offline
-// can show that an UPDATE changing no column still reports one row matched.
+// accepts, and that two of the four agreements db.go engineers — row counts
+// and time zones — hold against a running server rather than only in the
+// DSN. ClientFoundRows is the clearest case: nothing offline can show that
+// an UPDATE changing no column still reports one row matched. The other two
+// are held in the DSN alone: asserting TLS or a dial deadline against a
+// server needs one set up for it, with a certificate to refuse or a host
+// that drops packets, which a scratch database is not.
 //
 // Both suites are therefore the driver-bump alarm as well: a change to
 // either driver's escaping rules, to how database/sql sequences its

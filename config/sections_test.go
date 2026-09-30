@@ -4,7 +4,7 @@ package config
 //
 // Every section shares one shape — a constructor reading a Viper, a
 // Validate, and a String safe to log — and each file's header makes the
-// same promise: "N keys, and that is the whole section: the constructor
+// same promise: "N keys, and that is the whole section — NewXConfig below
 // reads exactly these." A promise like that drifts without anyone
 // noticing, because nothing reads a comment against the code it
 // describes.
@@ -22,24 +22,17 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"sort"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/spf13/viper"
 )
 
-// ruleCase is one rejection or acceptance a section's Validate is held to.
-type ruleCase struct {
-	name      string
-	overrides map[string]any
-	// mention is a fragment the error must contain; empty means the case
-	// must validate cleanly.
-	mention string
-}
-
 // section describes one section for the table-driven tests below.
 type section struct {
+	// name is the section's type name: String on a nil receiver has to
+	// print "<nil name>", and New<name> has to be its constructor.
 	name string
 	// build constructs the section from v.
 	build func(v *viper.Viper) SectionConfig
@@ -48,6 +41,36 @@ type section struct {
 	nilValue SectionConfig
 }
 
+// ruleCase is one rejection or acceptance a section's Validate is held to.
+type ruleCase struct {
+	// name labels the subtest.
+	name string
+	// overrides are the keys set on top of the base configuration; a nil
+	// value removes the key instead, so a case can express "absent".
+	overrides map[string]any
+	// mention is a fragment the error must contain; empty means the case
+	// must validate cleanly.
+	mention string
+}
+
+var (
+	// keyShape is a whole dotted key and nothing else. Error messages
+	// contain keys too, but always with spaces around them.
+	keyShape = regexp.MustCompile(`^[a-z0-9_]+(\.[a-z0-9_]+)+$`)
+
+	// sectionLine names the section a header covers.
+	sectionLine = regexp.MustCompile(`(?m)^The (\S+?)(?:\.\*)? section`)
+
+	// tableRow is one key and its variable, on two lines.
+	tableRow = regexp.MustCompile(`(?m)^\t(\S+)\n\t\t([A-Z0-9_]+)$`)
+
+	// countWord is the "N keys, and that is the whole section" sentence.
+	countWord = regexp.MustCompile(`(?m)^([A-Z][a-z]+(?:-[a-z]+)?) keys?,`)
+)
+
+// sections is every section in the package, one entry per *_config.go
+// file. TestTheSectionTableMatchesTheSource fails when a constructor has
+// no entry here, so a new section cannot escape the contract suite.
 var sections = []section{
 	{"AppConfig", func(v *viper.Viper) SectionConfig {
 		return NewAppConfig(v)
@@ -96,25 +119,9 @@ var sections = []section{
 	}, (*WhatsAppConfig)(nil)},
 }
 
-// ----------------------------------------------------------------------------
-// The header key list
-// ----------------------------------------------------------------------------
-
-var (
-	// keyShape is a whole dotted key and nothing else. Error messages
-	// contain keys too, but always with spaces around them.
-	keyShape = regexp.MustCompile(`^[a-z0-9_]+(\.[a-z0-9_]+)+$`)
-
-	// sectionLine names the section a header covers.
-	sectionLine = regexp.MustCompile(`(?m)^The (\S+?)(?:\.\*)? section`)
-
-	// tableRow is one key and its variable, on two lines.
-	tableRow = regexp.MustCompile(`(?m)^\t(\S+)\n\t\t([A-Z0-9_]+)$`)
-
-	// countWord is the "N keys, and that is the whole section" sentence.
-	countWord = regexp.MustCompile(`(?m)^([A-Z][a-z]+(?:-[a-z]+)?) keys?,`)
-)
-
+// numberWords maps each count word a header may open with, "Zero" to
+// "Thirty-nine", to its value, so the stated count can be compared with
+// the number of keys the header lists.
 var numberWords = func() map[string]int {
 	words := strings.Fields("Zero One Two Three Four Five Six Seven Eight " +
 		"Nine Ten Eleven Twelve Thirteen Fourteen Fifteen Sixteen " +
@@ -132,8 +139,11 @@ var numberWords = func() map[string]int {
 	return m
 }()
 
-// headerOf returns the comment block directly below the package clause,
-// which is where each section file documents its keys.
+// headerOf returns the comment block that opens two lines below the
+// package clause, after one blank line, which is where each section file
+// documents its keys. Below the clause rather than above it, because a
+// comment directly above "package config" is package documentation, and
+// doc.go alone supplies that.
 func headerOf(f *ast.File, fset *token.FileSet) string {
 	pkgLine := fset.Position(f.Name.End()).Line
 	for _, g := range f.Comments {
@@ -177,10 +187,6 @@ func keysRead(f *ast.File, prefix string) map[string]bool {
 	return read
 }
 
-// ----------------------------------------------------------------------------
-// Shared scaffolding for the per-section rule tests
-// ----------------------------------------------------------------------------
-
 // withKeys returns a Viper holding base with overrides applied on top.
 // A nil override deletes the key, so a case can express "absent".
 func withKeys(base, overrides map[string]any) *viper.Viper {
@@ -202,6 +208,14 @@ func withKeys(base, overrides map[string]any) *viper.Viper {
 	return v
 }
 
+// runRules is the table runner every section's rule test shares.
+//
+// It first requires base to validate as it stands, so a case that fails
+// is failing on its own override and not on a broken baseline. Each case
+// then builds the section from base with its overrides applied, through
+// the constructor, so the key name and the cast are exercised along with
+// the rule, and checks the verdict: an empty mention must validate, any
+// other must fail with an error containing it.
 func runRules(t *testing.T, base map[string]any,
 	build func(*viper.Viper) SectionConfig, cases []ruleCase) {
 	t.Helper()
@@ -231,6 +245,8 @@ func runRules(t *testing.T, base map[string]any,
 func TestEverySectionListsExactlyTheKeysItReads(t *testing.T) {
 	t.Parallel()
 
+	// go test runs a package's tests in its own directory, so the pattern
+	// sees exactly this package's section files.
 	files, err := filepath.Glob("*_config.go")
 	if err != nil {
 		t.Fatal(err)
@@ -253,8 +269,8 @@ func TestEverySectionListsExactlyTheKeysItReads(t *testing.T) {
 
 			header := headerOf(f, fset)
 			if header == "" {
-				t.Fatal("no header comment directly below the package " +
-					"clause — godoc would not show it")
+				t.Fatal("no header comment below the package clause, " +
+					"after one blank line")
 			}
 			m := sectionLine.FindStringSubmatch(header)
 			if m == nil {
@@ -304,10 +320,6 @@ func TestEverySectionListsExactlyTheKeysItReads(t *testing.T) {
 		})
 	}
 }
-
-// ----------------------------------------------------------------------------
-// Construction, nil safety and logging
-// ----------------------------------------------------------------------------
 
 // Every constructor is documented to never fail: an absent key comes back
 // as a zero value for Validate to reject. So building every section from
@@ -393,30 +405,32 @@ func TestStringNeverPrintsASecret(t *testing.T) {
 // The test table has to stay in step with the files, or a new section
 // silently escapes every test above. This is checked by NAME, so an entry
 // for a section that was renamed fails too.
+//
+// Each file is parsed on its own, as the other contract tests do. That
+// also keeps this test off parser.ParseDir, which is deprecated because it
+// ignores build tags.
 func TestTheSectionTableMatchesTheSource(t *testing.T) {
 	t.Parallel()
 
-	fset := token.NewFileSet()
-	pkgs, err := parser.ParseDir(fset, ".", func(fi os.FileInfo) bool {
-		return strings.HasSuffix(fi.Name(), "_config.go")
-	}, 0)
+	files, err := filepath.Glob("*_config.go")
 	if err != nil {
 		t.Fatal(err)
 	}
-
 	var inSource []string
-	for _, p := range pkgs {
-		for _, f := range p.Files {
-			for _, d := range f.Decls {
-				fn, ok := d.(*ast.FuncDecl)
-				if !ok || fn.Recv != nil ||
-					!strings.HasPrefix(fn.Name.Name, "New") ||
-					!strings.HasSuffix(fn.Name.Name, "Config") {
-					continue
-				}
-				inSource = append(inSource,
-					strings.TrimPrefix(fn.Name.Name, "New"))
+	for _, path := range files {
+		f, err := parser.ParseFile(token.NewFileSet(), path, nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, d := range f.Decls {
+			fn, ok := d.(*ast.FuncDecl)
+			if !ok || fn.Recv != nil ||
+				!strings.HasPrefix(fn.Name.Name, "New") ||
+				!strings.HasSuffix(fn.Name.Name, "Config") {
+				continue
 			}
+			inSource = append(inSource,
+				strings.TrimPrefix(fn.Name.Name, "New"))
 		}
 	}
 
@@ -424,9 +438,9 @@ func TestTheSectionTableMatchesTheSource(t *testing.T) {
 	for _, s := range sections {
 		inTable = append(inTable, s.name)
 	}
-	sort.Strings(inSource)
-	sort.Strings(inTable)
-	if strings.Join(inSource, ",") != strings.Join(inTable, ",") {
+	slices.Sort(inSource)
+	slices.Sort(inTable)
+	if !slices.Equal(inSource, inTable) {
 		t.Errorf("constructors in source:\n  %v\nsections in the test "+
 			"table:\n  %v", inSource, inTable)
 	}

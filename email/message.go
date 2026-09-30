@@ -15,25 +15,6 @@ import (
 	"unicode/utf8"
 )
 
-// foldAt is the length a header line is folded at when its words allow
-// it: the 78 RFC 5322 asks for. The 998 it requires is never at risk from
-// a folded field. A single word longer than 78 is left whole, since a
-// header can only be folded where it already has white space.
-const foldAt = 78
-
-// base64Line is the length of each line of an encoded attachment, the
-// maximum RFC 2045 allows.
-const base64Line = 76
-
-// maxFilename is the longest attachment name kept, in bytes.
-//
-// It is what ext4 and NTFS allow, so the name of a real file never
-// reaches it, and it keeps the header carrying the name under SMTP's
-// 998-byte line limit even when every byte is percent-encoded. A
-// parameter value is one word and cannot be folded, and a line past the
-// limit is refused by the relay, not trimmed.
-const maxFilename = 255
-
 // part is one MIME entity: its header and its encoded body.
 type part struct {
 	header textproto.MIMEHeader
@@ -49,6 +30,30 @@ type envelope struct {
 	// rcpts holds every recipient once, To first, then Cc, then Bcc, in
 	// the spelling of its first appearance.
 	rcpts []string
+}
+
+// Attachment is one file carried by a Message.
+type Attachment struct {
+	// Filename is the name the recipient sees, extension included. A
+	// directory part is dropped, a name longer than any file system
+	// allows is shortened with its extension kept, and an empty name
+	// becomes "attachment".
+	Filename string
+
+	// ContentType is the media type, "application/pdf" say. When it is
+	// empty or does not parse, the type registered for Filename's
+	// extension is used, and application/octet-stream when there is
+	// none.
+	//
+	// That lookup reads the system's MIME tables on top of a short
+	// built-in list, so outside the list — .xlsx and .docx among them —
+	// a minimal container answers differently from a desktop. Set it for
+	// anything the recipient's client should recognise by type.
+	ContentType string
+
+	// Data is the file itself. It travels as base64, which makes it about
+	// a third larger on the wire.
+	Data []byte
 }
 
 // Message is one email. Its zero value holds nothing, which Send treats
@@ -83,28 +88,35 @@ type Message struct {
 	Attachments []Attachment
 }
 
-// Attachment is one file carried by a Message.
-type Attachment struct {
-	// Filename is the name the recipient sees, extension included. A
-	// directory part is dropped, a name longer than any file system
-	// allows is shortened with its extension kept, and an empty name
-	// becomes "attachment".
-	Filename string
+// foldAt is the length a header line is folded at when its words allow
+// it: the 78 RFC 5322 asks for. The 998 it requires is never at risk from
+// a folded field. A single word longer than 78 is left whole, since a
+// header can only be folded where it already has white space.
+const foldAt = 78
 
-	// ContentType is the media type, "application/pdf" say. When it is
-	// empty or does not parse, the type registered for Filename's
-	// extension is used, and application/octet-stream when there is
-	// none.
-	//
-	// That lookup reads the system's MIME tables on top of a short
-	// built-in list, so outside the list — .xlsx and .docx among them —
-	// a minimal container answers differently from a desktop. Set it for
-	// anything the recipient's client should recognise by type.
-	ContentType string
+// base64Line is the length of each line of an encoded attachment, the
+// maximum RFC 2045 allows.
+const base64Line = 76
 
-	// Data is the file itself. It travels as base64, which makes it about
-	// a third larger on the wire.
-	Data []byte
+// maxFilename is the longest attachment name kept, in bytes.
+//
+// It is ext4's limit, so the name of a file from such a disk never reaches
+// it. NTFS allows 255 UTF-16 units rather than bytes, so a long non-ASCII
+// name from Windows can pass it, and is then shortened. What the bound
+// protects is the header carrying the name, which stays under SMTP's
+// 998-byte line limit even when every byte is percent-encoded. A parameter
+// value is one word and cannot be folded, and a line past the limit is
+// refused by the relay, not trimmed.
+const maxFilename = 255
+
+// blank reports whether s holds nothing but white space.
+func blank(s string) bool { return strings.TrimSpace(s) == "" }
+
+// empty reports whether m has nothing to deliver: no subject, no body and
+// no attachment. White space alone counts as nothing.
+func (m Message) empty() bool {
+	return blank(m.Subject) && blank(m.Text) && blank(m.HTML) &&
+		len(m.Attachments) == 0
 }
 
 // base64Lines encodes data as base64 in lines of base64Line characters
@@ -129,15 +141,6 @@ func addressList(list []*mail.Address) string {
 	}
 	return strings.Join(s, ", ")
 }
-
-// empty reports whether m has nothing to deliver: no subject, no body and
-// no attachment. White space alone counts as nothing.
-func (m Message) empty() bool {
-	return blank(m.Subject) && blank(m.Text) && blank(m.HTML) &&
-		len(m.Attachments) == 0
-}
-
-func blank(s string) bool { return strings.TrimSpace(s) == "" }
 
 // parseEnvelope resolves m's addresses, or returns ErrInvalidAddress
 // naming the first entry that does not parse and the field it is in.
@@ -213,51 +216,6 @@ func textPart(subtype, s string) part {
 	return part{header: h, body: b.Bytes()}
 }
 
-// multipartOf wraps parts in a multipart entity of the given subtype,
-// under multipart's own random boundary, which no body here can contain
-// by chance.
-func multipartOf(subtype string, parts ...part) (part, error) {
-	var b bytes.Buffer
-	w := multipart.NewWriter(&b)
-	for _, p := range parts {
-		pw, err := w.CreatePart(p.header)
-		if err != nil {
-			return part{}, err
-		}
-		if _, err := pw.Write(p.body); err != nil {
-			return part{}, err
-		}
-	}
-	if err := w.Close(); err != nil {
-		return part{}, err
-	}
-
-	h := make(textproto.MIMEHeader)
-	h.Set("Content-Type", mime.FormatMediaType("multipart/"+subtype,
-		map[string]string{"boundary": w.Boundary()}))
-	return part{header: h, body: b.Bytes()}, nil
-}
-
-// attachmentPart encodes a as a base64 file part.
-//
-// The name travels twice, as Content-Type's name and as
-// Content-Disposition's filename, because clients disagree about which
-// one they read. mime formats both, which percent-encodes (RFC 2231) any
-// name that is not plain ASCII, a line break in one included, so a name
-// cannot add a header either.
-func attachmentPart(a Attachment) part {
-	name := attachmentName(a.Filename)
-	mediaType, params := attachmentType(a.ContentType, name)
-	params["name"] = name
-
-	h := make(textproto.MIMEHeader)
-	h.Set("Content-Type", mime.FormatMediaType(mediaType, params))
-	h.Set("Content-Disposition", mime.FormatMediaType("attachment",
-		map[string]string{"filename": name}))
-	h.Set("Content-Transfer-Encoding", "base64")
-	return part{header: h, body: base64Lines(a.Data)}
-}
-
 // attachmentType is the media type an attachment is sent as, with its
 // parameters: the given type when it parses as one, else the type
 // registered for the name's extension, else application/octet-stream.
@@ -305,6 +263,51 @@ func attachmentName(name string) string {
 		keep--
 	}
 	return stem[:keep] + ext
+}
+
+// attachmentPart encodes a as a base64 file part.
+//
+// The name travels twice, as Content-Type's name and as
+// Content-Disposition's filename, because clients disagree about which
+// one they read. mime formats both, which percent-encodes (RFC 2231) any
+// name that is not plain ASCII, a line break in one included, so a name
+// cannot add a header either.
+func attachmentPart(a Attachment) part {
+	name := attachmentName(a.Filename)
+	mediaType, params := attachmentType(a.ContentType, name)
+	params["name"] = name
+
+	h := make(textproto.MIMEHeader)
+	h.Set("Content-Type", mime.FormatMediaType(mediaType, params))
+	h.Set("Content-Disposition", mime.FormatMediaType("attachment",
+		map[string]string{"filename": name}))
+	h.Set("Content-Transfer-Encoding", "base64")
+	return part{header: h, body: base64Lines(a.Data)}
+}
+
+// multipartOf wraps parts in a multipart entity of the given subtype,
+// under multipart's own random boundary, which no body here can contain
+// by chance.
+func multipartOf(subtype string, parts ...part) (part, error) {
+	var b bytes.Buffer
+	w := multipart.NewWriter(&b)
+	for _, p := range parts {
+		pw, err := w.CreatePart(p.header)
+		if err != nil {
+			return part{}, err
+		}
+		if _, err := pw.Write(p.body); err != nil {
+			return part{}, err
+		}
+	}
+	if err := w.Close(); err != nil {
+		return part{}, err
+	}
+
+	h := make(textproto.MIMEHeader)
+	h.Set("Content-Type", mime.FormatMediaType("multipart/"+subtype,
+		map[string]string{"boundary": w.Boundary()}))
+	return part{header: h, body: b.Bytes()}, nil
 }
 
 // content builds the body of m as one entity, a single part when that is

@@ -45,6 +45,15 @@ import (
 	_ "github.com/microsoft/go-mssqldb"
 )
 
+// labelRow is one row of the identity fixture, scanned by column name.
+type labelRow struct {
+	ID    int    `db:"id"`
+	Label string `db:"label"`
+}
+
+// tableSeq keeps scratch table names unique within one run.
+var tableSeq atomic.Int64
+
 // integrationEngines maps each grammar to its driver name and DSN variable.
 var integrationEngines = []struct {
 	dialect Dialect
@@ -53,6 +62,36 @@ var integrationEngines = []struct {
 }{
 	{DialectMySQL, "mysql", "DB_TEST_MYSQL_DSN"},
 	{DialectSQLServer, "sqlserver", "DB_TEST_SQLSERVER_DSN"},
+}
+
+// mustExec runs each statement and stops the test at the first error.
+func mustExec(t *testing.T, db *sqlx.DB, stmts ...string) {
+	t.Helper()
+	for _, s := range stmts {
+		if _, err := db.Exec(s); err != nil {
+			t.Fatalf("%v\n%s", err, s)
+		}
+	}
+}
+
+// onEngine returns mysql or sqlserver, whichever the selected grammar needs.
+func onEngine(mysql, sqlserver string) string {
+	if activeDialect() == DialectMySQL {
+		return mysql
+	}
+	return sqlserver
+}
+
+// scratchTable creates a table from ddl, in which %s stands for the name,
+// and drops it when the test ends. The name is quoted with QuoteIdent, so
+// it doubles as a check that a quoted identifier works in DDL and DML.
+func scratchTable(t *testing.T, db *sqlx.DB, base, ddl string) string {
+	t.Helper()
+	name := QuoteIdent(fmt.Sprintf("dialect %s`] %d_%d",
+		base, time.Now().UnixNano()%1e9, tableSeq.Add(1)))
+	mustExec(t, db, fmt.Sprintf(ddl, name))
+	t.Cleanup(func() { _, _ = db.Exec("DROP TABLE " + name) })
+	return name
 }
 
 // forEachEngine runs fn as a subtest for every engine with a DSN, with that
@@ -80,44 +119,10 @@ func forEachEngine(t *testing.T, fn func(t *testing.T, db *sqlx.DB)) {
 	}
 }
 
-// tableSeq keeps scratch table names unique within one run.
-var tableSeq atomic.Int64
-
-// scratchTable creates a table from ddl, in which %s stands for the name,
-// and drops it when the test ends. The name is quoted with quoteIdent, so
-// it doubles as a check that a quoted identifier works in DDL and DML.
-func scratchTable(t *testing.T, db *sqlx.DB, base, ddl string) string {
-	t.Helper()
-	name := QuoteIdent(fmt.Sprintf("dialect %s`] %d_%d",
-		base, time.Now().UnixNano()%1e9, tableSeq.Add(1)))
-	mustExec(t, db, fmt.Sprintf(ddl, name))
-	t.Cleanup(func() { _, _ = db.Exec("DROP TABLE " + name) })
-	return name
-}
-
-// mustExec runs each statement and stops the test at the first error.
-func mustExec(t *testing.T, db *sqlx.DB, stmts ...string) {
-	t.Helper()
-	for _, s := range stmts {
-		if _, err := db.Exec(s); err != nil {
-			t.Fatalf("%v\n%s", err, s)
-		}
-	}
-}
-
-// onEngine returns mysql or sqlserver, whichever the selected grammar needs.
-func onEngine(mysql, sqlserver string) string {
-	if activeDialect() == DialectMySQL {
-		return mysql
-	}
-	return sqlserver
-}
-
-type labelRow struct {
-	ID    int    `db:"id"`
-	Label string `db:"label"`
-}
-
+// InsertReturningID returns each generated key on both engines, including
+// SQL Server with an INSERT trigger enabled, which is what forces the
+// OUTPUT INTO form; and a MySQL table without AUTO_INCREMENT reports
+// ErrNoIdentityValue rather than a key of 0.
 func TestIntegrationInsertReturningID(t *testing.T) {
 	forEachEngine(t, func(t *testing.T, db *sqlx.DB) {
 		ctx := context.Background()
@@ -180,6 +185,8 @@ func TestIntegrationInsertReturningID(t *testing.T) {
 	})
 }
 
+// A capped DISTINCT and every page of a paginated query run on both
+// engines, and a count over the uncapped query agrees with the pages.
 func TestIntegrationApplyLimitAndPageClause(t *testing.T) {
 	forEachEngine(t, func(t *testing.T, db *sqlx.DB) {
 		table := scratchTable(t, db, "paging",
@@ -241,6 +248,8 @@ func TestIntegrationApplyLimitAndPageClause(t *testing.T) {
 	})
 }
 
+// Every LIKE metacharacter, and the characters each engine treats
+// specially, matches only itself through LikeArg and LikePredicate.
 func TestIntegrationLike(t *testing.T) {
 	forEachEngine(t, func(t *testing.T, db *sqlx.DB) {
 		table := scratchTable(t, db, "like",
@@ -282,6 +291,8 @@ func TestIntegrationLike(t *testing.T) {
 	})
 }
 
+// The same recursive body runs on both engines behind RecursiveCTE, and a
+// depth column bounds it.
 func TestIntegrationRecursiveCTE(t *testing.T) {
 	forEachEngine(t, func(t *testing.T, db *sqlx.DB) {
 		table := scratchTable(t, db, "tree",
@@ -319,6 +330,8 @@ func TestIntegrationRecursiveCTE(t *testing.T) {
 	})
 }
 
+// A reserved word quoted by QuoteIdent works as a column name in DDL and
+// DML, and NowExpr fills a timestamp column on both engines.
 func TestIntegrationQuoteIdentAndNowExpr(t *testing.T) {
 	forEachEngine(t, func(t *testing.T, db *sqlx.DB) {
 		user := QuoteIdent("user")

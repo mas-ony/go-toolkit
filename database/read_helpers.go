@@ -47,7 +47,7 @@ type SortField struct {
 // in cols, or defaults when cols is empty or names nothing known.
 //
 // It is the one definition of "the requested columns", so SelectClause and
-// needsJoin cannot disagree. They would: a request naming only unknown
+// NeedsJoin cannot disagree. They would: a request naming only unknown
 // columns falls back to defaults, and a JOIN decision taken from cols alone
 // would drop the JOIN that those defaults reference.
 func activeCols(cols, defaults []string, allowed map[string]string) []string {
@@ -89,6 +89,26 @@ func NeedsJoin(
 	return false
 }
 
+// AsText renders col as a character string, for a LIKE filter that searches
+// a numeric column beside text ones.
+//
+// Without it the engines disagree: MySQL converts the column to a string,
+// while SQL Server's type precedence converts the pattern to a number
+// instead, so "%123%" fails the whole statement with a conversion error
+// rather than matching nothing. CAST(col AS CHAR(20)) is spelled the same on
+// both.
+//
+// Twenty characters hold any 64-bit integer, sign included. A value that does
+// not fit is truncated on MySQL and, on SQL Server, rendered as "*" for an
+// integer or rejected as a conversion error for a decimal or float, so cast
+// wider columns with an expression of their own.
+//
+// The cast defeats an index on col, as does the leading "%" of the pattern it
+// is written for.
+func AsText(col string) string {
+	return "CAST(" + col + " AS CHAR(20))"
+}
+
 // ExistsFlag renders a select-list column that reports as 1 or 0 whether
 // subquery matches any row, under the name alias:
 //
@@ -113,26 +133,6 @@ func NeedsJoin(
 // to bool.
 func ExistsFlag(subquery, alias string) string {
 	return "CASE WHEN EXISTS (" + subquery + ") THEN 1 ELSE 0 END AS " + alias
-}
-
-// AsText renders col as a character string, for a LIKE filter that searches
-// a numeric column beside text ones.
-//
-// Without it the engines disagree: MySQL converts the column to a string,
-// while SQL Server's type precedence converts the pattern to a number
-// instead, so "%123%" fails the whole statement with a conversion error
-// rather than matching nothing. CAST(col AS CHAR(20)) is spelled the same on
-// both.
-//
-// Twenty characters hold any 64-bit integer, sign included. A value that does
-// not fit is truncated on MySQL and, on SQL Server, rendered as "*" for an
-// integer or rejected as a conversion error for a decimal or float, so cast
-// wider columns with an expression of their own.
-//
-// The cast defeats an index on col, as does the leading "%" of the pattern it
-// is written for.
-func AsText(col string) string {
-	return "CAST(" + col + " AS CHAR(20))"
 }
 
 // GetOne runs a named single-row query and scans the row into dest. A
@@ -281,6 +281,27 @@ func SelectClause(
 	return strings.Join(exprs, ",\n       ")
 }
 
+// GroupClause returns an "\nGROUP BY <col>" fragment, or an empty string when
+// col is empty or not in allowed. col must be spelled as the allowlist spells
+// it, qualified the same way, since the check is membership and nothing else.
+//
+// An unknown col yields no grouping rather than an error, as an unknown sort
+// column does. A request that names one therefore reads ungrouped rows.
+//
+// Two things the caller owns: col must also appear in the select list, and
+// every other selected column must be grouped or aggregated. Neither is
+// visible from here, and both engines reject a select list that breaks the
+// second — MySQL under ONLY_FULL_GROUP_BY, SQL Server always.
+//
+//	GroupClause("t.group_id", []string{"t.group_id", "t.type_id"})
+//	// "\nGROUP BY t.group_id"
+func GroupClause(col string, allowed []string) string {
+	if col != "" && slices.Contains(allowed, col) {
+		return "\nGROUP BY " + col
+	}
+	return ""
+}
+
 // SortClause builds an "\nORDER BY col1 DIR1, col2 DIR2" fragment from
 // fields, keeping only those whose Col is in allowed and normalising each
 // direction to ASC or DESC. When nothing is left it orders by fallback
@@ -322,25 +343,4 @@ func SortClause(fields []SortField, allowed []string, fallback string) string {
 		return "\nORDER BY " + fallback
 	}
 	return "\nORDER BY " + sb.String()
-}
-
-// GroupClause returns an "\nGROUP BY <col>" fragment, or an empty string when
-// col is empty or not in allowed. col must be spelled as the allowlist spells
-// it, qualified the same way, since the check is membership and nothing else.
-//
-// An unknown col yields no grouping rather than an error, as an unknown sort
-// column does. A request that names one therefore reads ungrouped rows.
-//
-// Two things the caller owns: col must also appear in the select list, and
-// every other selected column must be grouped or aggregated. Neither is
-// visible from here, and both engines reject a select list that breaks the
-// second — MySQL under ONLY_FULL_GROUP_BY, SQL Server always.
-//
-//	GroupClause("t.group_id", []string{"t.group_id", "t.type_id"})
-//	// "\nGROUP BY t.group_id"
-func GroupClause(col string, allowed []string) string {
-	if col != "" && slices.Contains(allowed, col) {
-		return "\nGROUP BY " + col
-	}
-	return ""
 }

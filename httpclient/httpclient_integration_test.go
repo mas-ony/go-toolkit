@@ -89,8 +89,8 @@ func bodyServer(t *testing.T, status int, contentType string,
 	return srv
 }
 
-// newClient builds a client for base, failing the test rather than
-// returning an error nobody would check.
+// newClient builds a client from cfg with default Options, failing the
+// test rather than returning an error nobody would check.
 func newClient(t *testing.T, cfg *config.ClientConfig) *Client {
 	t.Helper()
 	c, err := New(cfg, Options{})
@@ -99,10 +99,6 @@ func newClient(t *testing.T, cfg *config.ClientConfig) *Client {
 	}
 	return c
 }
-
-// ----------------------------------------------------------------------------
-// TLS
-// ----------------------------------------------------------------------------
 
 // Insecure is the one setting in the config section with a security
 // consequence, and it cannot be tested at all without a server presenting
@@ -180,10 +176,6 @@ func TestIntegrationInsecureLeavesTheRestOfTheTLSConfigAlone(t *testing.T) {
 	}
 }
 
-// ----------------------------------------------------------------------------
-// Backoff
-// ----------------------------------------------------------------------------
-
 // The unit suite counts attempts. This one measures the gaps between them,
 // which is the difference between a retry policy and a hot loop: a backoff
 // that computed a zero or negative duration would still produce the right
@@ -228,8 +220,8 @@ func TestIntegrationBackoffDoublesFromTheFirstWait(t *testing.T) {
 
 	// The total is the sum of the waits, which is what a caller's own
 	// deadline has to accommodate.
-	if min := firstBackoff * 7 / 10 * 7; elapsed < min {
-		t.Errorf("total %s, want at least about %s", elapsed, min)
+	if floor := firstBackoff * 7 / 10 * 7; elapsed < floor {
+		t.Errorf("total %s, want at least about %s", elapsed, floor)
 	}
 }
 
@@ -239,18 +231,11 @@ func TestIntegrationBackoffDoublesFromTheFirstWait(t *testing.T) {
 // fires on immediately, producing exactly the hot loop the cap exists to
 // prevent.
 //
-// Asserted through the unexported computation rather than by waiting
-// minutes for it, since the wait is the thing being bounded.
+// Asserted through backoff, the computation Do itself calls, rather than
+// by waiting minutes for it, since the wait is the thing being bounded.
 func TestIntegrationBackoffIsCappedAndNeverNegative(t *testing.T) {
 	for attempt := 1; attempt <= 40; attempt++ {
-		shift := attempt - 1
-		if shift > maxBackoffShift {
-			shift = maxBackoffShift
-		}
-		wait := firstBackoff << shift
-		if wait > maxBackoff {
-			wait = maxBackoff
-		}
+		wait := backoff(attempt)
 
 		if wait <= 0 {
 			t.Fatalf("attempt %d computes a wait of %s — time.After "+
@@ -296,10 +281,6 @@ func TestIntegrationContextCancelledDuringBackoffReturnsAtOnce(t *testing.T) {
 		t.Errorf("%d attempts, want 1", n)
 	}
 }
-
-// ----------------------------------------------------------------------------
-// Error message caps
-// ----------------------------------------------------------------------------
 
 // The caps only matter against a body built to defeat them, and a body
 // that size is not something to put in a unit test's source.
@@ -402,10 +383,6 @@ func TestIntegrationErrorMessageIsCapped(t *testing.T) {
 		}
 	})
 }
-
-// ----------------------------------------------------------------------------
-// Concurrency
-// ----------------------------------------------------------------------------
 
 // A Client is documented as safe for concurrent use and meant to be
 // shared. Nothing in the type enforces that, so the claim rests on a

@@ -20,7 +20,7 @@ import (
 )
 
 // yamlViper builds a Viper holding the given YAML, the way a file-backed
-// instance would after ReadInConfig.
+// instance would after ReadInConfig. splitlist_test.go uses it too.
 func yamlViper(t *testing.T, doc string) *viper.Viper {
 	t.Helper()
 	v := viper.New()
@@ -31,32 +31,39 @@ func yamlViper(t *testing.T, doc string) *viper.Viper {
 	return v
 }
 
-// ----------------------------------------------------------------------------
-// sectionOf
-// ----------------------------------------------------------------------------
-
 // The longest matching prefix wins, which is what keeps a parent section
 // from claiming the sections nested inside it: fiber.limiter.max begins
 // with both "fiber" and "fiber.limiter", and only the second is its
-// section.
+// section. The environment spelling routes the same way, on underscores
+// against upper-case prefixes.
 func TestSectionOfPrefersTheLongestPrefix(t *testing.T) {
 	t.Parallel()
-	prefixes := map[string]string{
+	keys := map[string]string{
 		"fiber":   "fiber",
 		"limiter": "fiber.limiter",
 		"app":     "app",
 	}
+	envs := map[string]string{
+		"fiber":   "FIBER",
+		"limiter": "FIBER_LIMITER",
+		"app":     "APP",
+	}
 
 	for _, c := range []struct {
+		prefixes       map[string]string
 		key, sep, want string
 	}{
-		{"fiber.limiter.max", ".", "limiter"},
-		{"fiber.app_name", ".", "fiber"},
-		{"app.port", ".", "app"},
-		// The environment spelling routes the same way on underscores.
-		{"FIBER_LIMITER_MAX", "_", ""}, // prefixes here are lowercase
+		{keys, "fiber.limiter.max", ".", "limiter"},
+		{keys, "fiber.app_name", ".", "fiber"},
+		{keys, "app.port", ".", "app"},
+		{envs, "FIBER_LIMITER_MAX", "_", "limiter"},
+		{envs, "FIBER_APP_NAME", "_", "fiber"},
+		// Prefixes are compared exactly as given, so a variable name never
+		// matches a prefix still in its dotted, lower-case spelling. That
+		// is why SuppliedSections converts them first.
+		{keys, "FIBER_LIMITER_MAX", "_", ""},
 	} {
-		if got := sectionOf(prefixes, c.key, c.sep); got != c.want {
+		if got := sectionOf(c.prefixes, c.key, c.sep); got != c.want {
 			t.Errorf("sectionOf(%q) = %q, want %q", c.key, got, c.want)
 		}
 	}
@@ -90,10 +97,6 @@ func TestSectionOfCountsAnExactMatch(t *testing.T) {
 	}
 }
 
-// ----------------------------------------------------------------------------
-// Supplied
-// ----------------------------------------------------------------------------
-
 // NIL MEANS EVERY SECTION. A nil Supplied did not come from
 // SuppliedSections, so it has no record of what any source held and cannot
 // justify skipping anything — it must validate in full.
@@ -107,6 +110,7 @@ func TestNilSuppliedReportsEverySectionConfigured(t *testing.T) {
 	}
 }
 
+// A map from SuppliedSections answers for exactly the sections it names.
 func TestSuppliedReportsOnlyWhatWasSupplied(t *testing.T) {
 	t.Parallel()
 	s := Supplied{"app": true}
@@ -118,10 +122,9 @@ func TestSuppliedReportsOnlyWhatWasSupplied(t *testing.T) {
 	}
 }
 
-// ----------------------------------------------------------------------------
-// SuppliedSections — the file half
-// ----------------------------------------------------------------------------
-
+// File keys reach the section with the longest matching prefix, so a
+// nested block supplies the nested section and its parent's own keys
+// supply the parent, and a section with no keys stays unsupplied.
 func TestSuppliedSectionsRoutesFileKeysByLongestPrefix(t *testing.T) {
 	t.Parallel()
 	v := yamlViper(t, `
@@ -150,6 +153,46 @@ zqunit:
 	}
 }
 
+// A prefix is matched in lower case, the case Viper reports file keys in,
+// so one written with capitals still claims the keys under it rather than
+// leaving its section to load as absent and skip validation.
+func TestSuppliedSectionsIgnoresPrefixCase(t *testing.T) {
+	t.Parallel()
+	v := yamlViper(t, "zqcase:\n  key: x\n")
+	got := SuppliedSections(v, []Section{
+		{Name: "zqcase", Prefix: "ZQCase", Value: AbsentSection{}},
+	})
+	if !got["zqcase"] {
+		t.Error("a prefix written with capitals did not claim its keys")
+	}
+}
+
+// Keys registered in code count as supplied, as SuppliedSections warns: a
+// default given with SetDefault, and a variable bound with BindEnv whether
+// or not it is set, both switch their section on. The bound variable's
+// name is one no machine exports, so the environment half cannot be what
+// switched it on.
+func TestSuppliedSectionsCountsKeysRegisteredInCode(t *testing.T) {
+	t.Parallel()
+	v := viper.New()
+	v.SetDefault("zqdefault.key", "x")
+	if err := v.BindEnv("zqbound.key", "ZQBOUND_NEVER_EXPORTED"); err != nil {
+		t.Fatal(err)
+	}
+
+	got := SuppliedSections(v, []Section{
+		{Name: "zqdefault", Prefix: "zqdefault", Value: AbsentSection{}},
+		{Name: "zqbound", Prefix: "zqbound", Value: AbsentSection{}},
+	})
+	if !got["zqdefault"] {
+		t.Error("a key given only a default did not supply its section")
+	}
+	if !got["zqbound"] {
+		t.Error("a key bound to an unset variable did not supply its " +
+			"section")
+	}
+}
+
 // SuppliedSections always returns a non-nil map, which is what makes the
 // nil check in Configured a reliable signal that a value came from
 // somewhere else.
@@ -166,10 +209,6 @@ func TestSuppliedSectionsNeverReturnsNil(t *testing.T) {
 	}
 }
 
-// ----------------------------------------------------------------------------
-// AbsentSection
-// ----------------------------------------------------------------------------
-
 // The pair that makes the substitution work: it validates clean, so a
 // deployment is not refused for a section it does not use, and it prints
 // what it is, so the startup log does not show that section's zero values
@@ -185,10 +224,6 @@ func TestAbsentSection(t *testing.T) {
 		t.Errorf("String = %q, want <not configured>", got)
 	}
 }
-
-// ----------------------------------------------------------------------------
-// NewViper
-// ----------------------------------------------------------------------------
 
 // The key replacer is half of the environment contract. Viper exposes no
 // getter for it, so this checks the one observable effect that does not

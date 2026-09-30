@@ -98,18 +98,20 @@
 // The unit suite covers the resolution rules against a temporary
 // directory: the three Lookup passes and their ordering, the dotted
 // reference that must not be stripped, case-insensitivity, ambiguity
-// reported by path relative to the root, the dotfile and extension
-// skips, recursion, and the name-length boundary measured in bytes
-// rather than runes.
+// reported by path relative to the root, the dotfile, dot-directory and
+// extension skips, recursion, and the name-length boundary measured in
+// bytes rather than runes.
 //
 // document_integration_test.go covers what a temporary directory cannot
-// promise, because it is a property of the filesystem and the process
-// rather than of this code: whether the filesystem distinguishes "1.pdf"
-// from "1.PDF" at all, and what happens to a directory the process is not
-// allowed to open. Both are skipped rather than failed where the
-// environment cannot produce them — a case-insensitive filesystem cannot
-// hold both spellings, and a process running as root can read a directory
-// with no permission bits set:
+// promise, because it is a property of the filesystem, the platform and the
+// process rather than of this code: whether the filesystem distinguishes
+// "1.pdf" from "1.PDF" at all, what happens to a directory the process is
+// not allowed to open, how a symlink named like a document and a symlinked
+// directory are treated, and the snapshot contract above, which needs the
+// tree to change after the walk. Each is skipped rather than failed where
+// the environment cannot produce it — a case-insensitive filesystem cannot
+// hold both spellings, a process running as root can read a directory with
+// no permission bits set, and not every platform allows a symlink:
 //
 //	go test -tags integration -run Integration ./document
 //

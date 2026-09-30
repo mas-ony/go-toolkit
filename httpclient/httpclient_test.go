@@ -1,5 +1,12 @@
 package httpclient
 
+// Tests for httpclient.go, against a real HTTP server rather than a stub
+// transport: what a base URL is normalised to and what it is refused for,
+// which failures are retried and how many times, the sentinels errors.Is
+// reaches, what a request carries, and how an error message is condensed.
+// What needs a certificate, a clock, a pathological body or contention is
+// in httpclient_integration_test.go.
+
 import (
 	"context"
 	"encoding/json"
@@ -12,10 +19,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rs/zerolog"
-
 	"github.com/mas-ony/go-toolkit/config"
 	"github.com/mas-ony/go-toolkit/response"
+	"github.com/rs/zerolog"
 )
 
 // writeEnvelope answers in the shape this package decodes, so the tests
@@ -31,6 +37,8 @@ func writeEnvelope(
 	})
 }
 
+// testClient starts a server running h, points cfg at it, and builds a
+// client that logs nowhere. The server closes when the test ends.
 func testClient(
 	t *testing.T, h http.Handler,
 	cfg config.ClientConfig, opt Options,
@@ -96,6 +104,82 @@ func TestNewErrorNamesNoSetting(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "-") {
 		t.Errorf("error mentions a flag: %q", err)
+	}
+}
+
+// A derived client builds against its own base, with the suffix New was
+// given taken off it, and leaves the client it came from as it was. A
+// base New would refuse is refused here too.
+func TestWithBaseURLRebases(t *testing.T) {
+	c, err := New(
+		&config.ClientConfig{BaseURL: "https://a.example.go.id"},
+		Options{TrimPathSuffix: "/api/v1"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	d, err := c.WithBaseURL(" https://b.example.go.id/api/v1/ ")
+	if err != nil {
+		t.Fatalf("WithBaseURL: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name string
+		c    *Client
+		want string
+	}{
+		{"derived", d, "https://b.example.go.id/api/v1/thing"},
+		{"original", c, "https://a.example.go.id/api/v1/thing"},
+	} {
+		if got := tc.c.URL("/api/v1/thing", nil); got != tc.want {
+			t.Errorf("%s client builds %q, want %q",
+				tc.name, got, tc.want)
+		}
+	}
+
+	for _, bad := range []string{"", "  ", "b.example.go.id",
+		"ftp://b/x", "https://"} {
+		if _, err := c.WithBaseURL(bad); err == nil {
+			t.Errorf("WithBaseURL(%q) should have failed", bad)
+		}
+	}
+}
+
+// A derived client shares the transport, so the token and the headers
+// reach the new host with it. That is what WithBaseURL warns about, and
+// what a caller deriving one client per region relies on.
+func TestWithBaseURLSendsTheSameHeaders(t *testing.T) {
+	var auth, extra string
+	srv := httptest.NewServer(http.HandlerFunc(func(
+		w http.ResponseWriter, r *http.Request,
+	) {
+		auth = r.Header.Get("Authorization")
+		extra = r.Header.Get("X-Api-Key")
+		writeEnvelope(w, http.StatusOK, "ok", nil)
+	}))
+	t.Cleanup(srv.Close)
+
+	c, err := New(&config.ClientConfig{
+		BaseURL: "https://unused.example.go.id",
+		Token:   "test-token",
+	}, Options{Headers: map[string]string{"X-Api-Key": "abc123"}})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	d, err := c.WithBaseURL(srv.URL)
+	if err != nil {
+		t.Fatalf("WithBaseURL: %v", err)
+	}
+
+	err = d.Do(context.Background(), http.MethodGet,
+		d.URL("/thing", nil), nil, "", nil)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	if auth != "Bearer test-token" {
+		t.Errorf("Authorization = %q", auth)
+	}
+	if extra != "abc123" {
+		t.Errorf("X-Api-Key = %q", extra)
 	}
 }
 
@@ -258,6 +342,8 @@ func TestErrorUnwrapsToTheSentinels(t *testing.T) {
 	}
 }
 
+// The token, the header map, the default Accept, a User-Agent routed past
+// the header map, and the caller's Content-Type all reach the server.
 func TestHeadersAndTokenAreSent(t *testing.T) {
 	var auth, extra, accept, agent, ctype string
 	mux := http.NewServeMux()
@@ -424,5 +510,75 @@ func TestMessageFromFallsBackToTheBody(t *testing.T) {
 
 	if got := messageFrom(nil); got != "" {
 		t.Errorf("empty body = %q, want empty", got)
+	}
+}
+
+// A base carrying userinfo is refused by New and by WithBaseURL alike,
+// since every URL built on it would quote the credential in errors and
+// logs. No message quotes the password either, including the one for a
+// password url.Parse cannot read, whose own error copies the whole input.
+func TestBaseURLRefusesUserinfoWithoutQuotingIt(t *testing.T) {
+	c, err := New(&config.ClientConfig{BaseURL: "https://a.example.go.id"},
+		Options{})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	for _, raw := range []string{
+		"https://svc:hunter2@api.example.go.id",
+		"https://svc:hunter2 x@api.example.go.id",
+	} {
+		_, errNew := New(&config.ClientConfig{BaseURL: raw}, Options{})
+		_, errWith := c.WithBaseURL(raw)
+		for name, err := range map[string]error{
+			"New": errNew, "WithBaseURL": errWith,
+		} {
+			if err == nil {
+				t.Errorf("%s(%q) accepted a credential", name, raw)
+				continue
+			}
+			if strings.Contains(err.Error(), "hunter2") {
+				t.Errorf("%s quotes the password: %v", name, err)
+			}
+		}
+	}
+}
+
+// The wait doubles from firstBackoff, stops at maxBackoff, and stays
+// positive however long the retry budget, since a zero or negative wait
+// makes time.After fire at once and turns the retries into a hot loop.
+func TestBackoffDoublesAndIsCapped(t *testing.T) {
+	for attempt, want := range map[int]time.Duration{
+		1: firstBackoff, 2: 2 * firstBackoff, 3: 4 * firstBackoff,
+		5: maxBackoff, 6: maxBackoff, 1000: maxBackoff,
+	} {
+		if got := backoff(attempt); got != want {
+			t.Errorf("backoff(%d) = %s, want %s", attempt, got, want)
+		}
+	}
+	for attempt := -1; attempt <= 200; attempt++ {
+		if got := backoff(attempt); got <= 0 || got > maxBackoff {
+			t.Fatalf("backoff(%d) = %s, outside (0, %s]", attempt, got,
+				maxBackoff)
+		}
+	}
+}
+
+// A "/", "?" or "#" inside a password ends the authority early, so url.Parse
+// fails on what it takes for a port, and the cause it reports quotes that
+// port: the password itself. The message New returns must not carry it.
+func TestBaseURLParseErrorsDoNotQuoteThePassword(t *testing.T) {
+	for _, raw := range []string{
+		"https://svc:hunter2/x@api.example",
+		"https://svc:hunter2?x@api.example",
+		"https://svc:hunter2#x@api.example",
+	} {
+		_, err := New(&config.ClientConfig{BaseURL: raw}, Options{})
+		if err == nil {
+			t.Errorf("%q was accepted", raw)
+			continue
+		}
+		if strings.Contains(err.Error(), "hunter2") {
+			t.Errorf("the error quotes the password: %v", err)
+		}
 	}
 }

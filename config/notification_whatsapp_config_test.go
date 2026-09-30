@@ -3,9 +3,10 @@ package config
 // Tests for notification_whatsapp_config.go.
 //
 // The section has one boolean and no rule a boolean can break, so what is
-// worth holding is that the key is read under its documented name and
-// that both settings validate: an operator choosing either is making a
-// trade, not a mistake.
+// worth holding is that the key is read under its documented name, that
+// both settings validate, since an operator choosing either is making a
+// trade rather than a mistake, and that the log line shows which one is
+// in force.
 
 import (
 	"strings"
@@ -14,6 +15,8 @@ import (
 	"github.com/spf13/viper"
 )
 
+// The key is read under its documented name, both ways, and an absent one
+// reads as synchronous.
 func TestWhatsAppReadsAsync(t *testing.T) {
 	t.Parallel()
 	for _, want := range []bool{true, false} {
@@ -28,6 +31,7 @@ func TestWhatsAppReadsAsync(t *testing.T) {
 	}
 }
 
+// Neither setting is refused: each is a trade, as the header says.
 func TestWhatsAppValidatesEitherSetting(t *testing.T) {
 	t.Parallel()
 	for _, async := range []bool{true, false} {
@@ -38,10 +42,12 @@ func TestWhatsAppValidatesEitherSetting(t *testing.T) {
 	}
 }
 
+// The log line shows the setting, since it decides whether a failed send
+// can reach the caller at all.
 func TestWhatsAppString(t *testing.T) {
 	t.Parallel()
-	if got := (&WhatsAppConfig{Async: true}).String(); !strings.Contains(
-		got, "Async=true") {
+	got := (&WhatsAppConfig{Async: true}).String()
+	if !strings.Contains(got, "Async=true") {
 		t.Errorf("String = %q, want it to show Async=true", got)
 	}
 }

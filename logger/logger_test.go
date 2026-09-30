@@ -1,5 +1,10 @@
 package logger
 
+// Tests for logger.go: the two shapes New chooses between — format, level
+// floor and caller in each — the environment names that must not reach the
+// console branch, child-logger inheritance, the untouched global level, and
+// the claim that every environment writes to stdout and nothing to stderr.
+
 import (
 	"bytes"
 	"encoding/json"
@@ -13,9 +18,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rs/zerolog"
-
 	"github.com/mas-ony/go-toolkit/config"
+	"github.com/rs/zerolog"
 )
 
 // nonDevelopmentEnvs is every input that must produce the JSON logger.
@@ -46,6 +50,33 @@ var nonDevelopmentEnvs = []string{
 // New itself. That is the only way to check the claim New's doc actually makes
 // about descriptors, and it is shared state, so the one test using it does NOT
 // call t.Parallel().
+
+// callerLine reports the line its own call site sits on, so a test can name
+// the line below it without counting the statements in between.
+func callerLine() int {
+	_, _, line, _ := runtime.Caller(1)
+	return line
+}
+
+// subtestName substitutes a word for the empty env, which would otherwise
+// produce a subtest with no name at all and a -run pattern nobody can write.
+func subtestName(env string) string {
+	if env == "" {
+		return "empty"
+	}
+	return env
+}
+
+// splitLines returns the lines of s that hold anything but white space.
+func splitLines(s string) []string {
+	var out []string
+	for _, line := range strings.Split(s, "\n") {
+		if strings.TrimSpace(line) != "" {
+			out = append(out, line)
+		}
+	}
+	return out
+}
 
 // emit runs f against a logger built for env and returns what it wrote.
 func emit(env string, f func(zerolog.Logger)) string {
@@ -104,32 +135,6 @@ func captureNew(
 	_ = outR.Close()
 	_ = errR.Close()
 	return outBuf.String(), errBuf.String()
-}
-
-// callerLine reports the line its own call site sits on, so a test can name
-// the line below it without counting the statements in between.
-func callerLine() int {
-	_, _, line, _ := runtime.Caller(1)
-	return line
-}
-
-// subtestName substitutes a word for the empty env, which would otherwise
-// produce a subtest with no name at all and a -run pattern nobody can write.
-func subtestName(env string) string {
-	if env == "" {
-		return "empty"
-	}
-	return env
-}
-
-func splitLines(s string) []string {
-	var out []string
-	for _, line := range strings.Split(s, "\n") {
-		if strings.TrimSpace(line) != "" {
-			out = append(out, line)
-		}
-	}
-	return out
 }
 
 // TestDevelopmentUsesConsoleWriter checks the four things that distinguish the

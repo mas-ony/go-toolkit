@@ -60,10 +60,10 @@
 //
 // # Phone numbers are normalised, then refused rather than repaired
 //
-// A recipient may arrive as "+62 812-3456789". Leading "+", spaces and
-// hyphens are stripped; everything else survives, and a number still
-// holding anything but digits afterwards is ErrInvalidPhone rather than a
-// send.
+// A recipient may arrive as "+62 812-3456789". "+", spaces and hyphens
+// are stripped wherever they appear; everything else survives, and a
+// number still holding anything but digits afterwards is ErrInvalidPhone
+// rather than a send.
 //
 // That narrowness is the decision. A wider filter would silently repair
 // typed junk into a number nobody verified, trading a rejected send for one
@@ -101,7 +101,7 @@
 // a nil-client SendDocument does the encryption work before failing.
 // Connect has no guard at all and would panic, which is harmless only
 // because this package calls it on nothing but a client NewClient has just
-// built. That was read from whatsmeow's own source at the pinned version;
+// built. All of this is as whatsmeow's source reads at the pinned version;
 // re-read it before relying on any of it for a new call site.
 //
 // The trap is that the no-op paths survive a nil receiver, because they

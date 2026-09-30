@@ -26,12 +26,14 @@
 // keys. Its constructor reads exactly those keys and nothing else, so a key
 // present in config.yaml but absent from the constructor is dead weight:
 // Viper never looks it up, and neither the file nor an environment variable
-// can supply it. The header comment of every file lists its keys beside
-// their environment spelling, and that list and the constructor move
-// together.
+// can supply it. The header comment of every file lists each key with its
+// environment spelling, and that list and the constructor move together.
 //
-// Machinery no single section owns lives in section.go, and the one reader
-// every list-valued key shares lives in splitlist.go.
+// Machinery no single section owns lives in section.go, and two helpers
+// live beside it: splitlist.go, the one reader every list-valued key goes
+// through, and redact.go, which fiber.client uses to quote its base URL
+// without the credential it may carry. Each is a file of its own so that
+// no section file holds anything but its own section.
 //
 // # How a key's environment spelling is derived
 //
@@ -41,7 +43,7 @@
 // dot replaced by an underscore:
 //
 //	app.port                    APP_PORT
-//	app.reports_base_url        APP_REPORTS_BASE_URL
+//	database.max_open_conns     DATABASE_MAX_OPEN_CONNS
 //	fiber.limiter.max           FIBER_LIMITER_MAX
 //
 // That only holds if the Viper instance was built with an underscore key
@@ -50,9 +52,10 @@
 // the file and no environment override at all — every documented variable
 // silently ignored, with the file's value or a zero in its place.
 //
-// NewViper exists for exactly that reason. Before it, the spelling was an
-// agreement between this package's comments and an application's loader,
-// which is not a thing a second application can be expected to discover.
+// NewViper exists for exactly that reason. Without it, the spelling would
+// be an agreement between this package's comments and each application's
+// loader, which is not a thing a second application can be expected to
+// discover.
 //
 // Environment variables override the file, key by key. An EMPTY variable is
 // not a value: AllowEmptyEnv is left off, so an exported-but-empty name
@@ -66,13 +69,25 @@
 // deployment that does not use a section is neither refused for it nor
 // shown its zero values as though somebody had chosen them.
 //
-// Both sources are consulted, because AllKeys sees only the file:
-// AutomaticEnv resolves a key when it is looked up rather than registering
-// it. The environment half is the weaker of the two, since it matches a
-// variable NAME rather than a key this package reads — see
+// Both sources are consulted, because AllKeys sees only what was
+// registered on the Viper — the file, and any key set or defaulted in code
+// — while AutomaticEnv resolves a key when it is looked up rather than
+// registering it. The environment half is the weaker of the two, since it
+// matches a variable NAME rather than a key this package reads — see
 // SuppliedSections for the consequence, which matters when this package is
 // lifted into a deployment whose other software already exports APP_* or
 // DATABASE_* variables.
+//
+// # Two sections are switches
+//
+// fiber.auth.mode selects fiber.session, fiber.jwt, or — left out —
+// neither; notification.channels selects notification.whatsapp,
+// notification.email, both, or neither. A switched section is worth
+// validating only while its switch selects it: a deployment in jwt mode
+// should not be refused for an empty session timeout it never uses. That
+// decision needs two sections at once, so it belongs to the application;
+// AuthConfig.IsSession, AuthConfig.IsJWT and NotificationConfig.Enabled
+// are the questions it asks.
 //
 // # What Validate does and does not check
 //
@@ -96,16 +111,16 @@
 // credential embedded in a URL — and the Validate beside it refuses the
 // shapes that would smuggle one past String.
 //
-// String uses a pointer receiver throughout, which has one consequence
+// Every section's String has a pointer receiver, which has one consequence
 // worth knowing: fmt only finds it on a *T. Printing a value copy bypasses
 // it and dumps the fields directly, secrets included.
 //
 // # The middleware order the fiber sections assume
 //
-// Four sections configure middleware — zerolog, requestid, recover and
-// limiter — and each one's documentation argues for its POSITION relative
-// to the others. The positions only make sense as one stack, so here it
-// is, outermost first:
+// Four sections configure the middleware every request passes through —
+// zerolog, requestid, recover and limiter — and each one's documentation
+// argues for its POSITION relative to the others. The positions only make
+// sense as one stack, so here it is, outermost first:
 //
 //	zl := config.NewZerologConfig(v)
 //	rid := config.NewRequestIDConfig(v)
@@ -122,14 +137,14 @@
 // logger and a panic handler — and those are installed on a copy by the
 // With methods rather than stored on the section.
 //
-// Every request is logged because zerolog is outermost: a panic that
-// recover converts, and a 429 the limiter answers, both come back as the
-// value of zerolog's c.Next() and so still get a line with a status. The
-// request id is readable in all of them because requestid runs before
-// anything that could fail. A recovered panic's stack trace carries that
-// id because recover sits inside requestid. A panic in the limiter is
-// recovered, and a rejection is logged, because the limiter sits inside
-// both.
+// Every request is logged because zerolog is outermost: a panic that recover
+// converts comes back as the value of zerolog's c.Next(), a 429 the limiter
+// answers leaves its status on the response, and either way the request still
+// gets a line with a status. The request id is readable in all of them because
+// requestid runs before anything that could fail. A recovered panic's stack
+// trace carries that id because recover sits inside requestid. A panic in the
+// limiter is recovered, and a rejection is logged, because the limiter sits
+// inside both.
 //
 // Nothing enforces this order — this package builds configuration and
 // never sees the stack — and a service is free to choose another. What it
@@ -144,17 +159,19 @@
 // keys its code reads, states the right count, and spells each variable
 // the way NewViper derives it; every constructor survives an empty Viper;
 // every nil receiver validates to an error and logs as "<nil T>"; and no
-// String prints a password, token or signing secret. A new section that
-// is missing from the test table fails there too.
+// String prints a password, token or signing secret. It also holds each
+// section file to a name derived from its prefix, and a section missing
+// from the test table fails there too.
 //
 // What is particular to each section — the rules its Validate enforces,
 // and helpers such as Namespace and the With installers — is tested beside
 // it, in <name>_config_test.go, which is the one-test-file-per-source-file
-// layout the rest of this module uses. Every case is built through the
+// layout the rest of this module uses. Rule cases are built through the
 // section's own constructor from a Viper, so a passing case has exercised
-// the key name and the cast as well as the rule. The contract suite checks
-// that every section file has its test file, so a new section cannot be
-// added without one.
+// the key name and the cast as well as the rule; tests about a struct's own
+// behaviour, such as a nil receiver or a hand-built value, build it
+// directly. The contract suite checks that every section file has its test
+// file, so a new section cannot be added without one.
 //
 // The environment is what a unit test cannot reach, so it is covered by
 // the integration files, each named for the source file it exercises, as
@@ -167,7 +184,7 @@
 // from a real variable, the case splitList was written for.
 //
 // There is deliberately no integration file per SECTION. Every section
-// gets its environment behaviour from NewViper, so thirteen files each
+// gets its environment behaviour from NewViper, so a file per section
 // re-proving it would add runtime and nothing else; the contract suite
 // instead checks that every section's documented spellings follow the
 // rule the section integration tests prove.

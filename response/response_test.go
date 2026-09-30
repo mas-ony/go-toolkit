@@ -164,14 +164,14 @@ func TestOmitemptyBehaviour(t *testing.T) {
 
 // TestInterfaceNilTrap pins a SHARP EDGE rather than a desirable behaviour.
 //
-// The Response doc describes it at length: Data is typed any, so a typed nil
+// The package doc describes it at length: Data is typed any, so a typed nil
 // (a nil slice, a nil pointer) produces a non-nil interface and omitempty does
 // not fire. The result is "data":null reaching a client that the same doc
 // promises will get "data":[].
 //
 // This test exists so that edge is a decision instead of folklore. If someone
-// later adds the reflection-based normalisation the doc suggests belongs in
-// OK, these three cases fail — which is exactly right: that would be a
+// later adds the reflection-based normalisation the OK doc argues against,
+// these three cases fail — which is exactly right: that would be a
 // deliberate change to the wire format for every list endpoint that passes a
 // bare slice, and it should not slip in unnoticed.
 func TestInterfaceNilTrap(t *testing.T) {
@@ -266,7 +266,7 @@ func TestNewPaginatedPreservesMetadata(t *testing.T) {
 }
 
 // TestNewPaginatedDoesNotCopyItems documents that the caller's slice is stored
-// by reference, not cloned. Nothing depends on a copy today, and adding one
+// by reference, not cloned. Nothing here depends on a copy, and adding one
 // would silently double the allocation of every list response.
 func TestNewPaginatedDoesNotCopyItems(t *testing.T) {
 	t.Parallel()
@@ -431,6 +431,8 @@ func TestOKListNormalisesANilSlice(t *testing.T) {
 	}
 }
 
+// A populated slice passes through OKList untouched, and so does the
+// message.
 func TestOKListPassesAPopulatedSliceThrough(t *testing.T) {
 	got := OKList("ok", []int{1, 2, 3})
 

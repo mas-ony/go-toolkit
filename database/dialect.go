@@ -92,9 +92,13 @@ import (
 	"github.com/jmoiron/sqlx"
 )
 
-// selectedDialect holds the Dialect passed to SetDialect, or zero before
-// the first call.
-var selectedDialect atomic.Int32
+// Dialect is the statement grammar the helpers in this file emit.
+//
+// The zero value selects no grammar. No engine is a safe default for code
+// shared between deployments, so until SetDialect has run, every helper
+// that depends on the grammar panics instead of emitting SQL for an engine
+// nobody chose.
+type Dialect int
 
 // likeEscape is the LIKE escape character. LikeArg writes it and
 // LikePredicate declares it, so the two cannot disagree.
@@ -103,10 +107,23 @@ var selectedDialect atomic.Int32
 // way on both engines. Under MySQL's default sql_mode a backslash escapes
 // the next character of a literal, so '\' leaves the literal unterminated
 // and '\\' is required; SQL Server reads '\\' as two characters, which
-// ESCAPE rejects.
-// "!" is an ordinary character in literals on both engines and a wildcard
-// on neither.
+// ESCAPE rejects. "!" is an ordinary character in literals on both engines
+// and a wildcard on neither.
 const likeEscape = "!"
+
+// The two grammars. They start at 1 so that the zero Dialect is none of
+// them, which is what lets every helper refuse to run before SetDialect.
+const (
+	// DialectMySQL emits MySQL and MariaDB grammar.
+	DialectMySQL Dialect = iota + 1
+
+	// DialectSQLServer emits T-SQL for SQL Server and Azure SQL Database.
+	DialectSQLServer
+)
+
+// selectedDialect holds the Dialect passed to SetDialect, or zero before
+// the first call.
+var selectedDialect atomic.Int32
 
 // likeEscaper escapes the escape character itself, % and _, which are
 // wildcards on both engines, and [, which opens a character class in T-SQL.
@@ -121,25 +138,26 @@ var likeEscaper = strings.NewReplacer(
 	"[", likeEscape+"[",
 )
 
-// Dialect is the statement grammar the helpers in this file emit.
-//
-// The zero value selects no grammar. No engine is a safe default for code
-// shared between deployments, so until SetDialect has run, every helper
-// that depends on the grammar panics instead of emitting SQL for an engine
-// nobody chose.
-type Dialect int
-
-const (
-	// DialectMySQL emits MySQL and MariaDB grammar.
-	DialectMySQL Dialect = iota + 1
-
-	// DialectSQLServer emits T-SQL for SQL Server and Azure SQL Database.
-	DialectSQLServer
-)
-
 // ErrNoIdentityValue is returned by InsertReturningID when the INSERT
 // succeeded but yielded no generated key.
 var ErrNoIdentityValue = errors.New("insert returned no identity value")
+
+// cutKeyword reports whether s, after any leading white space, opens with
+// keyword in any letter case followed by white space. If so, it returns
+// the text after that white space.
+func cutKeyword(s, keyword string) (rest string, ok bool) {
+	const space = " \t\r\n"
+	t := strings.TrimLeft(s, space)
+	if len(t) <= len(keyword) ||
+		!strings.EqualFold(t[:len(keyword)], keyword) {
+		return s, false
+	}
+	rest = strings.TrimLeft(t[len(keyword):], space)
+	if len(rest) == len(t)-len(keyword) {
+		return s, false
+	}
+	return rest, true
+}
 
 // activeDialect returns the selected Dialect. It panics if SetDialect has
 // not run, because a missing call is a wiring mistake that must fail loudly
@@ -169,23 +187,6 @@ func (d Dialect) isMySQL() bool {
 		return false
 	}
 	panic("database: " + d.String() + " is not a grammar")
-}
-
-// cutKeyword reports whether s, after any leading white space, opens with
-// keyword in any letter case followed by white space. If so, it returns
-// the text after that white space.
-func cutKeyword(s, keyword string) (rest string, ok bool) {
-	const space = " \t\r\n"
-	t := strings.TrimLeft(s, space)
-	if len(t) <= len(keyword) ||
-		!strings.EqualFold(t[:len(keyword)], keyword) {
-		return s, false
-	}
-	rest = strings.TrimLeft(t[len(keyword):], space)
-	if len(rest) == len(t)-len(keyword) {
-		return s, false
-	}
-	return rest, true
 }
 
 // insertMySQL is the MySQL half of InsertReturningID.
@@ -319,7 +320,10 @@ func (d Dialect) QuoteIdent(name string) string {
 // NowExpr returns SQL for the current date and time on the database server,
 // for timestamp columns that a statement sets from the server clock instead
 // of a bound value. MySQL reports it in the session time zone and SQL Server
-// in the host's local time, and neither carries an offset.
+// in the host's local time, and neither carries an offset. Azure SQL
+// Database keeps its hosts on UTC, so there SYSDATETIME() returns UTC, and a
+// column filled from it is read back labelled with app.location: a whole
+// offset adrift.
 //
 //	MySQL       NOW()          whole seconds
 //	SQL Server  SYSDATETIME()  DATETIME2(7), 100-nanosecond steps

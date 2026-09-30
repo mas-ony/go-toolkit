@@ -34,33 +34,46 @@ func withCleanRegistry(t *testing.T) {
 	t.Cleanup(func() { registry, order = oldRegistry, oldOrder })
 }
 
+// Info names the stub, which is all these tests read.
 func (d stubDataset) Info() Info { return Info{Name: d.name} }
 
-func (stubDataset) Flags(*flag.FlagSet)      { panic("not used here") }
-func (stubDataset) Validate() error          { panic("not used here") }
-func (stubDataset) Layout() xlsx.Layout      { panic("not used here") }
-func (stubDataset) Columns() []xlsx.Column   { panic("not used here") }
-func (stubDataset) HeaderAdvice(error) error { panic("not used here") }
-func (stubDataset) Len() int                 { panic("not used here") }
-func (stubDataset) Report() ReportShape      { panic("not used here") }
+// Len is not reached by these tests; see stubDataset.
+func (stubDataset) Len() int { panic("not used here") }
 
+// Flags is not reached by these tests; see stubDataset.
+func (stubDataset) Flags(*flag.FlagSet) { panic("not used here") }
+
+// Validate is not reached by these tests; see stubDataset.
+func (stubDataset) Validate() error { panic("not used here") }
+
+// Layout is not reached by these tests; see stubDataset.
+func (stubDataset) Layout() xlsx.Layout { panic("not used here") }
+
+// Columns is not reached by these tests; see stubDataset.
+func (stubDataset) Columns() []xlsx.Column { panic("not used here") }
+
+// HeaderAdvice is not reached by these tests; see stubDataset.
+func (stubDataset) HeaderAdvice(error) error { panic("not used here") }
+
+// Connect is not reached by these tests; see stubDataset.
 func (stubDataset) Connect(context.Context, Transport, *Run) error {
 	panic("not used here")
 }
 
+// Prepare is not reached by these tests; see stubDataset.
 func (stubDataset) Prepare(
 	context.Context, *xlsx.File, *Run,
 ) ([]Outcome, error) {
 	panic("not used here")
 }
 
+// Import is not reached by these tests; see stubDataset.
 func (stubDataset) Import(context.Context, int, *Run) Outcome {
 	panic("not used here")
 }
 
-// ----------------------------------------------------------------------------
-// Counters
-// ----------------------------------------------------------------------------
+// Report is not reached by these tests; see stubDataset.
+func (stubDataset) Report() ReportShape { panic("not used here") }
 
 // The zero value has to work: Run holds a *Counters a caller builds with
 // &Counters{}, and the maps behind the named tallies are created lazily.
@@ -149,10 +162,8 @@ func TestDeclarePinsOrderAheadOfFirstUse(t *testing.T) {
 	}
 }
 
-// ----------------------------------------------------------------------------
-// Outcome
-// ----------------------------------------------------------------------------
-
+// Note formats and appends, and Set creates Fields on first use, the last
+// write for a field winning.
 func TestOutcomeNoteAndSet(t *testing.T) {
 	var o Outcome
 
@@ -190,10 +201,6 @@ func TestOutcomeFailedIsOnlyTheFailedStatus(t *testing.T) {
 	}
 }
 
-// ----------------------------------------------------------------------------
-// sortOutcomes
-// ----------------------------------------------------------------------------
-
 // The report is ordered by workbook row so a reviewer can walk it against
 // the sheet. The input is not arbitrary: Prepare's parse failures come
 // first, already ordered among themselves, followed by the imported rows,
@@ -223,6 +230,8 @@ func TestSortOutcomesMergesTwoSortedRuns(t *testing.T) {
 	}
 }
 
+// sortOutcomes handles an empty and a one-row report, and keeps rows that
+// share a number in their original order.
 func TestSortOutcomesHandlesEdgeCases(t *testing.T) {
 	sortOutcomes(nil)                      // must not panic
 	sortOutcomes([]Outcome{{ExcelRow: 1}}) // must not panic
@@ -244,10 +253,8 @@ func TestSortOutcomesHandlesEdgeCases(t *testing.T) {
 	}
 }
 
-// ----------------------------------------------------------------------------
-// Registry
-// ----------------------------------------------------------------------------
-
+// Register keeps registration order, Lookup builds what was registered,
+// and an unknown name reports false.
 func TestRegisterLookupAndNames(t *testing.T) {
 	withCleanRegistry(t)
 

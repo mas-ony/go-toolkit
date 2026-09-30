@@ -1,6 +1,11 @@
 package config
 
 // Tests for fiber_limiter_config.go.
+//
+// What the section promises: a window of at least a second, a positive
+// maximum, a strategy named exactly and installed as named, and never both
+// skip flags at once — each a place where the middleware would otherwise
+// substitute or accept something the file does not say.
 
 import (
 	"testing"
@@ -9,24 +14,34 @@ import (
 	"github.com/spf13/viper"
 )
 
+// limiterBase is a configuration the limiter section accepts, which each
+// rule case changes one key at a time.
 var limiterBase = map[string]any{
 	"fiber.limiter.expiration": "1m",
 	"fiber.limiter.max":        100,
 	"fiber.limiter.strategy":   StrategyFixed,
 }
 
+// buildLimiter adapts NewLimiterConfig to the constructor shape runRules
+// takes.
 func buildLimiter(v *viper.Viper) SectionConfig { return NewLimiterConfig(v) }
 
+// TestLimiterValidate holds the section's rules. Each one exists because the
+// middleware would otherwise substitute a value of its own — a 1m window, a
+// max of 5, a fixed strategy — that neither config.yaml nor the log shows.
 func TestLimiterValidate(t *testing.T) {
 	t.Parallel()
 	runRules(t, limiterBase, buildLimiter, []ruleCase{
 		{"no expiration", map[string]any{
 			"fiber.limiter.expiration": nil}, "fiber.limiter.expiration"},
-		// Below a second the window rounds to nothing in the storage the
-		// middleware keys it by.
+		// Below a second the window truncates to zero whole seconds, and
+		// the middleware replaces that with its own minute.
 		{"a sub-second window", map[string]any{
 			"fiber.limiter.expiration": "500ms"},
 			"fiber.limiter.expiration"},
+		// 60 meant as a minute is 60ns.
+		{"a bare-number window", map[string]any{
+			"fiber.limiter.expiration": 60}, "at least 1s"},
 		{"no maximum", map[string]any{
 			"fiber.limiter.max": nil}, "fiber.limiter.max"},
 		{"a negative maximum", map[string]any{
@@ -38,6 +53,10 @@ func TestLimiterValidate(t *testing.T) {
 			"fiber.limiter.strategy": nil}, "fiber.limiter.strategy"},
 		{"an unknown strategy", map[string]any{
 			"fiber.limiter.strategy": "leaky"}, "fiber.limiter.strategy"},
+		// Matched exactly: corrected silently, it would disagree with
+		// the file.
+		{"a capitalised strategy", map[string]any{
+			"fiber.limiter.strategy": "Sliding"}, "fiber.limiter.strategy"},
 		{"fixed", map[string]any{
 			"fiber.limiter.strategy": StrategyFixed}, ""},
 		{"sliding", map[string]any{

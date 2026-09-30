@@ -147,6 +147,11 @@ PARSE_VCOL_EXPR PORTION REF_SYSTEM_ID RETURNING STATS_AUTO_RECALC
 STATS_PERSISTENT STATS_SAMPLE_PAGES
 `
 
+// reservedWords is the set of words reserved in T-SQL, MySQL or MariaDB, in
+// upper case. Keywords that are not reserved, such as STATUS and NAME, are
+// absent, since every engine accepts them bare.
+var reservedWords = wordSet(tsqlReserved, mysqlReserved, mariadbReserved)
+
 // DefaultNamespace is the prefix every repository starts from: constructors
 // copy it into the repository they return. Configure sets it.
 //
@@ -155,11 +160,6 @@ STATS_PERSISTENT STATS_SAMPLE_PAGES
 // other default would have to name a database in source code and spell one
 // engine's grammar; "app.dbo" is already a syntax error on MySQL.
 var DefaultNamespace = ""
-
-// reservedWords is the set of words reserved in T-SQL or in MySQL, in upper
-// case. Keywords that are not reserved, such as STATUS and NAME, are absent,
-// since both engines accept them bare.
-var reservedWords = wordSet(tsqlReserved, mysqlReserved, mariadbReserved)
 
 // wordSet builds a set from lists of words separated by white space.
 func wordSet(lists ...string) map[string]struct{} {
@@ -242,6 +242,15 @@ func trimYearSuffix(database string) string {
 	return database[:n-yearLen]
 }
 
+// joinNamespace prefixes an already-quoted table name with a namespace, or
+// returns it alone when there is none.
+func joinNamespace(namespace, table string) string {
+	if namespace == "" {
+		return table
+	}
+	return namespace + "." + table
+}
+
 // Configure sets DefaultNamespace for every repository constructed after it.
 // Call it once at startup, beside SetDialect and before the first repository
 // is constructed:
@@ -249,7 +258,7 @@ func trimYearSuffix(database string) string {
 //	database.Configure(prefix)
 //
 // Constructors copy the value, so a later call leaves existing repositories
-// on the old prefix. Nothing synchronizes it, so calling it while
+// on the old prefix. Nothing synchronises it, so calling it while
 // constructors run on other goroutines is a data race.
 //
 // One prefix per process is a default, not a limit. A repository that reads
@@ -301,15 +310,6 @@ func (d Dialect) Qualify(namespace, table string) string {
 		return joinNamespace(namespace, table)
 	}
 	return joinNamespace(namespace, d.QuoteIdent(table))
-}
-
-// joinNamespace prefixes an already-quoted table name with a namespace, or
-// returns it alone when there is none.
-func joinNamespace(namespace, table string) string {
-	if namespace == "" {
-		return table
-	}
-	return namespace + "." + table
 }
 
 // NamespaceForYear rewrites the database segment of a prefix to name year:

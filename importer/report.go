@@ -109,6 +109,11 @@ func PrintSummary(
 // number varies per row and a ragged CSV is harder to open than a long
 // field.
 //
+// Every value is written as it came. A spreadsheet opening the file reads a
+// cell that begins with "=", "+", "-" or "@" as a formula, and the labels
+// and notes come from the workbook's own cells, so a report from a
+// workbook of uncertain origin deserves the same care as the workbook.
+//
 // # Keep this file
 //
 // For a dataset that cannot match a row on a re-run — one whose Caveat

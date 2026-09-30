@@ -2,18 +2,24 @@
 
 package xlsx
 
-// Integration tests for workbook.go.
+// Integration tests for the xlsx package.
 //
 // The unit suite already writes real workbooks and reads them back, so
-// "integration" here is not about using a real file. It is about the three
+// "integration" here is not about using a real file. It is about the five
 // things that suite does not reach, and what they have in common is the
 // reason they are worth the extra file: each produces a WRONG ANSWER
 // rather than an error, so nothing downstream can notice.
 //
 //   - The 1904 epoch shifts every date by four years and a day, and every
 //     shifted date is plausible.
+//   - A cell carrying a date number format has to read as its serial;
+//     with the format applied, Date cannot resolve it.
 //   - A workbook saved without cached formula results reads those cells as
-//     empty, which is indistinguishable from a blank cell in the source.
+//     empty, which is indistinguishable from a blank cell in the source;
+//     beside it, a cached result has to read as that result.
+//   - A relative link resolves against the workbook's directory whatever
+//     the working directory is, and can climb out of it with Foreign
+//     false.
 //   - A data race on a shared *File corrupts whatever it corrupts.
 //
 //	go test -tags integration -run Integration ./xlsx
@@ -30,7 +36,19 @@ import (
 	"github.com/xuri/excelize/v2"
 )
 
+// itSheet is the sheet every fixture writes, excelize's default.
 const itSheet = "Sheet1"
+
+// openWorkbook opens path with layout and closes it when the test ends.
+func openWorkbook(t *testing.T, path string, layout Layout) *File {
+	t.Helper()
+	w, err := Open(path, layout)
+	if err != nil {
+		t.Fatalf("Open %s: %v", path, err)
+	}
+	t.Cleanup(func() { _ = w.Close() })
+	return w
+}
 
 // writeWorkbook builds a workbook with fill applied to it and saves it,
 // returning the path.
@@ -48,21 +66,6 @@ func writeWorkbook(t *testing.T, name string,
 	}
 	return path
 }
-
-// openWorkbook opens path with layout and closes it when the test ends.
-func openWorkbook(t *testing.T, path string, layout Layout) *File {
-	t.Helper()
-	w, err := Open(path, layout)
-	if err != nil {
-		t.Fatalf("Open %s: %v", path, err)
-	}
-	t.Cleanup(func() { _ = w.Close() })
-	return w
-}
-
-// ----------------------------------------------------------------------------
-// Hyperlinks
-// ----------------------------------------------------------------------------
 
 // linkedWorkbook writes a workbook into dir whose column A holds one link
 // per target, alternating between the two storage forms Hyperlink reads —
@@ -106,10 +109,6 @@ func writeTarget(t *testing.T, path, content string) {
 		t.Fatal(err)
 	}
 }
-
-// ----------------------------------------------------------------------------
-// The 1904 epoch
-// ----------------------------------------------------------------------------
 
 // The same serial number means two different dates depending on a property
 // buried in the workbook, and both readings are plausible. Open asks the
@@ -175,10 +174,6 @@ func TestIntegrationDate1904IsReadFromTheWorkbook(t *testing.T) {
 	}
 }
 
-// ----------------------------------------------------------------------------
-// Raw cell values
-// ----------------------------------------------------------------------------
-
 // Open calls RawCellValue "the load-bearing option", and until this test
 // nothing noticed if it were turned off.
 //
@@ -231,10 +226,6 @@ func TestIntegrationRawCellValueBypassesTheNumberFormat(t *testing.T) {
 		t.Errorf("serial read as %s, want 1995-10-28", have)
 	}
 }
-
-// ----------------------------------------------------------------------------
-// Cached formula results
-// ----------------------------------------------------------------------------
 
 // Open's comment warns that a workbook saved by a script carries no cached
 // formula values, so those cells read as EMPTY rather than as the formula
@@ -334,10 +325,6 @@ func TestIntegrationCachedFormulaResultsAreRead(t *testing.T) {
 		t.Error("the formula text was returned instead of its value")
 	}
 }
-
-// ----------------------------------------------------------------------------
-// Concurrency
-// ----------------------------------------------------------------------------
 
 // doc.go claims the grid is never written after Open, so the methods that
 // only read it are safe to call concurrently. Nothing enforces that — a

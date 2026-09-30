@@ -112,12 +112,12 @@
 //
 // The zone in each DSN must be the zone the test PROCESS runs in — here,
 // run with TZ=Asia/Jakarta — because that agreement is the precondition
-// this package documents. It is not optional decoration. Against MariaDB
-// with the zone left off, a naive "2024-03-15" came back as the 14th and
-// 14:30 came back as 07:30: the whole-offset drift this package exists to
-// make visible, reproduced by following a DSN that omitted it. In a UTC
-// process the offset tests skip, since the two readings coincide there, so
-// a run that is meant to test anything sets a zone that is not UTC.
+// this package documents. It is not optional decoration: leave the zone off
+// a MySQL or MariaDB DSN and a naive "2024-03-15" reads back as the 14th and
+// 14:30 as 07:30, the whole-offset drift this package exists to make
+// visible. In a UTC process the offset tests skip, since the two readings
+// coincide there, so a run that is meant to test anything sets a zone that
+// is not UTC.
 //
 //	go test -tags integration -run Integration ./datetime
 package datetime

@@ -29,6 +29,101 @@ import (
 	"github.com/spf13/viper"
 )
 
+// ClientConfig carries the settings for an OUTBOUND HTTP client, built with
+// httpclient.New.
+//
+// The section is OPTIONAL, and an empty BaseURL is the setting that says so:
+// a deployment that serves and calls nothing leaves the whole section out.
+// That is why Validate lets an absent base URL through. The refusal belongs
+// where something definitely wants a client, and it is there: httpclient.New
+// returns "base URL is required" for an empty one. What Validate does check
+// is a base URL that IS stated, since a value that is not a usable URL says
+// the deployment meant to call something and cannot.
+type ClientConfig struct {
+	// BaseURL is the service root: scheme, host, and optionally a path
+	// prefix, e.g. "https://api.example.com" or
+	// "https://api.example.com/api/v1". A trailing slash is tolerated, and so
+	// is the "/api/v1" a URL pasted out of a browser carries, provided the
+	// client is built with httpclient.Options.TrimPathSuffix set to it.
+	//
+	// Empty means no client is configured. See the type comment: it is a
+	// legitimate setting for a deployment that only serves, which is why
+	// Validate lets it through. httpclient.New refuses it, at the one point
+	// where something is definitely trying to build a client.
+	//
+	// It must not carry userinfo ("https://user:pass@host"). The credential
+	// is Token's job, and String logs this value on every start, so Validate
+	// refuses a password here rather than let it reach the log.
+	BaseURL string
+
+	// Token is the bearer credential, sent as "Authorization: Bearer
+	// <token>" on every request. Blank in config.yaml and supplied as
+	// FIBER_CLIENT_TOKEN, the same way the database pair is.
+	//
+	// Not required, and that is the difference from those two. A service that
+	// authenticates by network position rather than by header is a real
+	// deployment, so an absent token is a working configuration and cannot be
+	// rejected here. The failure it leaves is a 401 from the far end, which
+	// names itself.
+	Token string
+
+	// Retries is how many ADDITIONAL attempts a retryable failure gets. Zero
+	// means one attempt and no retry, which is the value an absent key reads
+	// as.
+	//
+	// What counts as retryable is the transport's decision, not this
+	// package's, and the usual rule is two kinds of failure: a transport
+	// error (connection refused, reset, timeout) and the statuses that mean
+	// "try again later" — 429, 500, 502, 503, 504. Every other 4xx is a
+	// deterministic answer about this request and gets one attempt however
+	// high this is set.
+	//
+	// It buys time as well as attempts. Under httpclient's backoff — doubling
+	// from 500ms, capped at 8s — 2 spends up to 1.5s before giving up and 5
+	// spends up to 15.5s, with each further retry adding the cap to a call
+	// that is already failing. That is per REQUEST, so a batch of them
+	// multiplies it: the reason to keep this small is the unattended run that
+	// takes an hour to report the outage it hit in the first minute.
+	Retries int
+
+	// NoRetryMethods are the methods that get exactly one attempt whatever
+	// the failure, and this key has THREE settings rather than two.
+	//
+	// Absent, it is nil, and the transport is expected to substitute its own
+	// default: POST alone. Stated, it is exactly what is stated. And stated
+	// EMPTY — `no_retry_methods: []` — every method is replayed, which is the
+	// opposite of the default and has to be asked for. splitList preserves
+	// that distinction (nil for a key no source supplies, non-nil for a stated
+	// empty list, as TestSplitListKeepsAbsentAndEmptyApart pins), which is
+	// what makes the third setting expressible at all. A transport that treats
+	// nil and empty alike collapses two of the three back into one, and this
+	// is the field to check when it does.
+	//
+	// From the ENVIRONMENT an empty value is not the empty list: Viper's
+	// AllowEmptyEnv is off, so FIBER_CLIENT_NO_RETRY_METHODS= reads as unset
+	// and lands on the default instead. A lone comma is the empty list:
+	// FIBER_CLIENT_NO_RETRY_METHODS=, reaches splitList's comma path and comes
+	// back stated but empty. TestClientALoneCommaReplaysEveryMethod pins it.
+	//
+	// POST is the usual default because replaying a create is only safe when
+	// the server can recognise the duplicate. Where the request body carries
+	// nothing unique, a replayed POST whose first attempt had in fact landed
+	// writes a SECOND row, and no later response can tell the two cases
+	// apart. Widen this only for endpoints that address a specific id or
+	// carry a natural key the server rejects a second copy on.
+	NoRetryMethods []string
+
+	// Insecure disables TLS certificate verification for every request the
+	// client makes. The real case is a private CA on an internal deployment;
+	// anything reachable from outside should fix its certificate instead.
+	//
+	// Inert under an http:// base_url, which negotiates no TLS to skip the
+	// checks of — so true there is not a setting that does nothing dangerous,
+	// it is a setting that will do something the day the URL gains its "s"
+	// and nobody revisits this line.
+	Insecure bool
+}
+
 // validNoRetryMethods is the allowlist checked by ClientConfig.Validate,
 // spelled with Fiber's own method constants so a rename upstream is a
 // compile error here rather than a silent gap in the list.
@@ -57,86 +152,6 @@ var validNoRetryMethods = map[string]struct{}{
 	fiber.MethodQuery:   {},
 }
 
-// ClientConfig carries the settings for an OUTBOUND HTTP client.
-type ClientConfig struct {
-	// BaseURL is the service root: scheme, host, and optionally a path
-	// prefix, e.g. "https://api.example.com" or
-	// "https://api.example.com/api/v1". A trailing slash is tolerated, and so
-	// is the "/api/v1" a URL pasted out of a browser carries, provided the
-	// client is built with httpclient.Options.TrimPathSuffix set to it.
-	//
-	// Empty means no client is configured. See the type comment: it is a
-	// legitimate setting for a deployment that only serves, which is why
-	// Validate lets it through. httpclient.New refuses it by name, at the
-	// one point where something is definitely trying to build a client.
-	BaseURL string
-
-	// Token is the bearer credential, sent as "Authorization: Bearer
-	// <token>" on every request. Blank in config.yaml and supplied as
-	// FIBER_CLIENT_TOKEN, the same way the database pair is.
-	//
-	// Not required, and that is the difference from those two. A service that
-	// authenticates by network position rather than by header is a real
-	// deployment, so an absent token is a working configuration and cannot be
-	// rejected here. The failure it leaves is a 401 from the far end, which
-	// names itself.
-	Token string
-
-	// Retries is how many ADDITIONAL attempts a retryable failure gets. Zero
-	// means one attempt and no retry, which is the value an absent key reads
-	// as.
-	//
-	// What counts as retryable is the transport's decision, not this
-	// package's, and the usual rule is two kinds of failure: a transport
-	// error (connection refused, reset, timeout) and the statuses that mean
-	// "try again later" — 429, 500, 502, 503, 504. Every other 4xx is a
-	// deterministic answer about this request and gets one attempt however
-	// high this is set.
-	//
-	// It buys time as well as attempts. Under the common exponential backoff
-	// — doubling from 500ms, capped at 8s — 2 spends up to 1.5s before giving
-	// up and 5 spends up to 15.5s, with each further retry adding the cap to
-	// a call that is already failing. That is per REQUEST, so a batch of them
-	// multiplies it: the reason to keep this small is the unattended run that
-	// now takes an hour to report the outage it hit in the first minute.
-	Retries int
-
-	// NoRetryMethods are the methods that get exactly one attempt whatever
-	// the failure, and this key has THREE settings rather than two.
-	//
-	// Absent, it is nil, and the transport is expected to substitute its own
-	// default: POST alone. Stated, it is exactly what is stated. And stated
-	// EMPTY — `no_retry_methods: []` — every method is replayed, which is the
-	// opposite of the default and has to be asked for. splitList preserves
-	// that distinction (nil for a key no source supplies, non-nil for a
-	// stated empty list), which is what makes the third setting expressible
-	// at all. A transport that treats nil and empty alike collapses two of
-	// the three back into one, and this is the field to check when it does.
-	//
-	// From the ENVIRONMENT the empty list is not expressible: Viper's
-	// AllowEmptyEnv is off, so FIBER_CLIENT_NO_RETRY_METHODS= reads as unset
-	// and lands on the default instead. The file is the only place it can be
-	// written.
-	//
-	// POST is the usual default because replaying a create is only safe when
-	// the server can recognise the duplicate. Where the request body carries
-	// nothing unique, a replayed POST whose first attempt had in fact landed
-	// writes a SECOND row, and no later response can tell the two cases
-	// apart. Widen this only for endpoints that address a specific id or
-	// carry a natural key the server rejects a second copy on.
-	NoRetryMethods []string
-
-	// Insecure disables TLS certificate verification for every request the
-	// client makes. The real case is a private CA on an internal deployment;
-	// anything reachable from outside should fix its certificate instead.
-	//
-	// Inert under an http:// base_url, which negotiates no TLS to skip the
-	// checks of — so true there is not a setting that does nothing dangerous,
-	// it is a setting that will do something the day the URL gains its "s"
-	// and nobody revisits this line.
-	Insecure bool
-}
-
 // NewClientConfig reads ClientConfig fields from the provided Viper instance.
 //
 // Never returns an error: absent keys and uncastable values both come back as
@@ -158,11 +173,11 @@ type ClientConfig struct {
 // WithLogger: a logger travels in that struct rather than being copied onto a
 // foreign config type the way ZerologConfig copies one.
 //
-// A HEADER MAP is the one shape this file cannot express. Every test that
-// pairs config.yaml against these constructors compares LEAF keys — a mapping
-// is recursed into, so "fiber.client.headers" would never appear as a key
-// anything reads, while each name an operator wrote under it would appear as
-// a key nothing reads. The environment cannot express it at all.
+// A HEADER MAP is the one shape this file cannot express well. Viper
+// flattens a mapping into LEAF keys, so "fiber.client.headers" would never
+// be a key of its own: every header name written under it would become one,
+// and no constructor can list those in advance the way this one lists its
+// five. The environment cannot express a mapping at all.
 // Authorization, the header this would mostly be used for, has its own key
 // above.
 //
@@ -228,35 +243,51 @@ func (c *ClientConfig) Validate() error {
 	// different findings: absence says this deployment calls nothing, while a
 	// value that is not a URL says it meant to call something and cannot.
 	//
-	// Trimmed and re-parsed the way a client constructor would, so what is
-	// checked is what that constructor will see. The host check is the one a
-	// constructor typically does NOT make: "https://" parses, carries the
-	// right scheme, and fails every request afterwards with no host to dial.
+	// Trimmed and re-parsed the way httpclient.New does, and held to the
+	// same four rules — it parses, its scheme is http or https, it names a
+	// host, and it carries no userinfo — so a value that passes here is one
+	// that constructor accepts, checked at startup instead of when something
+	// first builds a client, which may be a scheduled job hours later.
+	//
+	// No message quotes the value as written. Each quotes shown, which masks
+	// any userinfo, and the parse branch goes through urlParseCause, which
+	// drops the copy of the input url.Parse puts in its own error and masks
+	// any fragment the cause quotes. Both halves matter: a password with a
+	// space in it fails the parse before the userinfo case is ever reached,
+	// and one holding a "/" fails it as an invalid port that quotes the
+	// password.
 	if c.BaseURL != "" {
 		raw := strings.TrimRight(strings.TrimSpace(c.BaseURL), "/")
+		shown := redactUserinfo(c.BaseURL)
 		u, err := url.Parse(raw)
 		switch {
 		case err != nil:
 			errs = append(errs, fmt.Errorf("fiber.client.base_url is not a "+
-				"valid URL: %w",
-				err))
+				"valid URL (got %q): %w",
+				shown,
+				urlParseCause(err)))
 		case u.Scheme != "http" && u.Scheme != "https":
 			errs = append(errs, fmt.Errorf("fiber.client.base_url must "+
 				"start with http:// or https:// (got %q)",
-				c.BaseURL))
+				shown))
 		case u.Host == "":
 			errs = append(errs, fmt.Errorf("fiber.client.base_url names no "+
 				"host (got %q): every request would be built against an "+
 				"address with nothing to dial",
-				c.BaseURL))
+				shown))
+		case u.User != nil:
+			errs = append(errs, fmt.Errorf("fiber.client.base_url must not "+
+				"carry userinfo (got %q): the configuration is logged on "+
+				"every start, so a credential here reaches the log — put "+
+				"a bearer credential in fiber.client.token instead",
+				shown))
 		}
 	}
 
-	// Negative is not "fewer retries", it is NO REQUEST. The transport loops
-	// `for attempt := 0; attempt <= retries; attempt++`, so a negative bound
-	// skips the body entirely and every call returns "giving up after 0
-	// attempts" without a packet leaving the process — a failure that reads
-	// like an unreachable service and is a number in this file.
+	// Negative is not "fewer retries". httpclient.New clamps it to 0, so it
+	// runs as one attempt with no retry: a value that reads as a setting
+	// and acts as the default, which is the shape this package refuses
+	// everywhere else. Rejecting it makes the file say what runs.
 	if c.Retries < 0 {
 		errs = append(errs, fmt.Errorf("fiber.client.retries cannot be "+
 			"negative (got %d): 0 already means one attempt and no retry",
@@ -285,6 +316,10 @@ func (c *ClientConfig) Validate() error {
 // The pointer receiver means fmt only picks this up for a *ClientConfig.
 // Printing a value copy (%v on ClientConfig, not &ClientConfig) bypasses it
 // and dumps the struct fields directly — the token included.
+//
+// BaseURL goes through redactUserinfo. Validate refuses a base URL that
+// carries a credential, so a configuration that started has none to mask;
+// the mask is for a String called on one that did not start.
 //
 // Token is reported as PRESENT OR NOT rather than printed. This struct holds
 // a credential and the omission is deliberate, as in DatabaseConfig.String —
@@ -323,7 +358,7 @@ func (c *ClientConfig) String() string {
 		"Retries=%d "+
 		"NoRetryMethods=%s "+
 		"Insecure=%t",
-		c.BaseURL,
+		redactUserinfo(c.BaseURL),
 		token,
 		c.Retries,
 		methods,

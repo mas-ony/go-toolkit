@@ -19,9 +19,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/rs/zerolog"
-
 	"github.com/mas-ony/go-toolkit/xlsx"
+	"github.com/rs/zerolog"
 )
 
 // reportDataset supplies only the two methods the report renderers use.
@@ -51,33 +50,46 @@ func readCSV(t *testing.T, path string) [][]string {
 	return records
 }
 
-func (d reportDataset) Info() Info          { return d.info }
-func (d reportDataset) Report() ReportShape { return d.shape }
+// Info returns the info the test set.
+func (d reportDataset) Info() Info { return d.info }
 
-func (reportDataset) Flags(*flag.FlagSet)      { panic("not used here") }
-func (reportDataset) Validate() error          { panic("not used here") }
-func (reportDataset) Layout() xlsx.Layout      { panic("not used here") }
-func (reportDataset) Columns() []xlsx.Column   { panic("not used here") }
+// Len is not reached by the renderers; see reportDataset.
+func (reportDataset) Len() int { panic("not used here") }
+
+// Flags is not reached by the renderers; see reportDataset.
+func (reportDataset) Flags(*flag.FlagSet) { panic("not used here") }
+
+// Validate is not reached by the renderers; see reportDataset.
+func (reportDataset) Validate() error { panic("not used here") }
+
+// Layout is not reached by the renderers; see reportDataset.
+func (reportDataset) Layout() xlsx.Layout { panic("not used here") }
+
+// Columns is not reached by the renderers; see reportDataset.
+func (reportDataset) Columns() []xlsx.Column { panic("not used here") }
+
+// HeaderAdvice is not reached by the renderers; see reportDataset.
 func (reportDataset) HeaderAdvice(error) error { panic("not used here") }
-func (reportDataset) Len() int                 { panic("not used here") }
 
+// Connect is not reached by the renderers; see reportDataset.
 func (reportDataset) Connect(context.Context, Transport, *Run) error {
 	panic("not used here")
 }
 
+// Prepare is not reached by the renderers; see reportDataset.
 func (reportDataset) Prepare(
 	context.Context, *xlsx.File, *Run,
 ) ([]Outcome, error) {
 	panic("not used here")
 }
 
+// Import is not reached by the renderers; see reportDataset.
 func (reportDataset) Import(context.Context, int, *Run) Outcome {
 	panic("not used here")
 }
 
-// ----------------------------------------------------------------------------
-// PrintSummary
-// ----------------------------------------------------------------------------
+// Report returns the shape the test set.
+func (d reportDataset) Report() ReportShape { return d.shape }
 
 // Created, updated and skipped are suppressed at zero because most
 // datasets produce only one of the three, and a column of zeroes for
@@ -221,6 +233,7 @@ func TestPrintSummaryListsRowsWithNotesAndFailures(t *testing.T) {
 	}
 }
 
+// A run with no failed and no noted row says so in words.
 func TestPrintSummarySaysSoWhenThereAreNoProblems(t *testing.T) {
 	var buf bytes.Buffer
 	PrintSummary(&buf, "book.xlsx",
@@ -232,10 +245,6 @@ func TestPrintSummarySaysSoWhenThereAreNoProblems(t *testing.T) {
 		t.Errorf("a clean run should say so:\n%s", buf.String())
 	}
 }
-
-// ----------------------------------------------------------------------------
-// WriteReport
-// ----------------------------------------------------------------------------
 
 // The column order is a contract: the row number first so a reviewer can
 // go straight to the cell, the dataset's own fields in the order it
@@ -353,6 +362,7 @@ func TestWriteReportQuotesAwkwardValues(t *testing.T) {
 	}
 }
 
+// A report path that cannot be created fails with an error naming it.
 func TestWriteReportReportsAnUnwritablePath(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "no-such-dir", "report.csv")
 

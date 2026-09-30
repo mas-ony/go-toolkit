@@ -5,9 +5,8 @@ import (
 	"os"
 	"time"
 
-	"github.com/rs/zerolog"
-
 	"github.com/mas-ony/go-toolkit/config"
+	"github.com/rs/zerolog"
 )
 
 // newTo is New with the destination supplied by the caller.

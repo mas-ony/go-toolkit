@@ -41,6 +41,11 @@
 // separately, in Options: a route prefix to trim, a header map, and a
 // logger. NewClientConfig documents why each is absent from the section.
 //
+// A base URL carrying userinfo is refused, whether it arrives in the
+// config or through WithBaseURL. Every URL built on it is quoted in full
+// by errors and by the retry log, so a credential there would reach the
+// logs on the first failure; it belongs in the token or in a header.
+//
 // # What is retried
 //
 // Transport failures and the five statuses that mean "try again later":
@@ -70,10 +75,11 @@
 // # What the tests hold in place
 //
 // The unit suite already runs against a real HTTP server rather than a
-// stub transport, so it reaches the wire: base-URL normalisation, which
-// statuses retry and which do not, the no-retry method list, the
-// sentinels, headers and token, decoding into the caller's type, query
-// merging, and a context deadline.
+// stub transport, so it reaches the wire: base-URL normalisation,
+// rebasing with WithBaseURL, the refusal of a base carrying a credential,
+// which statuses retry and which do not, the no-retry method list, the
+// backoff schedule, the sentinels, headers and token, decoding into the
+// caller's type, query merging, and a context deadline.
 //
 // httpclient_integration_test.go covers four things that suite does not,
 // each needing something a plain HTTP handler cannot provide:
@@ -97,13 +103,12 @@
 // Its comment explains that the transport pools response buffers and that
 // anything still pointing at one after Close reads whatever lands there
 // next. That reasoning is sound and the clone should stay. But with the
-// clone removed, 8,000 requests across 16 concurrent workers produced no
-// corruption — first on fiber v3.0.0-beta.4, and again on v3.5.0 — so a
-// test asserting otherwise would be asserting something that does not
-// happen on either. The clone is a defence against a documented transport
-// behaviour, not against an observed failure. Re-run that probe when the
-// transport changes: a version that does corrupt makes the test possible,
-// the way it was for the request package.
+// clone removed, a probe of 8,000 requests across 16 concurrent workers
+// shows no corruption on the transport this module pins, so a test
+// asserting otherwise would assert something that does not happen. The
+// clone defends against a documented transport behaviour, not against an
+// observed failure. Re-run that probe when the transport changes: a version
+// that does corrupt makes the test possible.
 //
 //	go test -tags integration -run Integration ./httpclient
 //

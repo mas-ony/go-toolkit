@@ -1,6 +1,10 @@
 package config
 
 // Tests for fiber_recover_config.go.
+//
+// What the section promises: the stack-trace flag is read under its
+// documented key and accepted either way, and a stack-trace handler is
+// installed on a copy, so the section keeps describing what was loaded.
 
 import (
 	"testing"
@@ -9,6 +13,7 @@ import (
 	"github.com/spf13/viper"
 )
 
+// The flag is read under its documented key, both ways.
 func TestRecoverReadsTheStackTraceFlag(t *testing.T) {
 	t.Parallel()
 	for _, want := range []bool{true, false} {

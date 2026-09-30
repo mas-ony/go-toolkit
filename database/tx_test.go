@@ -1,5 +1,13 @@
 package database
 
+// Tests for tx.go, against a fake driver defined below; the reasons for a
+// fake rather than a server are set out above the first test.
+//
+// What the file promises: one commit or one rollback per call and never
+// both, fn's error and a panic passed through as they came, a begin failure
+// wrapped with its cause intact, options and context handed to the driver
+// untouched, and a nested call visible as the second connection it takes.
+
 import (
 	"context"
 	"database/sql"
@@ -13,22 +21,8 @@ import (
 	"github.com/jmoiron/sqlx"
 )
 
-// ----------------------------------------------------------------------------
-// Test helpers
-// ----------------------------------------------------------------------------
-
-// counts is the observable behaviour of one transaction, as the driver saw it.
-type counts struct {
-	connects  int
-	begins    int
-	commits   int
-	rollbacks int
-}
-
-// errReadOnlyUnsupported reproduces go-mssqldb's own message so the assertion
-// in TestWithTxContextSurfacesReadOnlyRejection is recognisably the real one.
-var errReadOnlyUnsupported = errors.New(
-	"read-only transactions are not supported")
+// fakeDriver is the driver.Driver behind fakeConnector.
+type fakeDriver struct{}
 
 // fakeDB is the shared state behind the connector, connections and
 // transactions below. Every field is guarded by mu because database/sql calls
@@ -53,6 +47,44 @@ type fakeDB struct {
 	rolledBack chan struct{}
 }
 
+// fakeConnector hands out connections to one fakeDB, so that sql.OpenDB can
+// use the fake without registering a driver name.
+type fakeConnector struct{ db *fakeDB }
+
+// fakeConn implements driver.ConnBeginTx as well as driver.Conn. That is the
+// point: database/sql only forwards the context and the isolation options to a
+// driver that implements the Tx variant, so a conn with a bare Begin would
+// make half the assertions in this file untestable — and, on a real driver,
+// would silently drop the very options WithTxContext exists to pass.
+type fakeConn struct{ db *fakeDB }
+
+// fakeTx counts COMMIT and ROLLBACK and returns the injected failure for
+// each.
+type fakeTx struct{ db *fakeDB }
+
+// counts is the observable behaviour of one transaction, as the driver saw it.
+type counts struct {
+	connects  int
+	begins    int
+	commits   int
+	rollbacks int
+}
+
+// snapshotResult is a consistent copy of the fake's counters, the options
+// BEGIN saw, and the context it was handed.
+type snapshotResult struct {
+	counts
+	opts []driver.TxOptions
+	ctx  context.Context
+}
+
+// errReadOnlyUnsupported reproduces go-mssqldb's own message so the assertion
+// in TestWithTxContextSurfacesReadOnlyRejection is recognisably the real one.
+var errReadOnlyUnsupported = errors.New(
+	"read-only transactions are not supported")
+
+// newFakeDB returns a fake with room for eight asynchronous rollback
+// signals, more than any test here waits for.
 func newFakeDB() *fakeDB {
 	return &fakeDB{rolledBack: make(chan struct{}, 8)}
 }
@@ -69,12 +101,8 @@ func (f *fakeDB) open(t *testing.T) *sqlx.DB {
 	return db
 }
 
-type snapshotResult struct {
-	counts
-	opts []driver.TxOptions
-	ctx  context.Context
-}
-
+// snapshot copies the fake's state under its lock, so a test can read it
+// while database/sql's own goroutines may still write.
 func (f *fakeDB) snapshot() snapshotResult {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -106,6 +134,27 @@ func (f *fakeDB) assert(t *testing.T, want counts) {
 	}
 }
 
+// assertConnectionsReturned is the leak check that motivates the panic guard.
+//
+// It polls rather than reading once, because database/sql returns a connection
+// to the pool from the goroutine that rolled the transaction back, which is
+// not necessarily the test's goroutine.
+func assertConnectionsReturned(t *testing.T, db *sqlx.DB) {
+	t.Helper()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if inUse := db.Stats().InUse; inUse == 0 {
+			return
+		} else if time.Now().After(deadline) {
+			t.Errorf("%d connection(s) still checked out; the pool would "+
+				"drain under repeated failures", inUse)
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
 // waitForRollback blocks until the driver sees a rollback, or the timeout
 // expires. It reports whether one arrived.
 func (f *fakeDB) waitForRollback(timeout time.Duration) bool {
@@ -119,8 +168,18 @@ func (f *fakeDB) waitForRollback(timeout time.Duration) bool {
 	}
 }
 
-type fakeConnector struct{ db *fakeDB }
+// capturePanic runs fn and returns whatever it panicked with, or nil.
+func capturePanic(fn func()) (recovered any) {
+	defer func() { recovered = recover() }()
+	fn()
+	return nil
+}
 
+// Driver returns the driver the connector belongs to.
+func (c *fakeConnector) Driver() driver.Driver { return fakeDriver{} }
+
+// Connect counts the connection, which is what the nesting tests read, and
+// opens it onto the shared fakeDB.
 func (c *fakeConnector) Connect(context.Context) (driver.Conn, error) {
 	c.db.mu.Lock()
 	c.db.connects++
@@ -128,32 +187,25 @@ func (c *fakeConnector) Connect(context.Context) (driver.Conn, error) {
 	return &fakeConn{db: c.db}, nil
 }
 
-func (c *fakeConnector) Driver() driver.Driver { return fakeDriver{} }
+// Prepare refuses: no test here runs a statement.
+func (c *fakeConn) Prepare(string) (driver.Stmt, error) {
+	return nil, errors.New("fake: statements are not supported")
+}
 
-type fakeDriver struct{}
-
+// Open refuses: the fake is reachable only through its connector.
 func (fakeDriver) Open(string) (driver.Conn, error) {
 	return nil, errors.New(
 		"fake: this driver is only reachable through its connector")
 }
 
-// fakeConn implements driver.ConnBeginTx as well as driver.Conn. That is the
-// point: database/sql only forwards the context and the isolation options to a
-// driver that implements the Tx variant, so a conn with a bare Begin would
-// make half the assertions in this file untestable — and, on a real driver,
-// would silently drop the very options WithTxContext exists to pass.
-type fakeConn struct{ db *fakeDB }
-
-func (c *fakeConn) Prepare(string) (driver.Stmt, error) {
-	return nil, errors.New("fake: statements are not supported")
-}
-
-func (c *fakeConn) Close() error { return nil }
-
+// Begin is the pre-context form database/sql falls back to only for a
+// driver without BeginTx, so it delegates.
 func (c *fakeConn) Begin() (driver.Tx, error) {
 	return c.BeginTx(context.Background(), driver.TxOptions{})
 }
 
+// BeginTx records the options and context it was handed, then applies the
+// injected failures in the order go-mssqldb checks the same things.
 func (c *fakeConn) BeginTx(
 	ctx context.Context,
 	opts driver.TxOptions,
@@ -179,8 +231,7 @@ func (c *fakeConn) BeginTx(
 	return &fakeTx{db: f}, nil
 }
 
-type fakeTx struct{ db *fakeDB }
-
+// Commit counts the call and returns the injected commit failure, if any.
 func (t *fakeTx) Commit() error {
 	f := t.db
 	f.mu.Lock()
@@ -190,6 +241,8 @@ func (t *fakeTx) Commit() error {
 	return err
 }
 
+// Rollback counts the call, signals any test waiting for an asynchronous
+// rollback, and returns the injected failure, if any.
 func (t *fakeTx) Rollback() error {
 	f := t.db
 	f.mu.Lock()
@@ -206,35 +259,10 @@ func (t *fakeTx) Rollback() error {
 	return err
 }
 
-// capturePanic runs fn and returns whatever it panicked with, or nil.
-func capturePanic(fn func()) (recovered any) {
-	defer func() { recovered = recover() }()
-	fn()
-	return nil
-}
+// Close releases nothing; the fake holds no resources.
+func (c *fakeConn) Close() error { return nil }
 
-// assertConnectionsReturned is the leak check that motivates the panic guard.
-//
-// It polls rather than reading once, because database/sql returns a connection
-// to the pool from the goroutine that rolled the transaction back, which is
-// not necessarily the test's goroutine.
-func assertConnectionsReturned(t *testing.T, db *sqlx.DB) {
-	t.Helper()
-
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		if inUse := db.Stats().InUse; inUse == 0 {
-			return
-		} else if time.Now().After(deadline) {
-			t.Errorf("%d connection(s) still checked out; the pool would "+
-				"drain under repeated failures", inUse)
-			return
-		}
-		time.Sleep(time.Millisecond)
-	}
-}
-
-// These tests run against a fake driver defined at the bottom of this file
+// These tests run against a fake driver defined at the top of this file
 // rather than against a real SQL Server, for two reasons.
 //
 // First, everything WithTxContext actually does is decide WHEN database/sql is
@@ -253,10 +281,6 @@ func assertConnectionsReturned(t *testing.T, db *sqlx.DB) {
 // on a real server, because the fake holds no row locks.
 // TestNestedCallChecksOutASecondConnection pins the mechanism that leads to it
 // instead, which is the part this package controls.
-
-// ----------------------------------------------------------------------------
-// Success and failure paths
-// ----------------------------------------------------------------------------
 
 // TestWithTxCommitsOnSuccess covers the happy path, including the negative
 // half: Rollback must not be called at all when Commit succeeds.
@@ -559,10 +583,6 @@ func TestNamedReturnRoutesEveryPathThroughOneRollback(t *testing.T) {
 	}
 }
 
-// ----------------------------------------------------------------------------
-// Context and options
-// ----------------------------------------------------------------------------
-
 // TestWithTxUsesBackgroundContextAndNoOptions pins what the shortcut form
 // delegates.
 //
@@ -652,11 +672,11 @@ func TestWithTxContextPassesIsolationLevelThrough(t *testing.T) {
 	}
 }
 
-// TestWithTxContextSurfacesReadOnlyRejection backs the "ReadOnly is NOT usable
-// on this driver" paragraph.
+// TestWithTxContextSurfacesReadOnlyRejection backs the ReadOnly paragraphs of
+// WithTxContext's doc comment.
 //
-// The rejection itself lives in go-mssqldb, which this package does not
-// import, so the fake reproduces the driver's own first-line check:
+// The rejection itself lives in go-mssqldb, which cannot be reached without
+// a server, so the fake reproduces the driver's own first-line check:
 //
 //	if opts.ReadOnly {
 //	    return nil, errors.New("read-only transactions are not supported")
@@ -771,10 +791,6 @@ func TestAlreadyCancelledContextFailsAtBegin(t *testing.T) {
 	f.assert(t, counts{begins: 0, commits: 0, rollbacks: 0})
 }
 
-// ----------------------------------------------------------------------------
-// Nesting
-// ----------------------------------------------------------------------------
-
 // TestNestedCallChecksOutASecondConnection pins the mechanism behind the
 // "Still no nesting" section.
 //
@@ -849,8 +865,9 @@ func TestPassingTheTxDownIsTheSupportedPattern(t *testing.T) {
 //
 // fn takes *sqlx.Tx rather than sqlx.ExtContext specifically so repositories
 // can call their own .WithTx(tx) method. Narrowing the parameter to an
-// interface would compile everywhere it is used today and break that pattern
-// for the next repository added.
+// interface would still compile at every call site that only runs
+// statements, and break the pattern for any repository that hands tx to its
+// own WithTx method.
 func TestFnReceivesAConcreteTxNotAnInterface(t *testing.T) {
 	t.Parallel()
 

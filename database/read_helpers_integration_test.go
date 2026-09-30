@@ -12,6 +12,8 @@ import (
 	"github.com/jmoiron/sqlx"
 )
 
+// readRow is one row of the read fixture, with the has_child flag that
+// ExistsFlag computes.
 type readRow struct {
 	ID       int    `db:"id"`
 	Code     string `db:"code"`
@@ -19,6 +21,7 @@ type readRow struct {
 	HasChild *bool  `db:"has_child"`
 }
 
+// codeCount is one group of the GroupClause fixture.
 type codeCount struct {
 	Code  string `db:"code"`
 	Total int    `db:"total"`
@@ -57,6 +60,8 @@ func readFixture(t *testing.T, db *sqlx.DB) (parent, child string) {
 	return parent, child
 }
 
+// GetOne scans a row that exists, reports a missing one as (false, nil),
+// and binds through a transaction as well as through a pool.
 func TestIntegrationGetOne(t *testing.T) {
 	forEachEngine(t, func(t *testing.T, db *sqlx.DB) {
 		ctx := context.Background()
@@ -97,6 +102,8 @@ func TestIntegrationGetOne(t *testing.T) {
 	})
 }
 
+// CountQuery's derived table and SelectList's page run on both engines
+// from one args map, and an empty result leaves a nil slice nil.
 func TestIntegrationCountQueryAndSelectList(t *testing.T) {
 	forEachEngine(t, func(t *testing.T, db *sqlx.DB) {
 		ctx := context.Background()
@@ -146,6 +153,8 @@ func TestIntegrationCountQueryAndSelectList(t *testing.T) {
 	})
 }
 
+// ExistsFlag scans into a bool on both engines, and a LIKE over AsText
+// searches a numeric column instead of failing a conversion.
 func TestIntegrationExistsFlagAndAsText(t *testing.T) {
 	forEachEngine(t, func(t *testing.T, db *sqlx.DB) {
 		ctx := context.Background()
@@ -172,6 +181,7 @@ func TestIntegrationExistsFlagAndAsText(t *testing.T) {
 	})
 }
 
+// GroupClause groups, and SortClause orders the groups, on both engines.
 func TestIntegrationGroupClause(t *testing.T) {
 	forEachEngine(t, func(t *testing.T, db *sqlx.DB) {
 		ctx := context.Background()

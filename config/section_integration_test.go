@@ -15,8 +15,10 @@ package config
 // deployment has one. What is under test is the wiring, which is the same
 // for every section; the contract suite in sections_test.go separately
 // checks that each section's documented spellings follow the rule these
-// tests prove. The one exception is the nested-prefix case, which needs a
-// real nested section and uses notification.email.
+// tests prove. Two cases need something the app section lacks: the
+// underscored-key case reads database.max_open_conns, since no app key has
+// an underscore inside a segment, and the nested-prefix case needs a real
+// nested section and uses notification.email.
 //
 // These set REAL process variables with t.Setenv and read a real
 // config.yaml through NewViper, so each assertion is about what a
@@ -36,6 +38,8 @@ import (
 	"github.com/spf13/viper"
 )
 
+// baseFile is a complete app section, the file every case reads before
+// the environment it sets is applied on top.
 const baseFile = `
 app:
   name: from-file
@@ -43,7 +47,6 @@ app:
   env: production
   port: 8080
   location: UTC
-  reports_base_url: https://file.example
 `
 
 // loadFile writes body to a config.yaml in a temporary directory and reads
@@ -83,17 +86,19 @@ func TestIntegrationEnvironmentOverridesTheFile(t *testing.T) {
 }
 
 // The spelling rule on a key that already contains an underscore:
-// app.reports_base_url becomes APP_REPORTS_BASE_URL. The replacer only
-// turns DOTS into underscores, so the underscore inside the key segment
-// survives and the two are indistinguishable in the variable name — which
-// is exactly what the documented spelling says.
+// database.max_open_conns becomes DATABASE_MAX_OPEN_CONNS. The replacer
+// only turns DOTS into underscores, so the underscores inside the key
+// segment survive and the two are indistinguishable in the variable name —
+// which is exactly what the documented spelling says. No app key has an
+// underscore in a segment, which is why this one case reads another
+// section.
 func TestIntegrationUnderscoredKeyHasTheDocumentedSpelling(t *testing.T) {
-	t.Setenv("APP_REPORTS_BASE_URL", "https://env.example")
+	t.Setenv("DATABASE_MAX_OPEN_CONNS", "25")
 
-	app := NewAppConfig(loadFile(t, baseFile))
-	if app.ReportsBaseURL != "https://env.example" {
-		t.Errorf("ReportsBaseURL = %q, want the value of "+
-			"APP_REPORTS_BASE_URL", app.ReportsBaseURL)
+	db := NewDatabaseConfig(loadFile(t, baseFile))
+	if db.MaxOpenConns != 25 {
+		t.Errorf("MaxOpenConns = %d, want 25 from "+
+			"DATABASE_MAX_OPEN_CONNS", db.MaxOpenConns)
 	}
 }
 
@@ -101,12 +106,12 @@ func TestIntegrationUnderscoredKeyHasTheDocumentedSpelling(t *testing.T) {
 // environment. This is the case AllKeys cannot see, and the reason
 // SuppliedSections consults both sources.
 func TestIntegrationEnvironmentSuppliesAKeyTheFileLacks(t *testing.T) {
-	t.Setenv("APP_UPLOAD_DIR", "/srv/uploads")
+	t.Setenv("APP_HOST", "127.0.0.1")
 
 	app := NewAppConfig(loadFile(t, baseFile))
-	if app.UploadDir != "/srv/uploads" {
-		t.Errorf("UploadDir = %q, want /srv/uploads from the "+
-			"environment", app.UploadDir)
+	if app.Host != "127.0.0.1" {
+		t.Errorf("Host = %q, want 127.0.0.1 from the environment",
+			app.Host)
 	}
 }
 

@@ -45,8 +45,8 @@ import (
 //     run: the hit is never decremented and no X-RateLimit-* headers are set,
 //     so a panicking request counts against the quota even under
 //     skip_failed_requests. Nothing on this type needs that; the argument is
-//     on LimiterConfig. It is here because it is what stopped this middleware
-//     being free to move inwards.
+//     on LimiterConfig. It is noted here because it is what keeps this
+//     middleware from moving inwards.
 //
 // The cost of that order is that a panic in the logging middleware itself is
 // not caught. Far less likely than a panic in a handler, and recover could not
@@ -89,10 +89,10 @@ func NewRecoverConfig(v *viper.Viper) *RecoverConfig {
 		Config: &fiberrecover.Config{
 			// EnableStackTrace is the gate on StackTraceHandler, and it is a
 			// gate rather than a formatting switch: the middleware calls the
-			// handler ONLY when this is true. With it false, the application's
-			// the stack-trace handler is installed and never runs, so a recovered
-			// panic produces no "recovered panic" line at all — no stack, no
-			// panic value, no handler=panic field.
+			// handler ONLY when this is true. With it false, the
+			// application's stack-trace handler is installed and never runs,
+			// so a recovered panic produces no "recovered panic" line at all
+			// — no stack, no panic value, no handler=panic field.
 			//
 			// The request is still logged and the client still gets a 500. The
 			// zerolog middleware writes its usual line with status 500 and the
@@ -123,11 +123,12 @@ func NewRecoverConfig(v *viper.Viper) *RecoverConfig {
 // id back out of the Fiber context — both of which are the HTTP layer's
 // business, and neither of which exists when this configuration is built.
 //
-// Its second argument is cfg.Zerolog.RequestIDField(), derived once in the
-// application and shared with the error handler, so the key the id is logged
-// under follows fiber.zerolog.fields_snake_case at all three sites rather than
-// at one of them. See ZerologConfig.RequestIDField for why the name is derived
-// rather than spelled as a literal at each site.
+// The handler should take the key it logs the request id under from
+// cfg.Zerolog.RequestIDField(), derived once in the application and shared
+// with the error handler, so that key follows
+// fiber.zerolog.fields_snake_case at all three sites rather than at one of
+// them. See ZerologConfig.RequestIDField for why the name is derived rather
+// than spelled as a literal at each site.
 //
 // # Mechanics
 //
@@ -179,13 +180,10 @@ func (c *RecoverConfig) WithStackTraceHandler(
 //     on the field in NewRecoverConfig, where it can be read by someone about
 //     to change it.
 //
-// That accounts for all fields, so this method has no checks beyond the nil
-// guard, and returns nil directly rather than joining an empty list.
-//
-// The other Validate implementations open with `var errs []error` above their
-// nil check so that the two statements read in the same order everywhere;
-// there is nothing here to append to it, and a declared-but-never-appended
-// slice would take three paragraphs to explain what one return says.
+// That accounts for every field, so this method has no checks beyond the nil
+// guard and returns nil directly. Like WhatsAppConfig's, it does not open
+// with the `var errs []error` the other Validate methods start with, because
+// there is nothing here to append to one.
 func (c *RecoverConfig) Validate() error {
 	if c == nil || c.Config == nil {
 		return errors.New("fiber.recover config was not initialised")
@@ -199,13 +197,12 @@ func (c *RecoverConfig) Validate() error {
 // Printing a value copy (%v on RecoverConfig, not &RecoverConfig) bypasses it
 // and dumps the struct fields directly.
 //
-// The nil check is TWO-PART, mirroring Validate's. zerolog reaches this method
-// through fmt.Stringer, and its own guard — `if val == nil` in
-// internal/json.AppendStringer — is an INTERFACE nil, which neither a typed
-// nil pointer nor a wrapper around a nil embedded pointer satisfies. So it
-// calls String on both, and without the second half the half-built one panics
-// inside the startup log line rather than rendering a placeholder.
-// The section list carries the argument.
+// The nil check is TWO-PART, mirroring Validate's. A logger's own guard, such
+// as zerolog's `if val == nil` before it calls a Stringer, compares an
+// INTERFACE with nil, which neither a typed nil pointer nor a wrapper around
+// a nil embedded pointer satisfies. Without the second half, the half-built
+// one would panic inside the startup log line instead of rendering a
+// placeholder.
 func (c *RecoverConfig) String() string {
 	if c == nil {
 		return "<nil RecoverConfig>"

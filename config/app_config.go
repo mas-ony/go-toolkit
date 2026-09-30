@@ -16,50 +16,16 @@ package config
 //		APP_PORT
 //	app.location
 //		APP_LOCATION
-//	app.reports_base_url
-//		APP_REPORTS_BASE_URL
-//	app.upload_dir
-//		APP_UPLOAD_DIR
 //
-// Eight keys, and that is the whole section: NewAppConfig reads exactly
+// Six keys, and that is the whole section: NewAppConfig reads exactly
 // these. The environment spelling holds only for a Viper built by NewViper;
 // see the package documentation.
 
 import (
 	"errors"
 	"fmt"
-	"net/url"
-	"strings"
 
 	"github.com/spf13/viper"
-)
-
-// validEnvs is the allowlist checked by AppConfig.Validate.
-//
-// The empty-struct value is the idiomatic set: it occupies no memory, and the
-// two-value map read in Validate reports membership without a sentinel value.
-// Values are matched exactly — no trimming, no case folding — so "Production"
-// is rejected. That strictness is deliberate: logger.New treats every
-// unrecognised value as production, so a typo that slipped through would
-// silently disable debug logging instead of failing at startup.
-var validEnvs = map[string]struct{}{
-	EnvDevelopment: {},
-	EnvStaging:     {},
-	EnvProduction:  {},
-}
-
-// Environment name constants used by app.env and the logger.
-// Compare against these instead of bare string literals to avoid typos.
-const (
-	// Pretty-printed, colorized logs; DEBUG level.
-	EnvDevelopment = "development"
-
-	// JSON logs; INFO level.
-	EnvStaging = "staging"
-
-	// JSON logs; INFO level — the same logger behaviour as staging. The
-	// separate value exists for future env-specific tuning.
-	EnvProduction = "production"
 )
 
 // AppConfig holds application-level identity and runtime settings.
@@ -78,8 +44,9 @@ type AppConfig struct {
 	// whatever the logs are doing.
 	//
 	// Any byte is safe while the connection string is built in URL form,
-	// which escapes a semicolon to %3B and reads it back intact. The older
-	// "key=value;..." form would not be, since ";" is its field separator.
+	// which escapes a semicolon to %3B and reads it back intact. The
+	// ADO-style "key=value;..." form would not be, since ";" is its field
+	// separator.
 	//
 	// It is not the Server response header, which the framework takes
 	// verbatim from fiber.server_header and omits when that is empty.
@@ -142,43 +109,35 @@ type AppConfig struct {
 	//
 	// Example: "UTC", "Europe/Berlin", "America/New_York"
 	Location string
-
-	// ReportsBaseURL is the scheme and authority of an external service a
-	// deployment proxies requests to — scheme, host and optional port, and
-	// nothing after them.
-	//
-	// It is the most application-specific key in this section: it exists
-	// for a service that forwards some routes to a separate renderer, and a
-	// service that does not can leave it unset, which Validate accepts.
-	//
-	// "Nothing after them" is the contract, because the consumer is
-	// expected to build the upstream URL by CONCATENATION — base + route —
-	// and anything past the authority would be silently prepended to every
-	// forwarded request. See Validate for what that costs.
-	ReportsBaseURL string
-
-	// UploadDir is the root under which uploaded files are written: one
-	// directory per record, <UploadDir>/<id>/<name>, which is the layout the
-	// fileutil package implements.
-	//
-	// Nothing in this package touches the filesystem with it. Storing the
-	// file NAME rather than a path is what lets this value change between
-	// deployments with no data migration, because the path is recomputed
-	// from upload_dir, the id and the name on every access.
-	//
-	// A relative value is legal and resolves against the process working
-	// directory on every call.
-	UploadDir string
 }
 
-// trimBaseURL normalises a base URL to the form a consumer concatenates
-// against: no surrounding whitespace, no trailing slash.
+// Environment name constants used by app.env and the logger.
+// Compare against these instead of bare string literals to avoid typos.
+const (
+	// Pretty-printed, colorized logs; DEBUG level.
+	EnvDevelopment = "development"
+
+	// JSON logs; INFO level.
+	EnvStaging = "staging"
+
+	// JSON logs; INFO level — the same logger behaviour as staging. A
+	// separate value so a deployment can say which one it is; nothing in
+	// this module treats the two differently.
+	EnvProduction = "production"
+)
+
+// validEnvs is the allowlist checked by AppConfig.Validate.
 //
-// "http://host:5019/" and "http://host:5019" therefore reach Validate and
-// String as one string, so a stray slash can neither produce a doubled one
-// upstream nor make two identical deployments log different values.
-func trimBaseURL(s string) string {
-	return strings.TrimRight(strings.TrimSpace(s), "/")
+// The empty-struct value is the idiomatic set: it occupies no memory, and the
+// two-value map read in Validate reports membership without a sentinel value.
+// Values are matched exactly — no trimming, no case folding — so "Production"
+// is rejected. That strictness is deliberate: logger.New treats every
+// unrecognised value as production, so a typo that slipped through would
+// silently disable debug logging instead of failing at startup.
+var validEnvs = map[string]struct{}{
+	EnvDevelopment: {},
+	EnvStaging:     {},
+	EnvProduction:  {},
 }
 
 // NewAppConfig reads AppConfig fields from the provided Viper instance.
@@ -191,14 +150,12 @@ func trimBaseURL(s string) string {
 // looks it up, so neither the file nor an environment variable can supply it.
 func NewAppConfig(v *viper.Viper) *AppConfig {
 	return &AppConfig{
-		Name:           v.GetString("app.name"),
-		Version:        v.GetString("app.version"),
-		Env:            v.GetString("app.env"),
-		Host:           v.GetString("app.host"),
-		Port:           v.GetInt("app.port"),
-		Location:       v.GetString("app.location"),
-		ReportsBaseURL: trimBaseURL(v.GetString("app.reports_base_url")),
-		UploadDir:      v.GetString("app.upload_dir"),
+		Name:     v.GetString("app.name"),
+		Version:  v.GetString("app.version"),
+		Env:      v.GetString("app.env"),
+		Host:     v.GetString("app.host"),
+		Port:     v.GetInt("app.port"),
+		Location: v.GetString("app.location"),
 	}
 }
 
@@ -209,33 +166,22 @@ func NewAppConfig(v *viper.Viper) *AppConfig {
 //
 //   - Whether anything consumes the key. Validate sees a *AppConfig and
 //     nothing else, so it cannot tell a wired route from a dead key.
-//   - Whether ReportsBaseURL is REACHABLE. Nothing here dials it, so a
-//     host that does not resolve, a port nothing listens on and a renderer
-//     that is simply down all pass startup, and surface per request in
-//     whatever proxies to it. That is the right place: the renderer may
-//     restart independently of this service, and a startup probe would
-//     turn its downtime into this service's downtime.
 //   - Host. Empty is the correct default for a container, so it cannot be
 //     required here. The one case where it IS required — a unix-socket
 //     listener — needs the listen section as well, and has to be checked
 //     where both are in hand.
 //   - Location as an IANA name. time.LoadLocation at startup is the
 //     authority and fails the process on an unknown zone.
-//   - UploadDir. A startup probe is the authority: it has to stat the path
-//     and create and delete a file to learn anything, and every check in
-//     this method is a pure function of the struct. "Existing" rather than
-//     "created on demand" is the property worth probing for — a helper that
-//     created every missing level would let a misspelled path start cleanly
-//     and write uploads somewhere nobody provisioned.
 //
 // Port range IS checked, and database.port deliberately reaches the opposite
 // conclusion, so the argument is worth keeping. Both have a second authority
 // that would catch an out-of-range value; what differs is how LATE each one
-// runs. The driver rejects a bad database.port when the pool is opened,
-// before a single route is registered, so a duplicate check buys nothing.
-// net.Listen is typically the LAST thing a service does, so a 70000 here
-// would fail only after the pool was open and every route registered — a
-// full startup spent to learn one number is four digits too long.
+// runs. database.New rejects a bad database.port, naming the key, when the
+// pool is opened, before a single route is registered, so a duplicate check
+// buys nothing. net.Listen is typically the LAST thing a service does, so a
+// 70000 here would fail only after the pool was open and every route
+// registered: a full startup spent to learn that one number was out of
+// range.
 //
 // The check is a chained else-if so an absent key produces one error rather
 // than two: 0 is caught as "required" and never also reported as out of range.
@@ -274,56 +220,6 @@ func (c *AppConfig) Validate() error {
 	if c.Location == "" {
 		errs = append(errs, errors.New("app.location is required"))
 	}
-	// Presence and SHAPE are both checked, and the shape half is the part that
-	// earns its keep. The consumer builds the upstream URL by concatenation —
-	// base + "/route/" + name — so anything past the authority is silently
-	// prepended to every forwarded request: a value ending in "/api" yields
-	// "/api/api/route/name" and a 404 from the upstream naming neither this
-	// key nor the doubling. url.Parse accepts all of that happily, which is
-	// why the parse result is inspected rather than just its error.
-	//
-	// USERINFO is rejected on its own terms rather than folded into the
-	// path/query/fragment branch below, because it is the one part of a URL
-	// that is a credential. It would survive the concatenation into every
-	// upstream request, and String prints this field verbatim — so a password
-	// written here would reach the log aggregator on every start.
-	if c.ReportsBaseURL != "" {
-		if u, err := url.Parse(c.ReportsBaseURL); err != nil {
-			errs = append(errs, fmt.Errorf("app.reports_base_url is not a valid "+
-				"URL (got %q): %w",
-				c.ReportsBaseURL,
-				err))
-		} else if u.Scheme != "http" && u.Scheme != "https" {
-			errs = append(errs, fmt.Errorf("app.reports_base_url must start "+
-				"with http:// or https:// (got %q)",
-				c.ReportsBaseURL))
-		} else if u.Host == "" {
-			errs = append(errs, fmt.Errorf("app.reports_base_url must name a "+
-				"host (got %q)",
-				c.ReportsBaseURL))
-		} else if u.User != nil {
-			// The offending value is NOT echoed, unlike every other branch here.
-			// A service typically hands a validation error straight to a fatal
-			// log call, so reporting the value would copy the credential into
-			// exactly the place this check exists to keep it out of. Only the
-			// corrected form is printed, and it drops the userinfo by
-			// construction.
-			errs = append(errs, fmt.Errorf("app.reports_base_url must not "+
-				"carry userinfo: the value is concatenated into every upstream "+
-				"URL and is printed verbatim when the configuration is logged, "+
-				"so a credential here reaches both — use %q and authenticate "+
-				"to the upstream some other way",
-				u.Scheme+"://"+u.Host))
-		} else if u.Path != "" || u.RawQuery != "" || u.Fragment != "" {
-			errs = append(errs, fmt.Errorf("app.reports_base_url must be scheme "+
-				"+ host (+ port) only, with no path, query, or fragment (got "+
-				"%q): the consumer appends its own route, so anything here is "+
-				"prepended to every upstream URL — use %q",
-				c.ReportsBaseURL,
-				u.Scheme+"://"+u.Host))
-		}
-	}
-
 	return errors.Join(errs...)
 }
 
@@ -341,16 +237,12 @@ func (c *AppConfig) String() string {
 		"Env=%s "+
 		"Host=%s "+
 		"Port=%d "+
-		"Location=%s "+
-		"ReportsBaseURL=%s "+
-		"UploadDir=%s",
+		"Location=%s",
 		c.Name,
 		c.Version,
 		c.Env,
 		c.Host,
 		c.Port,
 		c.Location,
-		c.ReportsBaseURL,
-		c.UploadDir,
 	)
 }

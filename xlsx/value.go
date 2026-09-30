@@ -7,20 +7,25 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mas-ony/go-toolkit/datetime"
 	"github.com/shopspring/decimal"
 	"github.com/xuri/excelize/v2"
-
-	"github.com/mas-ony/go-toolkit/datetime"
 )
+
+// intBound is 2^(w-1) for the width w of int: the magnitude of math.MinInt,
+// and one more than math.MaxInt. As a power of two it is exact in a
+// float64, which math.MaxInt is not on a 64-bit target; see Int.
+const intBound = -float64(math.MinInt)
 
 // dateLayouts are the text date formats accepted when a cell is not a serial
 // number, ordered from least to most ambiguous.
 //
-// The day-first entries come before the month-first ones deliberately: in a
-// day-first locale 03/04/2005 means 3 April, and a parser that tried
-// "01/02/2006" first would silently read it as 4 March. Both parse
-// successfully, so order is the only thing that decides — which is exactly
-// why a wrong order here would be invisible rather than an error.
+// Every numeric layout is day-first, and no month-first one is listed at
+// all. In a day-first locale 03/04/2005 means 3 April, and a month-first
+// layout would read the same text as 4 March; both readings parse, so
+// adding one would leave the answer to list order, invisibly. As it stands,
+// a month-first date is misread when its day is 12 or less and refused when
+// it is not, since 12/25/2005 has no month 25.
 //
 // Each numeric separator is listed twice, padded and unpadded. Go's parser
 // reads the "2" verb as one digit or two, so the unpadded spelling subsumes
@@ -180,17 +185,15 @@ func Int(s string) (*int, error) {
 	// its conversion is excelize's, and this checks its INPUT because the
 	// conversion is the one on the next line.
 	//
-	// The bounds are int64's, while the conversion below produces an int.
-	// The two are the same width on a 64-bit target, and the check is
-	// written to that: MinInt64 converts to float64 exactly, and MaxInt64
-	// rounds UP to 2^63, which is why the upper comparison has to be >=
-	// rather than >. On a 32-bit target the guard would pass values int
-	// cannot hold, so it would need rewriting around math.MinInt and
-	// math.MaxInt rather than merely re-reading.
+	// The bounds are intBound, a power of two, rather than math.MaxInt.
+	// On a 64-bit target math.MaxInt rounds UP to 2^63 as a float64, so a
+	// `> math.MaxInt` check would admit 2^63 itself; intBound is exactly
+	// that value, so `>=` is right, and it is right on a 32-bit target
+	// too, where intBound is 2^31 and int is that narrow.
 	if math.IsNaN(f) || math.IsInf(f, 0) {
 		return nil, fmt.Errorf("%q is not a number", s)
 	}
-	if f < math.MinInt64 || f >= math.MaxInt64 {
+	if f < -intBound || f >= intBound {
 		return nil, fmt.Errorf("%q is out of range", s)
 	}
 
@@ -206,18 +209,17 @@ func Int(s string) (*int, error) {
 //
 // Grouping and decimal separators are a real hazard whenever the source
 // workbooks come from a locale whose conventions are the reverse of the
-// invariant ones, where 1.234,56 means one thousand two hundred thirty-four
-// and a half. Read raw, the numeric cells carry no separators at all — but a
-// cell somebody typed as text does, and the two conventions have to be told
-// apart.
+// invariant ones, where 1.234,56 means 1234.56. Read raw, the numeric cells
+// carry no separators at all — but a cell somebody typed as text does, and
+// the two conventions have to be told apart.
 //
 // The rule used is positional rather than locale-configured, because a single
 // workbook can contain both: whichever of "." and "," appears LAST is the
 // decimal separator, and the other is grouping. That is unambiguous whenever
 // both are present. When only one appears, it is treated as grouping if it
-// separates a group of exactly three digits from the end and appears more than
-// once, and as a decimal point otherwise — so "1.234.567" is a million, while
-// "1.234" is one-point-two-three-four.
+// appears more than once with exactly three digits after each occurrence, and
+// as a decimal point otherwise — so "1.234.567" is 1234567, while "1.234" is
+// 1.234.
 //
 // The remaining ambiguity is a lone separator followed by exactly three
 // digits: "1.234" could be either. It is read as a decimal, which is the
@@ -322,6 +324,23 @@ func Decimal(s string) (*decimal.Decimal, error) {
 	return &d, nil
 }
 
+// Day returns the calendar date t names, read in t's own location, as
+// midnight in time.Local: the form the datetime package gives every
+// date-only value, and the one that keeps its day through Value in any zone.
+// See Date.
+//
+// Exported because a caller that recognises a shape this package does not — an
+// acquisition month, a bare year — still has to produce a value in the same
+// form, and doing it by hand is how one column ends up an hour off from the
+// rest.
+func Day(t time.Time) *datetime.Datetime {
+	d := datetime.Datetime{
+		Time: time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0,
+			time.Local),
+	}
+	return &d
+}
+
 // Date parses a cell as a date, returning nil for an empty cell.
 //
 // Two representations are handled:
@@ -341,19 +360,20 @@ func Decimal(s string) (*decimal.Decimal, error) {
 // FIRST. "2019" parses cleanly as a serial and lands on 11 July 1905, which is
 // wrong by a century and looks like an ordinary date in the report.
 //
-// The result is normalised to midnight UTC by Day. Both parse paths already
-// produce UTC — excelize.ExcelDateToTime returns it, and time.Parse resolves
-// a layout carrying no zone in UTC — so this pins what is already true rather
-// than converting anything. The target columns are DATE, so the time part is
-// discarded by the engine either way.
+// The result is the calendar date at midnight in time.Local, built by Day.
+// Both parse paths produce the date in UTC — excelize.ExcelDateToTime
+// returns it, and time.Parse resolves a layout carrying no zone in UTC — and
+// Day keeps its year, month and day while moving it to local midnight. The
+// target columns are DATE, so the time part is discarded by the engine.
 //
-// The anchor is only correct while the process's local zone is AHEAD of UTC.
-// datetime.Datetime.Value converts into time.Local on the way to the driver,
-// so midnight UTC becomes the same day's morning and the column records the
-// intended date. Under a zone BEHIND UTC the same value converts to the
-// previous evening and the column records the previous day — so this
-// anchoring and the local zone move together rather than being independently
-// correct.
+// Local rather than UTC because of what happens on the way to the driver.
+// datetime.Datetime.Value converts into time.Local, which leaves a local
+// midnight exactly where it is, so the column records the intended date in
+// any zone. Midnight UTC survives that only east of Greenwich: west of it,
+// Value converts it to the previous evening and the column records the
+// previous day. Local midnight is also the form the datetime package gives a
+// date-only value everywhere else, so a date read from a workbook and one
+// typed into a form marshal alike.
 func Date(s string, date1904 bool) (*datetime.Datetime, error) {
 	s = Trim(s)
 	if s == "" {
@@ -397,17 +417,4 @@ func Date(s string, date1904 bool) (*datetime.Datetime, error) {
 		}
 	}
 	return nil, fmt.Errorf("%q is not a recognised date", s)
-}
-
-// Day truncates a time to its calendar date and pins it to UTC.
-//
-// Exported because a caller that recognises a shape this package does not — an
-// acquisition month, a bare year — still has to produce a value in the same
-// form, and doing it by hand is how one column ends up an hour off from the
-// rest.
-func Day(t time.Time) *datetime.Datetime {
-	d := datetime.Datetime{
-		Time: time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.UTC),
-	}
-	return &d
 }

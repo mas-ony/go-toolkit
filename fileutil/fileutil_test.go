@@ -1,4 +1,14 @@
+//go:build unix
+
 package fileutil
+
+// Tests for fileutil.go, all against t.TempDir(): the name sanitisation
+// table and its idempotence, the content-type decision with both of its
+// exceptions and both ways to defeat them, the limits and their labels, the
+// atomic reservation loop in CopyUnique, the fallback guard on Remove, and
+// the permissions under a hostile umask — which needs syscall.Umask, hence
+// the unix build constraint on this file. What depends on the filesystem,
+// the process identity or timing is in fileutil_integration_test.go.
 
 import (
 	"errors"
@@ -15,6 +25,7 @@ import (
 	"testing"
 )
 
+// testID is the record id every unit test stores under.
 const testID = 1234
 
 // Magic-byte fixtures for the content-type tests. Real signatures rather than
@@ -42,10 +53,22 @@ var (
 	htmlBytes = []byte("<html><script>alert(document.cookie)</script></html>")
 )
 
-// ----------------------------------------------------------------------------
-// Helpers
-// ----------------------------------------------------------------------------
+// setUmask installs a new process umask and returns the previous one.
+//
+// It exists so the permission tests can prove that Write's explicit os.Chmod
+// defeats a hostile umask, which is the failure the directory Chmod is there
+// for: os.MkdirAll applies the umask to every level it creates, os.Chmod does
+// not, and under a systemd unit carrying UMask=0077 the difference is a record
+// directory the account serving HTTP cannot traverse.
+//
+// syscall.Umask has no Windows implementation, so this file carries a unix
+// build constraint. Without it, `go test ./...` on Windows would fail to
+// compile rather than skip; with it, the package has no unit tests there,
+// which costs little, since the permission behaviour they pin does not
+// apply on Windows anyway.
+func setUmask(mask int) int { return syscall.Umask(mask) }
 
+// listDir returns the names in dir, failing the test on error.
 func listDir(t *testing.T, dir string) []string {
 	t.Helper()
 	entries, err := os.ReadDir(dir)
@@ -57,15 +80,6 @@ func listDir(t *testing.T, dir string) []string {
 		names = append(names, e.Name())
 	}
 	return names
-}
-
-func assertNoTempFiles(t *testing.T, dir string) {
-	t.Helper()
-	for _, name := range listDir(t, dir) {
-		if strings.HasPrefix(name, ".tmp-") {
-			t.Errorf("temporary file %q was left behind in %q", name, dir)
-		}
-	}
 }
 
 // restoreExts snapshots the registration tables and puts them back when the
@@ -103,23 +117,15 @@ func restoreLimits(t *testing.T) {
 	})
 }
 
-// setUmask installs a new process umask and returns the previous one.
-//
-// It exists so the permission tests can prove that Write's explicit os.Chmod
-// defeats a hostile umask, which is the failure the directory Chmod is there
-// for: os.MkdirAll applies the umask to every level it creates, os.Chmod does
-// not, and under a systemd unit carrying UMask=0077 the difference is a record
-// directory the account serving HTTP cannot traverse.
-//
-// syscall.Umask has no Windows implementation, so this file — and with it
-// the package's whole test binary — builds on Unix only. That is
-// deliberate: a build tag plus a stub would be two files of ceremony for a
-// platform the permission behaviour does not apply to anyway.
-func setUmask(mask int) int { return syscall.Umask(mask) }
-
-// ----------------------------------------------------------------------------
-// Name sanitisation
-// ----------------------------------------------------------------------------
+// assertNoTempFiles fails the test if a ".tmp-" file survives in dir.
+func assertNoTempFiles(t *testing.T, dir string) {
+	t.Helper()
+	for _, name := range listDir(t, dir) {
+		if strings.HasPrefix(name, ".tmp-") {
+			t.Errorf("temporary file %q was left behind in %q", name, dir)
+		}
+	}
+}
 
 // TestSafeName is the security-relevant table. Each case is a name that can
 // reach this function from a multipart upload or a spreadsheet cell, and the
@@ -230,10 +236,7 @@ func TestSafeNameInvariants(t *testing.T) {
 	}
 }
 
-// ----------------------------------------------------------------------------
-// Path construction
-// ----------------------------------------------------------------------------
-
+// Dir joins the upload root and the record id, and creates nothing.
 func TestDir(t *testing.T) {
 	t.Parallel()
 
@@ -318,7 +321,8 @@ func TestPathFindsWhatWriteStored(t *testing.T) {
 	}
 
 	for _, supplied := range names {
-		t.Run(strings.ReplaceAll(supplied, "\x00", "<NUL>"), func(t *testing.T) {
+		label := strings.ReplaceAll(supplied, "\x00", "<NUL>")
+		t.Run(label, func(t *testing.T) {
 			t.Parallel()
 
 			uploadDir := t.TempDir()
@@ -338,10 +342,8 @@ func TestPathFindsWhatWriteStored(t *testing.T) {
 	}
 }
 
-// ----------------------------------------------------------------------------
-// Write / Read / Stat
-// ----------------------------------------------------------------------------
-
+// What Write stores, Read returns and Stat sizes, under the name Write
+// reports.
 func TestWriteReadStatRoundTrip(t *testing.T) {
 	t.Parallel()
 
@@ -553,10 +555,6 @@ func TestWriteEmptyData(t *testing.T) {
 	}
 }
 
-// ----------------------------------------------------------------------------
-// Permissions
-// ----------------------------------------------------------------------------
-
 // TestWritePermissions checks the two modes in the const block, and in
 // particular that the explicit Chmod on the directory survives the process
 // umask.
@@ -698,10 +696,6 @@ func TestWriteLeavesExistingDirectoryModesAlone(t *testing.T) {
 	}
 }
 
-// ----------------------------------------------------------------------------
-// Reading
-// ----------------------------------------------------------------------------
-
 // TestReadMissingIsUnwrappedNotExist backs the doc comment's promise that
 // callers can use errors.Is to tell "the row names a file that is not there"
 // apart from a genuine I/O failure. Wrapping the error with %w would still
@@ -757,10 +751,6 @@ func TestStatDoesNotReadTheFile(t *testing.T) {
 		t.Errorf("size: got %d, want %d", info.Size(), size)
 	}
 }
-
-// ----------------------------------------------------------------------------
-// CopyUnique
-// ----------------------------------------------------------------------------
 
 // TestCopyUniqueSuffixesBeforeTheExtension pins the naming rule, which is not
 // cosmetic: an in-browser editor keys its format off the extension, so a
@@ -1018,10 +1008,8 @@ func TestCopyUniqueRefusesASuffixOverTheNameCap(t *testing.T) {
 	}
 }
 
-// ----------------------------------------------------------------------------
-// Removal
-// ----------------------------------------------------------------------------
-
+// Remove deletes a stored file, and the record directory once it is
+// empty.
 func TestRemove(t *testing.T) {
 	t.Parallel()
 
@@ -1158,7 +1146,8 @@ func TestRemoveFiles(t *testing.T) {
 
 	uploadDir := t.TempDir()
 	for _, supplied := range []string{"a.pdf", "b.pdf", "c.pdf"} {
-		if _, err := Write(uploadDir, testID, supplied, []byte("x")); err != nil {
+		if _, err := Write(uploadDir, testID, supplied,
+			[]byte("x")); err != nil {
 			t.Fatalf("Write(%q): %v", supplied, err)
 		}
 	}
@@ -1189,6 +1178,7 @@ func TestRemoveFiles(t *testing.T) {
 	}
 }
 
+// RemoveDir deletes a record directory and everything in it.
 func TestRemoveDir(t *testing.T) {
 	t.Parallel()
 
@@ -1227,10 +1217,6 @@ func TestRemoveDir(t *testing.T) {
 	// Idempotent: removing an absent tree is not an error.
 	RemoveDir(uploadDir, testID)
 }
-
-// ----------------------------------------------------------------------------
-// Content type
-// ----------------------------------------------------------------------------
 
 // TestDetectContentType walks the documented outcomes over the default table.
 func TestDetectContentType(t *testing.T) {
@@ -1433,6 +1419,8 @@ func TestAllowedTypesIsDerivedFromTheExtensionTable(t *testing.T) {
 	}
 }
 
+// The extension gate accepts a registered extension in any case, and
+// refuses everything else.
 func TestHasAllowedExt(t *testing.T) {
 	t.Parallel()
 
@@ -1507,9 +1495,6 @@ func TestAllowedExts(t *testing.T) {
 	}
 }
 
-// ----------------------------------------------------------------------------
-// Registration
-// ----------------------------------------------------------------------------
 //
 // These tests mutate package-level state, so they are NOT parallel, and the
 // same goes for the two limit tests further down. The ordering that makes that
@@ -1752,10 +1737,6 @@ func TestRegisteringAnArchiveTypeDefeatsTheException(t *testing.T) {
 	}
 }
 
-// ----------------------------------------------------------------------------
-// Limits
-// ----------------------------------------------------------------------------
-
 // TestNameTooLongMeasuresBytes states the rule callers must apply, and the
 // reason the helper exists rather than an exported comparison.
 //
@@ -1820,6 +1801,7 @@ func TestZeroCapDisablesTheLimit(t *testing.T) {
 	}
 }
 
+// A payload of exactly the cap fits, and one byte more does not.
 func TestTooLargeBoundary(t *testing.T) {
 	t.Parallel()
 
@@ -1913,10 +1895,6 @@ func TestDefaultLimits(t *testing.T) {
 			MaxFileBytes, 20<<20)
 	}
 }
-
-// ----------------------------------------------------------------------------
-// Base64 payloads
-// ----------------------------------------------------------------------------
 
 // TestDecodeBase64File covers each shape a client actually sends. The
 // tolerance is the point: a browser FileReader produces a data URL, several
@@ -2047,5 +2025,19 @@ func TestDecodeBase64FileChecksTheDecodedSize(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "5 bytes") {
 		t.Errorf("error %q does not report the decoded length", err)
+	}
+}
+
+// RegisterContainer trims both values, as RegisterExts trims its own, so a
+// declaration written with a stray space still refines the sniff instead
+// of silently matching nothing. The extension and type are made up, so no
+// other test's table is touched.
+func TestRegisterContainerTrimsItsValues(t *testing.T) {
+	t.Parallel()
+	RegisterExt(".zqcsv", "text/x-zq-csv")
+	RegisterContainer("  text/x-zq-csv ", " text/plain; charset=utf-8  ")
+	if got := DetectContentType("data.zqcsv",
+		[]byte("a,b\n1,2\n")); got != "text/x-zq-csv" {
+		t.Errorf("DetectContentType = %q, want text/x-zq-csv", got)
 	}
 }

@@ -1,5 +1,15 @@
 package database
 
+// Tests for dialect.go.
+//
+// What the file promises: ParseDialect accepts every spelling of the two
+// drivers and nothing else, both grammars are spelled exactly, each
+// package-level helper equals its method and refuses to run before
+// SetDialect, a method refuses a Dialect that is no grammar, ApplyLimit and
+// PageClause agree across engines on what they leave alone and what they
+// bind, and the LIKE escape reads the same way on both. Whether a server
+// accepts the SQL is dialect_integration_test.go's question.
+
 import (
 	"context"
 	"errors"
@@ -13,35 +23,6 @@ import (
 
 // dialects lists every grammar, for tests that assert something of both.
 var dialects = []Dialect{DialectMySQL, DialectSQLServer}
-
-// withDialect selects d until the test ends and then restores the previous
-// selection, including no selection. The selection is package-wide, so a
-// test that calls it must not run in parallel.
-func withDialect(t *testing.T, d Dialect) {
-	t.Helper()
-	prev := selectedDialect.Load()
-	t.Cleanup(func() { selectedDialect.Store(prev) })
-	SetDialect(d)
-}
-
-// withoutDialect clears the selection until the test ends.
-func withoutDialect(t *testing.T) {
-	t.Helper()
-	prev := selectedDialect.Load()
-	t.Cleanup(func() { selectedDialect.Store(prev) })
-	selectedDialect.Store(0)
-}
-
-// mustPanic reports an error unless f panics.
-func mustPanic(t *testing.T, name string, f func()) {
-	t.Helper()
-	defer func() {
-		if recover() == nil {
-			t.Errorf("%s did not panic", name)
-		}
-	}()
-	f()
-}
 
 // dialectHelpers pairs each package-level helper with the method it wraps,
 // as two closures producing the same string from the same arguments.
@@ -95,6 +76,38 @@ var dialectHelpers = []struct {
 	},
 }
 
+// mustPanic reports an error unless f panics.
+func mustPanic(t *testing.T, name string, f func()) {
+	t.Helper()
+	defer func() {
+		if recover() == nil {
+			t.Errorf("%s did not panic", name)
+		}
+	}()
+	f()
+}
+
+// withDialect selects d until the test ends and then restores the previous
+// selection, including no selection. The selection is package-wide, so a
+// test that calls it must not run in parallel.
+func withDialect(t *testing.T, d Dialect) {
+	t.Helper()
+	prev := selectedDialect.Load()
+	t.Cleanup(func() { selectedDialect.Store(prev) })
+	SetDialect(d)
+}
+
+// withoutDialect clears the selection until the test ends.
+func withoutDialect(t *testing.T) {
+	t.Helper()
+	prev := selectedDialect.Load()
+	t.Cleanup(func() { selectedDialect.Store(prev) })
+	selectedDialect.Store(0)
+}
+
+// ParseDialect accepts every spelling of both drivers in any case and
+// spacing, round-trips each Dialect's own name, and refuses everything else
+// with ErrUnsupportedDriver.
 func TestParseDialect(t *testing.T) {
 	accepted := map[string]Dialect{
 		"mysql":       DialectMySQL,
@@ -141,13 +154,13 @@ func TestHelpersPanicWithoutDialect(t *testing.T) {
 
 	withoutDialect(t)
 	helpers := map[string]func(){
-		"applyLimit":      func() { ApplyLimit("SELECT a FROM t", 1) },
-		"applyLimit(n=0)": func() { ApplyLimit("SELECT a FROM t", 0) },
-		"pageClause":      func() { PageClause(map[string]any{}, 1, 10) },
-		"nowExpr":         func() { NowExpr() },
-		"recursiveCTE":    func() { RecursiveCTE("tree") },
-		"quoteIdent":      func() { QuoteIdent("user") },
-		"insertReturningID": func() {
+		"ApplyLimit":      func() { ApplyLimit("SELECT a FROM t", 1) },
+		"ApplyLimit(n=0)": func() { ApplyLimit("SELECT a FROM t", 0) },
+		"PageClause":      func() { PageClause(map[string]any{}, 1, 10) },
+		"NowExpr":         func() { NowExpr() },
+		"RecursiveCTE":    func() { RecursiveCTE("tree") },
+		"QuoteIdent":      func() { QuoteIdent("user") },
+		"InsertReturningID": func() {
 			_, _ = InsertReturningID(context.Background(), nil,
 				"t", "a", ":a", "id", struct{}{})
 		},
@@ -157,6 +170,8 @@ func TestHelpersPanicWithoutDialect(t *testing.T) {
 	}
 }
 
+// SetDialect refuses a value that is no grammar, and stores nothing when
+// it does.
 func TestSetDialectRejectsInvalidValues(t *testing.T) {
 	withoutDialect(t)
 	for _, d := range []Dialect{0, -1, DialectSQLServer + 1} {
@@ -167,6 +182,8 @@ func TestSetDialectRejectsInvalidValues(t *testing.T) {
 	}
 }
 
+// ApplyLimit appends LIMIT on MySQL and places TOP after SELECT, DISTINCT
+// or ALL on SQL Server, whatever the case and spacing of the keywords.
 func TestApplyLimit(t *testing.T) {
 	cases := []struct {
 		name, query, mysql, sqlserver string
@@ -231,17 +248,20 @@ func TestApplyLimitLeavesQueryUnchanged(t *testing.T) {
 		withDialect(t, d)
 		for _, n := range []int{0, -1} {
 			if got := ApplyLimit(q, n); got != q {
-				t.Errorf("%v: applyLimit(q, %d) = %q", d, n, got)
+				t.Errorf("%v: ApplyLimit(q, %d) = %q", d, n, got)
 			}
 		}
 		for _, s := range notSelect {
 			if got := ApplyLimit(s, 1); got != s {
-				t.Errorf("%v: applyLimit(%q, 1) = %q", d, s, got)
+				t.Errorf("%v: ApplyLimit(%q, 1) = %q", d, s, got)
 			}
 		}
 	}
 }
 
+// PageClause emits each engine's tail and binds an offset and a limit that
+// both engines accept, raising a page or limit below 1 and saturating an
+// offset that would overflow.
 func TestPageClause(t *testing.T) {
 	tails := map[Dialect]string{
 		DialectMySQL:     "\nLIMIT :limit OFFSET :offset",
@@ -277,7 +297,7 @@ func TestPageClause(t *testing.T) {
 	}
 }
 
-// pageClause relies on two sqlx.Named behaviours: positional arguments
+// PageClause relies on two sqlx.Named behaviours: positional arguments
 // follow the order of the names in the text, and keys the text does not
 // reference are ignored.
 func TestPageClauseBindsThroughSqlxNamed(t *testing.T) {
@@ -307,6 +327,8 @@ func TestPageClauseBindsThroughSqlxNamed(t *testing.T) {
 	}
 }
 
+// The fixed spellings each grammar emits, including the doubled closing
+// quote inside a quoted identifier.
 func TestDialectSpellings(t *testing.T) {
 	cases := []struct {
 		name             string
@@ -314,25 +336,25 @@ func TestDialectSpellings(t *testing.T) {
 		mysql, sqlserver string
 	}{
 		{
-			name:      "nowExpr",
+			name:      "NowExpr",
 			emit:      NowExpr,
 			mysql:     "NOW()",
 			sqlserver: "SYSDATETIME()",
 		},
 		{
-			name:      "recursiveCTE",
+			name:      "RecursiveCTE",
 			emit:      func() string { return RecursiveCTE("tree") },
 			mysql:     "WITH RECURSIVE tree AS (",
 			sqlserver: "WITH tree AS (",
 		},
 		{
-			name:      "quoteIdent",
+			name:      "QuoteIdent",
 			emit:      func() string { return QuoteIdent("user") },
 			mysql:     "`user`",
 			sqlserver: "[user]",
 		},
 		{
-			name:      "quoteIdent doubles the closing quote",
+			name:      "QuoteIdent doubles the closing quote",
 			emit:      func() string { return QuoteIdent("a`b]c[d") },
 			mysql:     "`a``b]c[d`",
 			sqlserver: "[a`b]]c[d]",
@@ -351,6 +373,8 @@ func TestDialectSpellings(t *testing.T) {
 	}
 }
 
+// LikeArg escapes the escape character, both wildcards and T-SQL's
+// character-class bracket, and nothing else.
 func TestLikeArg(t *testing.T) {
 	cases := map[string]string{
 		"":         "%%",
@@ -364,18 +388,18 @@ func TestLikeArg(t *testing.T) {
 	}
 	for in, want := range cases {
 		if got := LikeArg(in); got != want {
-			t.Errorf("likeArg(%q) = %q, want %q", in, got, want)
+			t.Errorf("LikeArg(%q) = %q, want %q", in, got, want)
 		}
 	}
 }
 
-// likeArg and likePredicate meet only inside the database, so the escape
+// LikeArg and LikePredicate meet only inside the database, so the escape
 // character they share is pinned here: one character, ordinary inside a
 // string literal on both engines and a LIKE wildcard on neither.
 func TestLikePredicate(t *testing.T) {
 	const want = "t.name LIKE :q ESCAPE '!'"
 	if got := LikePredicate("t.name", "q"); got != want {
-		t.Errorf("likePredicate = %q, want %q", got, want)
+		t.Errorf("LikePredicate = %q, want %q", got, want)
 	}
 	if len(likeEscape) != 1 ||
 		strings.ContainsAny(likeEscape, `\'"%_[]^-`) {

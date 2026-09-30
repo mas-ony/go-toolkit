@@ -13,10 +13,45 @@ import (
 	"strings"
 	"time"
 
-	"github.com/rs/zerolog"
-
 	"github.com/mas-ony/go-toolkit/config"
+	"github.com/rs/zerolog"
 )
+
+// auth logs in with PLAIN when the server offers it and with LOGIN
+// otherwise. LOGIN answers two prompts in turn, so a value serves one
+// conversation and deliver builds one per send.
+type auth struct {
+	username, password string
+	mech               string
+	prompts            int
+}
+
+// Service sends mail through one SMTP relay.
+//
+// It holds no connection: each send dials, delivers and hangs up, so a
+// Service is nothing but settings, read-only after New and safe for
+// concurrent use.
+//
+// It is also safe on a nil receiver, where Send and SendText return
+// ErrNotConfigured. That is what lets a caller keep a nil *Service when
+// email is not among notification.channels and call it unconditionally,
+// rather than guard every call site — including one in a detached
+// goroutine, where a panic would have nobody to catch it.
+type Service struct {
+	host string
+	addr string
+	mode string
+
+	// tlsConf is shared by every send, which tls allows as long as
+	// nothing modifies it after New. nil under tls: none.
+	tlsConf *tls.Config
+
+	username string
+	password string
+	from     *mail.Address
+	timeout  time.Duration
+	log      zerolog.Logger
+}
 
 // helloName is the name this client gives in EHLO, the one net/smtp gives
 // when told nothing. A submission relay ignores it for a client that logs
@@ -26,20 +61,12 @@ const helloName = "localhost"
 
 // loopbackHosts are the host spellings credentials may cross to without
 // TLS: the three net/smtp's PlainAuth accepts, and the three
-// config.EmailConfig.Validate accepts. A test holds the last two equal.
+// config.EmailConfig.Validate accepts.
+// TestClearTextCredentialsAgreeWithValidate holds the last two equal.
 var loopbackHosts = map[string]bool{
 	"localhost": true,
 	"127.0.0.1": true,
 	"::1":       true,
-}
-
-// auth logs in with PLAIN when the server offers it and with LOGIN
-// otherwise. LOGIN answers two prompts in turn, so a value serves one
-// conversation and deliver builds one per send.
-type auth struct {
-	username, password string
-	mech               string
-	prompts            int
 }
 
 // errNoStartTLS ends a starttls send to a server that does not offer the
@@ -70,43 +97,6 @@ var ErrInvalidAddress = errors.New("email: invalid address")
 // the message reached the relay, and sending it again fails the same way.
 var ErrTooLarge = errors.New("email: message exceeds the relay's size limit")
 
-// Service sends mail through one SMTP relay.
-//
-// It holds no connection: each send dials, delivers and hangs up, so a
-// Service is nothing but settings, read-only after New and safe for
-// concurrent use.
-//
-// It is also safe on a nil receiver, where Send and SendText return
-// ErrNotConfigured. That is what lets a caller keep a nil *Service when
-// email is not among notification.channels and call it unconditionally,
-// rather than guard every call site — including one in a detached
-// goroutine, where a panic would have nobody to catch it.
-type Service struct {
-	host string
-	addr string
-	mode string
-
-	// tlsConf is shared by every send, which tls allows as long as
-	// nothing modifies it after New. nil under tls: none.
-	tlsConf *tls.Config
-
-	username string
-	password string
-	from     *mail.Address
-	timeout  time.Duration
-	log      zerolog.Logger
-}
-
-// offers reports whether mechs lists mech, in any case.
-func offers(mechs []string, mech string) bool {
-	for _, m := range mechs {
-		if strings.EqualFold(m, mech) {
-			return true
-		}
-	}
-	return false
-}
-
 // messageID returns a new Message-ID under the sender's domain. The
 // random part is rand.Text, 128 bits, which is what keeps it unique
 // without any state here.
@@ -129,6 +119,16 @@ func names(rcpts []string) string {
 	}
 	return fmt.Sprintf("%s and %d more",
 		strings.Join(rcpts[:shown], ", "), len(rcpts)-shown)
+}
+
+// offers reports whether mechs lists mech, in any case.
+func offers(mechs []string, mech string) bool {
+	for _, m := range mechs {
+		if strings.EqualFold(m, mech) {
+			return true
+		}
+	}
+	return false
 }
 
 // stepErr names the step of the conversation err ended. When ctx has

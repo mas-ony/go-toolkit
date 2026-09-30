@@ -15,6 +15,9 @@ import (
 	"github.com/spf13/viper"
 )
 
+// The key reaches Viper as a YAML sequence from the file and as a string
+// from the environment, and both read as the same normalised list. An
+// absent key reads as an empty list: no channels, rather than an error.
 func TestNotificationReadsChannels(t *testing.T) {
 	t.Parallel()
 	for _, c := range []struct {
@@ -35,13 +38,16 @@ func TestNotificationReadsChannels(t *testing.T) {
 		if c.val != nil {
 			v.Set("notification.channels", c.val)
 		}
-		if got := NewNotificationConfig(v).Channels; !slices.Equal(got,
-			c.want) {
+		got := NewNotificationConfig(v).Channels
+		if !slices.Equal(got, c.want) {
 			t.Errorf("%s: Channels = %q, want %q", c.name, got, c.want)
 		}
 	}
 }
 
+// Every list of known channels validates, empty, repeated or oddly cased
+// alike. Each unknown entry is reported by its index and its spelling, and
+// the valid entries beside it are not reported at all.
 func TestNotificationValidate(t *testing.T) {
 	t.Parallel()
 	for _, ok := range [][]string{
@@ -78,6 +84,8 @@ func TestNotificationValidate(t *testing.T) {
 	}
 }
 
+// Enabled matches by normalised name, and enables nothing on a nil or an
+// empty configuration.
 func TestNotificationEnabled(t *testing.T) {
 	t.Parallel()
 	var none *NotificationConfig
@@ -101,6 +109,9 @@ func TestNotificationEnabled(t *testing.T) {
 	}
 }
 
+// No channels is logged as "none" in words, whether the list is nil or
+// empty, so the startup line cannot be read as a list that failed to
+// print.
 func TestNotificationString(t *testing.T) {
 	t.Parallel()
 	for _, c := range []struct {

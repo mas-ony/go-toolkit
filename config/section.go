@@ -17,31 +17,6 @@ import (
 	"github.com/spf13/viper"
 )
 
-// NewViper returns a Viper instance configured the way every section in
-// this package assumes.
-//
-// Two settings, and each is what one half of the documented contract rests
-// on. The key replacer turns a dotted key into its environment spelling —
-// app.reports_base_url becomes APP_REPORTS_BASE_URL — and AutomaticEnv makes
-// an environment variable of that name override the file.
-//
-// A caller that builds its own instance with viper.New() loses both, and
-// what it loses is invisible: every documented variable is ignored, the
-// file's value or a zero stands in for it, and nothing reports that the
-// override was never wired. That is why the configuration lives here rather
-// than being left for each application to reproduce.
-//
-// Reading the file is left to the caller — SetConfigFile, then ReadInConfig
-// — because where configuration lives is a deployment decision. AllowEmptyEnv
-// is left at its default of off, so an exported-but-empty variable does not
-// blank a value the file supplies; SuppliedSections relies on that too.
-func NewViper() *viper.Viper {
-	v := viper.New()
-	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
-	v.AutomaticEnv()
-	return v
-}
-
 // SectionConfig is what every configuration section implements, and
 // requiring both halves in one interface is what lets an application
 // validate and log its sections from a single list. A section that can be
@@ -52,6 +27,20 @@ type SectionConfig interface {
 	Validate() error
 }
 
+// AbsentSection stands in for a section no source supplied a key for.
+//
+// It validates clean and prints what it is, and that pair is the whole
+// mechanism: ONE substitution in the application's section list both spares
+// validation a section this deployment does not use and keeps the startup
+// line from reporting that section's zero values as though somebody had
+// chosen them. Neither the validation loop nor the logging needs to know the
+// rule, which is what keeps them from disagreeing about it.
+//
+// The zero values a section holds when nothing supplied it are not worth
+// printing: an expiration of 0s and a max of 0 read as settings somebody
+// chose, and are the absence of any setting at all.
+type AbsentSection struct{}
+
 // Section pairs a configuration section with the key it is logged under and
 // the config.yaml prefix its keys are nested behind.
 //
@@ -61,9 +50,18 @@ type SectionConfig interface {
 // prefix that drifts moves a section from configured to absent without
 // moving anything an operator can see.
 type Section struct {
-	Name   string
+	// Name is the key the section is logged under, and the key Supplied
+	// reports it by. Unique within one list.
+	Name string
+
+	// Prefix is the dotted config.yaml path the section's keys are nested
+	// behind, such as "fiber.limiter", with no trailing dot. Unique within
+	// one list; sectionOf says what a shared one does.
 	Prefix string
-	Value  SectionConfig
+
+	// Value is the section itself, or AbsentSection in the place of one no
+	// source supplied.
+	Value SectionConfig
 }
 
 // Supplied names the sections some source actually supplied a key for.
@@ -83,6 +81,9 @@ type Supplied map[string]bool
 // under it — a bare "fiber:" — supplies that section rather than nothing.
 // The block is there, and what it holds is a question for the section's own
 // Validate.
+//
+// The prefixes are expected to be distinct. Two sections with the same one
+// tie on length, and the one that wins depends on map iteration order.
 func sectionOf(prefixes map[string]string, key, sep string) string {
 	name, longest := "", ""
 	for section, prefix := range prefixes {
@@ -96,6 +97,31 @@ func sectionOf(prefixes map[string]string, key, sep string) string {
 	return name
 }
 
+// NewViper returns a Viper instance configured the way every section in
+// this package assumes.
+//
+// Two settings, and each is what one half of the documented contract rests on.
+// The key replacer turns a dotted key into its environment spelling —
+// database.max_open_conns becomes DATABASE_MAX_OPEN_CONNS — and AutomaticEnv
+// makes an environment variable of that name override the file.
+//
+// A caller that builds its own instance with viper.New() loses both, and
+// what it loses is invisible: every documented variable is ignored, the
+// file's value or a zero stands in for it, and nothing reports that the
+// override was never wired. That is why the configuration lives here rather
+// than being left for each application to reproduce.
+//
+// Reading the file is left to the caller — SetConfigFile, then ReadInConfig
+// — because where configuration lives is a deployment decision. AllowEmptyEnv
+// is left at its default of off, so an exported-but-empty variable does not
+// blank a value the file supplies; SuppliedSections relies on that too.
+func NewViper() *viper.Viper {
+	v := viper.New()
+	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
+	v.AutomaticEnv()
+	return v
+}
+
 // Configured reports whether some source supplied a key for the named
 // section. See the type's own documentation for why a nil map means every
 // section rather than none.
@@ -106,10 +132,18 @@ func (s Supplied) Configured(name string) bool {
 // SuppliedSections names every section some source supplied at least one key
 // for.
 //
-// Both sources are consulted, and both have to be. AllKeys covers the file
-// and nothing else, because AutomaticEnv resolves a key when it is looked up
-// rather than registering it — so by that measure a deployment that ships no
-// config.yaml supplies nothing, and every section would load as absent.
+// Both sources are consulted, and both have to be. AllKeys lists what was
+// REGISTERED on v — the file's keys, and any given in code with Set,
+// SetDefault or BindEnv — but not what AutomaticEnv supplies, because
+// AutomaticEnv resolves a key when it is looked up rather than registering
+// it. By AllKeys alone, a deployment that ships no config.yaml supplies
+// nothing, and every section would load as absent.
+//
+// Registered is not the same as supplied. A default given with SetDefault,
+// or a variable bound with BindEnv, lists its key whether or not any source
+// holds a value for it, and so marks its section supplied. An application
+// that wants a section to stay optional registers nothing under its prefix
+// in code.
 //
 // A key is routed to the section with the LONGEST matching prefix, which is
 // what keeps a parent from claiming the sections nested inside it:
@@ -131,24 +165,34 @@ func (s Supplied) Configured(name string) bool {
 // represent the difference.
 //
 // That weakness is worth knowing before this package is lifted into a new
-// deployment. Of the sections whose prefixes carry no fiber. component,
-// app, database, and notification match the short, common spellings
-// APP_*, DATABASE_*, and NOTIFICATION_*, so a variable another stack
-// already exports switches one of them on. The channel sections are
-// nested under notification to stay out of that: their variables are
-// NOTIFICATION_EMAIL_* and NOTIFICATION_WHATSAPP_*, rather than the MAIL_*
-// or SMTP_* that several frameworks export.
+// deployment. Outside fiber.*, the prefixes app, database and notification
+// are plain words, and APP_* and DATABASE_* in particular are spellings
+// other stacks export, APP_ENV and DATABASE_URL among them, so a variable
+// meant for something else can switch one of these sections on. The
+// channel sections are nested under notification to stay out of that:
+// their variables are NOTIFICATION_EMAIL_* and NOTIFICATION_WHATSAPP_*,
+// rather than the MAIL_* or SMTP_* that several frameworks export.
 //
 // An empty variable is not a value. AllowEmptyEnv is off, so Viper would not
 // read one either, and treating it as evidence would make an exported-but-
 // empty name switch a section on that nothing can then fill in.
+//
+// Prefixes are matched in lower case, the case Viper reports every file key
+// in, so a prefix written with capitals claims its file keys just as its
+// upper-cased environment spelling claims its variables. Without that, a
+// section whose prefix has a capital would load as absent however much of
+// it the file held, and none of it would be validated.
+//
+// Each section in sections needs a Name and a Prefix of its own: two
+// sharing a prefix split its keys between them arbitrarily (see
+// sectionOf), and two sharing a name are reported as one.
 func SuppliedSections(v *viper.Viper, sections []Section) Supplied {
 	keys := make(map[string]string, len(sections))
 	envs := make(map[string]string, len(sections))
 	for _, s := range sections {
-		keys[s.Name] = s.Prefix
-		envs[s.Name] = strings.ToUpper(
-			strings.ReplaceAll(s.Prefix, ".", "_"))
+		prefix := strings.ToLower(s.Prefix)
+		keys[s.Name] = prefix
+		envs[s.Name] = strings.ToUpper(strings.ReplaceAll(prefix, ".", "_"))
 	}
 
 	supplied := make(Supplied, len(sections))
@@ -169,20 +213,10 @@ func SuppliedSections(v *viper.Viper, sections []Section) Supplied {
 	return supplied
 }
 
-// AbsentSection stands in for a section no source supplied a key for.
-//
-// It validates clean and prints what it is, and that pair is the whole
-// mechanism: ONE substitution in the application's section list both spares
-// validation a section this deployment does not use and keeps the startup
-// line from reporting that section's zero values as though somebody had
-// chosen them. Neither the validation loop nor the logging needs to know the
-// rule, which is what keeps them from disagreeing about it.
-//
-// The zero values a section holds when nothing supplied it are not worth
-// printing: an expiration of 0s and a max of 0 read as settings somebody
-// chose, and are the absence of any setting at all.
-type AbsentSection struct{}
-
-func (AbsentSection) String() string { return "<not configured>" }
-
+// Validate reports nothing: a section no source supplied holds no value
+// that could be wrong.
 func (AbsentSection) Validate() error { return nil }
+
+// String reports the section as "<not configured>", in place of the zero
+// values nobody chose.
+func (AbsentSection) String() string { return "<not configured>" }

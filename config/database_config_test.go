@@ -1,8 +1,17 @@
 package config
 
-// Tests for database_config.go. Every case is built through
-// NewDatabaseConfig from a Viper, the way a deployment builds it, so a
-// passing case has exercised the key name and the cast as well as the rule.
+// Tests for database_config.go.
+//
+// What the section promises: every required key reported by name, the
+// naming rules each driver brings, the encrypt vocabulary with case forgiven
+// and nothing else, duration floors that catch a bare number, the pool
+// invariants, and a log line that names the target and never the
+// credentials.
+//
+// Rule cases are built through NewDatabaseConfig from a Viper, the way a
+// deployment builds the section, so a passing case has exercised the key
+// name and the cast as well as the rule. Configured is a question about the
+// struct itself, so its test builds literals as well.
 
 import (
 	"strings"
@@ -11,6 +20,8 @@ import (
 	"github.com/spf13/viper"
 )
 
+// sqlServerBase is a configuration the database section accepts on SQL
+// Server, which each rule case changes one key at a time.
 var sqlServerBase = map[string]any{
 	"database.driver":             "sqlserver",
 	"database.host":               "db.internal",
@@ -26,10 +37,15 @@ var sqlServerBase = map[string]any{
 	"database.max_open_conns":     10,
 }
 
+// buildDatabase adapts NewDatabaseConfig to the constructor shape runRules
+// takes.
 func buildDatabase(v *viper.Viper) SectionConfig {
 	return NewDatabaseConfig(v)
 }
 
+// TestDatabaseValidate holds the section's rules: the required keys, the
+// naming rules each driver brings, the encrypt vocabulary, the duration
+// floors, and the pool invariants.
 func TestDatabaseValidate(t *testing.T) {
 	t.Parallel()
 	runRules(t, sqlServerBase, buildDatabase, []ruleCase{
@@ -55,14 +71,31 @@ func TestDatabaseValidate(t *testing.T) {
 			"database.encrypt": nil}, "database.encrypt"},
 		{"an unknown encrypt mode", map[string]any{
 			"database.encrypt": "maybe"}, "database.encrypt"},
-		{"every encrypt mode is accepted", map[string]any{
-			"database.encrypt": "strict"}, ""},
+		// The base carries "true"; the other three modes are as good.
+		{"disable", map[string]any{"database.encrypt": "disable"}, ""},
+		{"false", map[string]any{"database.encrypt": "false"}, ""},
+		{"strict", map[string]any{"database.encrypt": "strict"}, ""},
+		// Case is forgiven: the value is lowercased before the lookup.
+		{"a mode in capitals", map[string]any{
+			"database.encrypt": "TRUE"}, ""},
+		// A spelling go-mssqldb would parse on its own has no MySQL
+		// translation, so it is refused by name.
+		{"a ParseBool spelling", map[string]any{
+			"database.encrypt": "1"}, "database.encrypt must be one of"},
 		{"no idle time", map[string]any{
 			"database.conn_max_idle_time": nil},
 			"database.conn_max_idle_time"},
 		{"no lifetime", map[string]any{
 			"database.conn_max_lifetime": nil},
 			"database.conn_max_lifetime"},
+		// database/sql reads a negative duration as "never", and a bare
+		// number is nanoseconds.
+		{"a negative idle time", map[string]any{
+			"database.conn_max_idle_time": "-5m"},
+			"database.conn_max_idle_time must be at least 1s"},
+		{"a bare-number lifetime", map[string]any{
+			"database.conn_max_lifetime": 1800},
+			"database.conn_max_lifetime must be at least 1s"},
 		{"negative idle connections", map[string]any{
 			"database.max_idle_conns": -1}, "database.max_idle_conns"},
 		{"negative open connections", map[string]any{
@@ -133,6 +166,30 @@ func TestDatabaseStringNamesTheTarget(t *testing.T) {
 	for _, want := range []string{"sqlserver", "db.internal", "1433"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("String does not show %q:\n%s", want, got)
+		}
+	}
+}
+
+// Configured tells an absent section from a present one, a nil section
+// included, and one setting is enough to count as present.
+func TestDatabaseConfigured(t *testing.T) {
+	t.Parallel()
+	var none *DatabaseConfig
+	for name, c := range map[string]*DatabaseConfig{
+		"nil":         none,
+		"zero":        {},
+		"from no key": NewDatabaseConfig(viper.New()),
+	} {
+		if c.Configured() {
+			t.Errorf("%s: Configured() = true, want false", name)
+		}
+	}
+	for name, c := range map[string]*DatabaseConfig{
+		"a full section": NewDatabaseConfig(withKeys(sqlServerBase, nil)),
+		"one setting":    {Host: "db.internal"},
+	} {
+		if !c.Configured() {
+			t.Errorf("%s: Configured() = false, want true", name)
 		}
 	}
 }

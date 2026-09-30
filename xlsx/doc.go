@@ -49,40 +49,43 @@
 // those makes the check something operators learn to bypass, which defeats
 // it entirely.
 //
-// # Cells are read raw, and that has two consequences
+// # Cells are read as stored, and formulas as their last result
 //
 // Open reads the sheet with RawCellValue, so a cell yields what is stored
 // rather than what the sheet displays. A date comes back as its serial
 // number instead of whatever the cell's number format renders it as, which
 // is what makes Date able to resolve it at all.
 //
-// The second consequence is easier to be caught by. A formula cell yields
-// its CACHED result, not the formula text — and a workbook saved by a
-// script rather than by Excel carries no cached values, so every generated
-// column in it reads as empty. That is not a missing value in the source
-// data, and a caller that treats blank as missing will quietly under-count
-// a file nobody can see anything wrong with. If a whole column comes back
-// empty, this is the first thing to check.
+// The second fact holds whatever the options, and it is the easier one to
+// be caught by. A formula cell yields its CACHED result, never the formula
+// text, and a workbook saved by a script rather than by Excel carries no
+// cached values, so every generated column in it reads as empty. That is
+// not a missing value in the source data, and a caller that treats blank as
+// missing will quietly under-count a file nobody can see anything wrong
+// with. If a whole column comes back empty, this is the first thing to
+// check.
 //
 // # Ambiguity is resolved by rule, and each rule is a guess
 //
 // Three places accept input that is genuinely ambiguous, and in each the
 // wrong answer is silent rather than an error:
 //
-//   - DATE ORDER. Text dates are tried day-first, so 03/04/2005 is 3
-//     April. Month-first layouts come after. Both parse, so order is the
-//     only thing deciding, and a workbook authored in a month-first locale
-//     will be read wrong with no complaint.
+//   - DATE ORDER. Text dates are read day-first, and no month-first
+//     layout is tried at all, so 03/04/2005 is 3 April. A workbook
+//     authored in a month-first locale is read wrong with no complaint
+//     wherever the day is 12 or less, and refused only on a later day:
+//     12/25/2005 has no month 25 to be read as.
 //   - THE EPOCH. A workbook authored in classic Mac Excel counts from
 //     1904, shifting every date by four years and a day. Open asks the
 //     file rather than the operator, because the resulting dates are all
 //     plausible — nothing about "1996-02-17" says it should have been
 //     2000-02-17.
-//   - THOUSANDS SEPARATORS. A separator is read as grouping only when it
-//     appears more than once with three digits after each. A single one is
-//     always a decimal point, so "1,234" is one thousand two hundred and
-//     thirty-four in no locale this package supports — it is 1.234. See
-//     Decimal.
+//   - THOUSANDS SEPARATORS. When a value carries both "." and ",", the
+//     later of the two is the decimal point. When it carries only one of
+//     them, that one is read as grouping only when it appears more than
+//     once with three digits after each, and a single occurrence is always
+//     a decimal point, so "1,234" is read as 1.234 and never as one
+//     thousand two hundred and thirty-four. See Decimal.
 //
 // Only the spelled-out month layouts are English. A localised month name
 // does not parse however close its spelling, and fails loudly naming the
@@ -141,7 +144,9 @@
 //
 //   - The missing cached values above, reproduced by writing a formula and
 //     not calculating it, so the documented behaviour is pinned rather
-//     than described.
+//     than described — and beside it, a formula whose result IS cached
+//     reading as that result, without which the first case would pass
+//     against a reader that returned nothing at all.
 //
 //   - Hyperlinks that resolve against the workbook's directory even after
 //     the process has moved to another one, and a relative link that
@@ -151,7 +156,7 @@
 //   - Concurrent readers under the race detector, against the claim in the
 //     section above.
 //
-//     go test -tags integration -run Integration ./xlsx
+// It writes workbooks to a temporary directory and needs nothing else:
 //
-// It writes workbooks to a temporary directory and needs nothing else.
+//	go test -tags integration -run Integration ./xlsx
 package xlsx

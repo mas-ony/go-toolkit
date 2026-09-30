@@ -7,6 +7,47 @@ import (
 	"time"
 )
 
+// Datetime is a time.Time that accepts multiple date/time string formats when
+// unmarshalling JSON. This is necessary because different HTML input types
+// produce different string formats, and Go's encoding/json only accepts
+// RFC 3339 for time.Time.
+//
+// It also implements sql.Scanner and driver.Valuer so sqlx can read and write
+// time columns transparently — SQL drivers typically return time columns as
+// time.Time, which Scan accepts directly without re-parsing.
+//
+// On marshal, Datetime always emits a full RFC 3339 string so API responses
+// are consistent regardless of which input format was originally parsed.
+//
+// Usage in a model struct:
+//
+//	IssuedAt *datetime.Datetime `db:"issued_at" json:"issued_at"`
+//
+// Models use POINTERS to this type, which gives two distinct routes to a JSON
+// null: a nil pointer, and a non-nil pointer holding a zero Datetime. Both
+// serialise identically and both write SQL NULL through Value, so nothing
+// downstream has to tell them apart.
+//
+// Embedding time.Time rather than wrapping it in a named field promotes every
+// time.Time method — Before, Sub, Year, Format — onto Datetime for free.
+//
+// Three of the five methods below SHADOW a time.Time method: MarshalJSON,
+// UnmarshalJSON, and UnmarshalText. That shadowing is the entire point of the
+// type, and it rests on the three names alone. Misspell or rename one and the
+// promoted time.Time method takes its place without a word — it satisfies the
+// same interface, so nothing fails to compile — bringing back RFC 3339-only
+// parsing on the way in, or, on the way out, a value in its own zone and a
+// zero instant where null belongs.
+//
+// The other two ADD behaviour rather than replacing it: time.Time
+// implements neither sql.Scanner nor driver.Valuer, so Scan and Value have
+// nothing to shadow. A bare time.Time field cannot be scanned from or
+// written to a column through this package's rules at all — that capability
+// arrives only with this wrapper.
+type Datetime struct {
+	time.Time
+}
+
 // parseLayouts lists every format accepted by UnmarshalJSON and the string
 // path of Scan, tried in order from most to least specific. The first
 // successful parse wins.
@@ -45,45 +86,6 @@ var parseLayouts = []string{
 	"2006-01-02T15:04",    // datetime-local without seconds, no timezone
 	"2006-01-02 15:04:05", // SQL text timestamp
 	"2006-01-02",          // <input type="date">, and SQL DATE as text
-}
-
-// Datetime is a time.Time that accepts multiple date/time string formats when
-// unmarshalling JSON. This is necessary because different HTML input types
-// produce different string formats, and Go's encoding/json only accepts
-// RFC 3339 for time.Time.
-//
-// It also implements sql.Scanner and driver.Valuer so sqlx can read and write
-// time columns transparently — SQL drivers typically return time columns as
-// time.Time, which Scan accepts directly without re-parsing.
-//
-// On marshal, Datetime always emits a full RFC 3339 string so API responses
-// are consistent regardless of which input format was originally parsed.
-//
-// Usage in a model struct:
-//
-//	IssuedAt *datetime.Datetime `db:"issued_at" json:"issued_at"`
-//
-// Models use POINTERS to this type, which gives two distinct routes to a JSON
-// null: a nil pointer, and a non-nil pointer holding a zero Datetime. Both
-// serialise identically and both write SQL NULL through Value, so nothing
-// downstream has to tell them apart.
-//
-// Embedding time.Time rather than wrapping it in a named field promotes every
-// time.Time method — Before, Sub, Year, Format — onto Datetime for free.
-//
-// Three of the five methods below SHADOW a time.Time method: MarshalJSON,
-// UnmarshalJSON, and UnmarshalText. That shadowing is the entire point of the
-// type, and it means a change of embedded field name would silently un-shadow
-// time.Time's RFC 3339-only versions and reinstate the strictness this exists
-// to avoid.
-//
-// The other two ADD behaviour rather than replacing it: time.Time
-// implements neither sql.Scanner nor driver.Valuer, so Scan and Value have
-// nothing to shadow. A bare time.Time field cannot be scanned from or
-// written to a column through this package's rules at all — that capability
-// arrives only with this wrapper.
-type Datetime struct {
-	time.Time
 }
 
 // parse is the shared string→time routine behind UnmarshalJSON and Scan.
@@ -145,6 +147,35 @@ func parse(s string) (time.Time, error) {
 		"datetime: cannot parse %q as a date/time", s)
 }
 
+// MarshalJSON implements json.Marshaler. It emits an RFC 3339 string carrying
+// an explicit offset — "2026-08-04T14:30:00+07:00" — so API responses are
+// consistent and timezone-unambiguous. A zero Datetime marshals as JSON null.
+//
+// Fractional seconds are dropped: time.RFC3339 has no fractional
+// component, so a value parsed via RFC3339Nano keeps its nanoseconds in
+// memory and loses them here. Harmless against a column with no sub-second
+// precision, but it does mean marshal(unmarshal(x)) is not always x.
+func (d Datetime) MarshalJSON() ([]byte, error) {
+	if d.Time.IsZero() {
+		return []byte("null"), nil
+	}
+	// .In(time.Local) rather than either .UTC() or a bare Format. It
+	// converts — it does not relabel — so the instant is preserved, and it
+	// pins the OUTPUT zone so every response carries the same offset
+	// regardless of how the value arrived. A bare Format would echo whatever
+	// zone the value happened to hold: "+07:00" for anything read from the
+	// database, "Z" for a value still carrying an offset a client sent — one
+	// response shape per input shape, which is the inconsistency this pins
+	// down.
+	//
+	// With time.Local and the driver's own timezone setting resolved from
+	// the same configured location, the round trip is closed: what Value
+	// sends, what the engine stores, what the driver labels on the way
+	// back, and what this emits are all the same zone. Value supplies the
+	// write half — see its comment for why a driver may not supply it.
+	return []byte(`"` + d.Time.In(time.Local).Format(time.RFC3339) + `"`), nil
+}
+
 // UnmarshalJSON implements json.Unmarshaler. It accepts all formats listed in
 // parseLayouts as well as the JSON literal "null" and an empty string, both of
 // which produce a zero Datetime (equivalent to time.Time{}).
@@ -185,9 +216,9 @@ func (d *Datetime) UnmarshalJSON(b []byte) error {
 // that the bare word null is treated as absent here too, matching the JSON
 // side.
 //
-// One case this does NOT reach: encoding/json uses TextUnmarshaler for MAP
-// KEYS rather than json.Unmarshaler, so a map[Datetime]T decodes through
-// this method instead of time.Time's.
+// One JSON case does come through here: encoding/json decodes MAP KEYS
+// with TextUnmarshaler rather than json.Unmarshaler, so a map[Datetime]T
+// decodes its keys through this method instead of time.Time's.
 //
 // There is deliberately no matching MarshalText. Adding one would shadow
 // time.Time's, which nothing here wants shadowed, and the only place the
@@ -200,43 +231,14 @@ func (d *Datetime) UnmarshalText(b []byte) error {
 	return d.UnmarshalJSON(b)
 }
 
-// MarshalJSON implements json.Marshaler. It emits an RFC 3339 string carrying
-// an explicit offset — "2026-08-04T14:30:00+07:00" — so API responses are
-// consistent and timezone-unambiguous. A zero Datetime marshals as JSON null.
-//
-// Fractional seconds are dropped: time.RFC3339 has no fractional
-// component, so a value parsed via RFC3339Nano keeps its nanoseconds in
-// memory and loses them here. Harmless against a column with no sub-second
-// precision, but it does mean marshal(unmarshal(x)) is not always x.
-func (d Datetime) MarshalJSON() ([]byte, error) {
-	if d.Time.IsZero() {
-		return []byte("null"), nil
-	}
-	// .In(time.Local) rather than either .UTC() or a bare Format. It
-	// converts — it does not relabel — so the instant is preserved, and it
-	// pins the OUTPUT zone so every response carries the same offset
-	// regardless of how the value arrived. A bare Format would echo whatever
-	// zone the value happened to hold: "+07:00" for anything read from the
-	// database, "Z" for a value still carrying an offset a client sent — one
-	// response shape per input shape, which is the inconsistency this pins
-	// down.
-	//
-	// With time.Local and the driver's own timezone setting resolved from
-	// the same configured location, the round trip is closed: what Value
-	// sends, what the engine stores, what the driver labels on the way
-	// back, and what this emits are all the same zone. Value supplies the
-	// write half — see its comment for why a driver may not supply it.
-	return []byte(`"` + d.Time.In(time.Local).Format(time.RFC3339) + `"`), nil
-}
-
 // Scan implements sql.Scanner so sqlx can populate a *Datetime directly from a
 // database column value. Four source values are handled:
 //
 //   - nil       → zero Datetime (SQL NULL).
 //   - time.Time → stored as-is. This is the primary path for a driver
 //     configured to decode time columns natively: MySQL with
-//     parseTime=true, and go-mssqldb, which returns time.Time for
-//     datetime2/datetimeoffset columns.
+//     parseTime=true, and go-mssqldb, which returns time.Time for its date
+//     and time column types.
 //   - []byte    → wrapped in double-quote bytes and delegated to
 //     UnmarshalJSON. Fallback for MySQL without parseTime=true, or for any
 //     driver that returns a raw byte slice for a time column.

@@ -53,16 +53,13 @@ import (
 //   - Whether WhatsApp actually accepts a JID this package builds. The tests
 //     assert the string handed to whatsmeow, not the server's opinion of it.
 
-// ----------------------------------------------------------------------------
-// Helpers
-// ----------------------------------------------------------------------------
-
 // safeBuffer is a zerolog sink that survives -race.
 //
-// Only Disconnect and the success paths log, and none of those run
-// concurrently in this file today. The mutex is here so that
-// TestSendIsSafeForConcurrentUse stays a test of the Service rather than a
-// test of whether bytes.Buffer tolerates concurrent writes.
+// Only Disconnect and the success paths log, and no test here reaches
+// either concurrently: against a nil client every send fails before its
+// success line. The mutex is here so that TestSendIsSafeForConcurrentUse
+// stays a test of the Service rather than of whether bytes.Buffer tolerates
+// concurrent writes, should a send path ever log on failure.
 type safeBuffer struct {
 	mu  sync.Mutex
 	buf bytes.Buffer
@@ -124,10 +121,6 @@ func exprName(e ast.Expr) string {
 	}
 }
 
-// ----------------------------------------------------------------------------
-// Shared assertions
-// ----------------------------------------------------------------------------
-
 // assertPhoneInError checks that a failed send reports the NORMALISED number
 // behind the given step prefix.
 //
@@ -179,21 +172,19 @@ func newTestService(t *testing.T) (*Service, *safeBuffer) {
 	}, out
 }
 
+// Write appends p under the lock.
 func (b *safeBuffer) Write(p []byte) (int, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.buf.Write(p)
 }
 
+// String returns everything written so far, under the lock.
 func (b *safeBuffer) String() string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.buf.String()
 }
-
-// ----------------------------------------------------------------------------
-// The seam itself
-// ----------------------------------------------------------------------------
 
 // TestNilClientIsTheTestingSeam pins the upstream nil guards this whole file
 // rests on.
@@ -276,10 +267,6 @@ func TestNilClientIsTheTestingSeam(t *testing.T) {
 		})
 	}
 }
-
-// ----------------------------------------------------------------------------
-// The empty-input guards
-// ----------------------------------------------------------------------------
 
 // TestSendTextNoOpsOnEmptyInput covers the guard the doc comment justifies: a
 // user record with no phone number filled in is an expected operational state,
@@ -484,10 +471,6 @@ func TestPhoneNormalisationRunsBeforeTheEmptyGuard(t *testing.T) {
 			types.DefaultUserServer)
 	}
 }
-
-// ----------------------------------------------------------------------------
-// Phone normalisation
-// ----------------------------------------------------------------------------
 
 // TestPhoneNormalisation walks the formats the doc comment promises to accept.
 //
@@ -721,10 +704,6 @@ func TestSourceBuildsUserJIDsOnly(t *testing.T) {
 	}
 }
 
-// ----------------------------------------------------------------------------
-// The error contract
-// ----------------------------------------------------------------------------
-
 // TestErrorMessagesIdentifyWhichStepFailed pins the message prefixes.
 //
 // SendDocument is a two-step operation whose failures read almost identically
@@ -821,10 +800,6 @@ func TestErrorsEmbedTheRecipientsPhoneNumber(t *testing.T) {
 	}
 }
 
-// ----------------------------------------------------------------------------
-// Logging
-// ----------------------------------------------------------------------------
-
 // TestFailedSendsAreSilent checks that this package logs nothing on the error
 // path, leaving the decision to the caller.
 //
@@ -873,10 +848,6 @@ func TestDisconnectIsSafeAndAnnouncesItself(t *testing.T) {
 		t.Errorf("expected an info-level entry:\n%s", got)
 	}
 }
-
-// ----------------------------------------------------------------------------
-// Concurrency and receiver contracts
-// ----------------------------------------------------------------------------
 
 // TestSendIsSafeForConcurrentUse backs the "safe for concurrent use" claim as
 // far as this package can.
@@ -957,10 +928,6 @@ func TestANilServiceIsNotSafe(t *testing.T) {
 		}
 	})
 }
-
-// ----------------------------------------------------------------------------
-// The credential store path
-// ----------------------------------------------------------------------------
 
 // storeDSN is the one place a caller-supplied string is spliced into
 // something a parser reads, so it gets the same treatment the database
@@ -1044,10 +1011,6 @@ func TestStoreDSNSetsBusyTimeoutBeforeForeignKeys(t *testing.T) {
 		t.Errorf("busy_timeout comes after foreign_keys in %s", dsn)
 	}
 }
-
-// ----------------------------------------------------------------------------
-// The context forms
-// ----------------------------------------------------------------------------
 
 // Documented: the no-op cases are decided before the context is consulted,
 // so "nothing to send" is one answer rather than one that depends on

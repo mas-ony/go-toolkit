@@ -85,61 +85,22 @@ import (
 // Both lead with the CATALOG — the database the connection opened — and both
 // permit a query to name a catalog other than that one. That shared property
 // is what portability across the three accepted driver names costs and buys:
-// not a DSN branch, which db.go already had, but the shape of every table
-// reference the repository layer emits. See Namespace below, which is the
-// whole mechanism.
+// not a DSN branch, which the database package's db.go owns, but the shape of
+// every table reference the repository layer emits. See Namespace below, which
+// is the whole mechanism.
 type driverKind int
-
-const (
-	driverUnknown driverKind = iota
-	driverSQLServer
-	driverMySQL
-)
-
-// validDriverKinds is the allowlist of supported database drivers checked by
-// DatabaseConfig.Validate before a connection is attempted, and simultaneously
-// the table that decides how a qualified table name is spelled for each.
-//
-// Membership is presence in this map: a driver with no entry here is rejected
-// by Validate, and there is no second list to keep in step with this one. That
-// pairing is deliberate — a bare set of names would let a driver pass
-// validation without this package knowing how many parts its qualified table
-// references carry.
-//
-// Lookups go through DatabaseConfig.kind, which lowercases and trims first, so
-// "MySQL" and " sqlserver " both resolve. NewDatabaseConfig normalises the
-// value once on the way in, so validation, buildDSN's own switch, and
-// namespace rendering all see one spelling — a capitalised driver name cannot
-// fail validation with a message about a driver the DSN builder would have
-// accepted.
-var validDriverKinds = map[string]driverKind{
-	"sqlserver": driverSQLServer,
-	"mssql":     driverSQLServer,
-	"mysql":     driverMySQL,
-}
-
-// validEncryptModes is the allowlist of database.encrypt checked by
-// DatabaseConfig.Validate. The vocabulary is SQL Server's, which is the
-// deployed target; the database package's encryptModes translates each value
-// into MySQL's tls= so the key means the same thing on either driver.
-//
-// The split is deliberate: this package owns which values are LEGAL, that one
-// owns what each MEANS to a driver, and neither needs the other's table. They
-// can drift — a value added here and not there — but the consequence is a
-// startup error from buildDSN naming the value, not a connection that quietly
-// comes up unencrypted. That asymmetry is why the duplication is tolerable
-// where the driver allowlist's would not have been.
-var validEncryptModes = map[string]struct{}{
-	"disable": {},
-	"false":   {},
-	"true":    {},
-	"strict":  {},
-}
 
 // DatabaseConfig holds connection, naming, and connection-pool settings for
 // the single pool this service opens. String omits Username and Password
-// deliberately — see the caveat on those fields for the part of the startup
-// path that does NOT keep them out of the logs.
+// deliberately, and the database package keeps both out of its errors; the
+// note on Username says what can still name the login in a log.
+//
+// The section is OPTIONAL to an application that can run without a
+// database. Left out, every field is zero, Configured reports false, and
+// database.New answers with database.ErrNotConfigured rather than dialling.
+// Supplied at all, from the file or the environment, it is validated in
+// full, so a section filled in halfway fails at startup instead of quietly
+// switching the database off.
 type DatabaseConfig struct {
 	// Driver is the database driver name.
 	//
@@ -157,8 +118,8 @@ type DatabaseConfig struct {
 	// Port is the TCP port of the database server.
 	//
 	// Validate only requires it to be non-zero. Any other value passes here
-	// and fails later in the driver — 70000 above the range, and -1 below it,
-	// which net.JoinHostPort renders as "host:-1". AppConfig.Validate
+	// and is refused by database.New, which names the key before it builds a
+	// DSN — 70000 above the range, and -1 below it. AppConfig.Validate
 	// range-checks app.port instead; the note in Validate explains why the two
 	// rules reach opposite conclusions on purpose.
 	//
@@ -208,16 +169,20 @@ type DatabaseConfig struct {
 
 	// Username is the database login name. Required.
 	//
-	// Not logged by this package — String omits it. That is NOT true of the
-	// whole startup path: database.New wraps the sqlx.Open error with %w, the
-	// MSSQL driver may quote the connection string it failed to parse, and The
-	// application hands that error straight to log.Fatal().Err(). A malformed
-	// DSN is therefore a live route for these credentials to reach the log
-	// aggregator. See the caution on the Open error in database.New.
+	// Not logged by this package: String omits it. Nor does the database
+	// package quote the connection string that carries it. A DSN the driver
+	// refuses comes back from database.New as ErrMalformedDSN, with the
+	// driver's own message, which could quote the DSN, deliberately dropped.
+	//
+	// One route remains, and it carries the login NAME only. A failed ping
+	// is wrapped with the driver's error, and a server that refuses a login
+	// says which login it refused: "Login failed for user 'svc'" on SQL
+	// Server, "Access denied for user 'svc'" on MySQL.
 	Username string
 
-	// Password is the database login password. Required; not logged here, with
-	// the same caveat as Username above.
+	// Password is the database login password. Required, and not logged
+	// here. Unlike the login name, it is not part of the login-failure
+	// message a server sends back either.
 	//
 	// Leave both blank in config.yaml and inject them at runtime as
 	// DATABASE_USERNAME / DATABASE_PASSWORD. Blank is not merely tidier: an
@@ -258,10 +223,10 @@ type DatabaseConfig struct {
 	//	strict   TDS 8.0 (SQL Server 2022+): TLS before the TDS handshake,
 	//	         certificate always verified.
 	//
-	// The vocabulary above is SQL Server's; the key is not. the database
-	// package's encryptModes translates each value into the TLS parameter the
-	// configured driver understands, so the setting means the same thing on all
-	// three driver names:
+	// The vocabulary above is SQL Server's; the key is not. The database
+	// package's encryptModes translates each value into the TLS parameter
+	// the configured driver understands, so the setting means the same thing
+	// on all three driver names:
 	//
 	//	database.encrypt   sqlserver encrypt=   mysql tls=
 	//	disable            disable              false
@@ -303,12 +268,16 @@ type DatabaseConfig struct {
 	// the app and the database silently drops idle NAT entries after a few
 	// minutes, and the next query on such a connection fails with a reset
 	// rather than a clean error. Keep this below the shortest idle timeout
-	// on the path; 5m is comfortably under the common 15-30m.
+	// on the path, and do not assume that is long: Azure Load Balancer drops
+	// an idle flow after 4 minutes by default, without a reset, and an AWS
+	// NAT gateway after 350 seconds. 3m clears both.
 	//
 	// Applied via db.SetConnMaxIdleTime in the database package's
-	// applyPoolSettings. Both duration keys are required by Validate — 0 would
-	// mean "never expire", which is exactly the behaviour that produces the reset
-	// above.
+	// applyPoolSettings. Both duration keys are required by Validate, and
+	// both must be at least one second. database/sql reads zero AND any
+	// negative value as "never expire", which is exactly the behaviour that
+	// produces the reset above; and a bare number is nanoseconds, which
+	// closes every connection the moment it goes idle. Always write a unit.
 	ConnMaxIdleTime time.Duration
 
 	// ConnMaxLifetime is the maximum total lifetime of a pooled connection
@@ -319,8 +288,12 @@ type DatabaseConfig struct {
 	// It is what lets a password rotation or a failover to a new replica take
 	// effect without a restart, since only a fresh handshake picks either up.
 	// Keep it comfortably above ConnMaxIdleTime, or idle eviction never gets a
-	// chance to run first. Validate does not enforce that ordering — 5m
+	// chance to run first. Validate does not enforce that ordering — 3m
 	// idle against a 30m lifetime is the shape to copy.
+	//
+	// Required and at least one second, like ConnMaxIdleTime and for the
+	// same reasons: zero or a negative value never recycles a connection,
+	// and a bare number recycles every connection after each use.
 	ConnMaxLifetime time.Duration
 
 	// MaxIdleConns is the maximum number of idle connections kept open in the
@@ -356,6 +329,55 @@ type DatabaseConfig struct {
 	// Setting it equal to MaxIdleConns gives a fixed-size pool that neither
 	// grows nor churns — the simplest behaviour to reason about.
 	MaxOpenConns int
+}
+
+// The driver kinds. driverUnknown is the zero value on purpose: it is what
+// a lookup in validDriverKinds yields for a name with no entry, so an
+// unrecognised driver needs no second signal.
+const (
+	driverUnknown driverKind = iota
+	driverSQLServer
+	driverMySQL
+)
+
+// validDriverKinds is the allowlist of supported database drivers checked by
+// DatabaseConfig.Validate before a connection is attempted, and simultaneously
+// the table that decides how a qualified table name is spelled for each.
+//
+// Membership is presence in this map: a driver with no entry here is rejected
+// by Validate, and there is no second list to keep in step with this one. That
+// pairing is deliberate — a bare set of names would let a driver pass
+// validation without this package knowing how many parts its qualified table
+// references carry.
+//
+// Lookups go through DatabaseConfig.kind, which lowercases and trims first, so
+// "MySQL" and " sqlserver " both resolve. NewDatabaseConfig normalises the
+// value once on the way in, so validation, buildDSN's own switch, and
+// namespace rendering all see one spelling — a capitalised driver name cannot
+// fail validation with a message about a driver the DSN builder would have
+// accepted.
+var validDriverKinds = map[string]driverKind{
+	"sqlserver": driverSQLServer,
+	"mssql":     driverSQLServer,
+	"mysql":     driverMySQL,
+}
+
+// validEncryptModes is the allowlist of database.encrypt checked by
+// DatabaseConfig.Validate. The vocabulary is SQL Server's, which is the
+// deployed target; the database package's encryptModes translates each value
+// into MySQL's tls= so the key means the same thing on either driver.
+//
+// The split is deliberate: this package owns which values are LEGAL, that one
+// owns what each MEANS to a driver, and neither needs the other's table. They
+// can drift — a value added here and not there — but the consequence is a
+// startup error from buildDSN naming the value, not a connection that quietly
+// comes up unencrypted. That asymmetry is why the duplication is tolerable
+// where the driver allowlist's would not have been.
+var validEncryptModes = map[string]struct{}{
+	"disable": {},
+	"false":   {},
+	"true":    {},
+	"strict":  {},
 }
 
 // kind classifies the configured driver. An unrecognised name yields
@@ -480,6 +502,19 @@ func NewDatabaseConfig(v *viper.Viper) *DatabaseConfig {
 // so that only happens for a hand-built config.
 func (c *DatabaseConfig) Namespace() string { return c.namespace(c.Database) }
 
+// Configured reports whether any database.* setting reached this section,
+// which is how an application that treats the section as optional decides
+// whether to open a pool at all. A nil receiver reports false.
+//
+// It asks whether ANY field is set, not whether the section is usable;
+// that is Validate's question. The two agree after startup, because a
+// section that is supplied at all is validated in full: a service that
+// started with Configured false had no database section, and one that
+// started with it true had a valid one.
+func (c *DatabaseConfig) Configured() bool {
+	return c != nil && *c != (DatabaseConfig{})
+}
+
 // Validate returns a joined error for every invalid or missing DatabaseConfig
 // field.
 //
@@ -493,24 +528,27 @@ func (c *DatabaseConfig) Namespace() string { return c.namespace(c.Database) }
 //     as the bullet above. What is checked is that it was NAMED, which is the
 //     part a config can be wrong about silently: Namespace() renders it
 //     verbatim as the middle segment of every qualified table reference.
-//   - Port range. Anything non-zero passes, including 70000, which fails
-//     later in the driver. AppConfig.Validate DOES range-check app.port, on
-//     the grounds that net.Listen is the last thing to run and fails after the
-//     pool is open and every route is registered. The argument is weaker here:
-//     the driver rejects the port during database.New, before any route
-//     exists, so the failure is already early and already names the port. Two
-//     rules reaching opposite conclusions rather than one shared rule, so the
-//     divergence stays visible as a decision rather than reading as an
-//     oversight in one of the two.
+//   - Port range. Anything non-zero passes, including 70000, which
+//     database.New refuses, naming the key, before it builds a DSN.
+//     AppConfig.Validate DOES range-check app.port, on the grounds that
+//     net.Listen is the last thing to run and fails after the pool is open
+//     and every route is registered. The argument is weaker here: the
+//     database package rejects the port before any route exists, so the
+//     failure is already early and already names the key. Two rules reaching
+//     opposite conclusions rather than one shared rule, so the divergence
+//     stays visible as a decision rather than reading as an oversight in one
+//     of the two.
 //   - ConnMaxLifetime > ConnMaxIdleTime. Inverting them is a misconfiguration
 //     rather than an error: idle eviction simply never fires first.
 //
 // The VALUE of Encrypt is checked here rather than left to the driver, because
 // the database package's encryptModes TRANSLATES it: on mysql there is no
 // driver to forward an unknown value to, so an unrecognised value has no
-// meaning anywhere in the process. One practical consequence — go-mssqldb
-// accepts anything strconv.ParseBool does, so a deployment carrying "encrypt:
-// 0" or "encrypt: True" fails at startup and needs the canonical spelling.
+// meaning anywhere in the process. One practical consequence: go-mssqldb
+// accepts anything strconv.ParseBool does, so a deployment carrying
+// "encrypt: 0" or "encrypt: 1" fails at startup and needs the canonical
+// spelling. Case is forgiven, since the value is lowercased before it is
+// compared, so "True" reads as "true".
 //
 // "mssql" and "sqlserver" are both accepted and map to the same registered
 // driver; "mssql" is the legacy alias. Nothing depends on which one is used.
@@ -582,11 +620,11 @@ func (c *DatabaseConfig) Validate() error {
 		}
 	}
 
-	// Encrypt is required for EVERY driver, and its value is checked against the
-	// vocabulary rather than forwarded. The two halves hold each other up: the
-	// key is required everywhere because the database package's encryptModes
-	// gives it a meaning everywhere, and it can only be translated if it is one
-	// of the four.
+	// Encrypt is required for EVERY driver, and its value is checked against
+	// the vocabulary rather than forwarded. The two halves hold each other
+	// up: the key is required everywhere because the database package's
+	// encryptModes gives it a meaning everywhere, and it can only be
+	// translated if it is one of the four.
 	//
 	// Not gated on kind: an unrecognised driver has already produced its own
 	// error above, and an empty or misspelled encrypt is still worth reporting
@@ -606,22 +644,40 @@ func (c *DatabaseConfig) Validate() error {
 	default:
 		if _, ok := validEncryptModes[enc]; !ok {
 			errs = append(errs, fmt.Errorf(`database.encrypt must be one `+
-				`of: disable, false, true, strict (got %q). Values the SQL `+
-				`Server driver accepts on its own — "0", "1", "True" and `+
-				`the other strconv.ParseBool spellings — are rejected here, `+
-				`because the value has to be translated for the mysql `+
-				`driver`,
+				`of: disable, false, true, strict (got %q). The short `+
+				`strconv.ParseBool spellings the SQL Server driver would `+
+				`take on its own, such as "0", "1", "t" and "f", are `+
+				`rejected here, because the value has to be translated for `+
+				`the mysql driver`,
 				c.Encrypt))
 		}
 	}
 
-	if c.ConnMaxIdleTime == 0 {
+	// Both durations: zero is the absent value and reported as required;
+	// anything else under a second is out of range. That range holds both
+	// mistakes worth catching — a negative value, which database/sql reads
+	// as "never", and a bare number, which Viper reads as nanoseconds.
+	switch {
+	case c.ConnMaxIdleTime == 0:
 		errs = append(errs, errors.New(
 			"database.conn_max_idle_time is required"))
+	case c.ConnMaxIdleTime < time.Second:
+		errs = append(errs, fmt.Errorf("database.conn_max_idle_time must "+
+			"be at least 1s (got %s): database/sql never closes an idle "+
+			"connection when this is negative, and if this was meant as "+
+			"seconds, write the unit — a bare number is nanoseconds",
+			c.ConnMaxIdleTime))
 	}
-	if c.ConnMaxLifetime == 0 {
+	switch {
+	case c.ConnMaxLifetime == 0:
 		errs = append(errs, errors.New(
 			"database.conn_max_lifetime is required"))
+	case c.ConnMaxLifetime < time.Second:
+		errs = append(errs, fmt.Errorf("database.conn_max_lifetime must be "+
+			"at least 1s (got %s): database/sql never recycles a connection "+
+			"when this is negative, and if this was meant as seconds, write "+
+			"the unit — a bare number is nanoseconds",
+			c.ConnMaxLifetime))
 	}
 	// MaxIdleConns / MaxOpenConns invariant, covering the three checks below.
 	// Neither field has a meaningful negative value, and database/sql would
@@ -665,7 +721,7 @@ func (c *DatabaseConfig) Validate() error {
 // struct DOES hold secrets, and that omission is the entire point of the
 // method.
 //
-// The namespace is printed as RENDERED prefixes rather than raw config values,
+// The namespace is printed as the RENDERED prefix as well as the raw values,
 // because the rendered form is what ends up in every query and is the thing
 // worth confirming in a startup log after a driver change.
 func (c *DatabaseConfig) String() string {

@@ -165,8 +165,9 @@
 // The unit suite covers the name sanitisation table, the content-type
 // decision including both exceptions and both ways to defeat them, the
 // limits and their labels, the atomic-reservation loop in CopyUnique, and
-// the permission behaviour under a hostile umask — which is why that file
-// calls syscall.Umask and therefore builds on Unix only.
+// the permission behaviour under a hostile umask — which needs
+// syscall.Umask, so that file carries a unix build constraint and the unit
+// suite runs on Unix only.
 //
 // fileutil_integration_test.go covers what a unit test cannot promise,
 // because it depends on the filesystem, the process identity, or on timing

@@ -23,17 +23,6 @@ import (
 	"unicode/utf8"
 )
 
-const testID = "<id@example.go.id>"
-
-var (
-	testFrom = &mail.Address{
-		Name:    "Notifikasi",
-		Address: "noreply@example.go.id",
-	}
-	testDate = time.Date(2026, 9, 25, 14, 30, 0, 0,
-		time.FixedZone("WIB", 7*60*60))
-)
-
 // entity is one decoded MIME entity: a leaf with its decoded body, or a
 // multipart with its children.
 type entity struct {
@@ -43,6 +32,33 @@ type entity struct {
 	dispParams map[string]string
 	body       []byte
 	children   []entity
+}
+
+// testID is the Message-ID every composed test message carries, so its
+// header is predictable.
+const testID = "<id@example.go.id>"
+
+// Fixed inputs for compose, so every test message is reproducible.
+var (
+	testFrom = &mail.Address{
+		Name:    "Notifikasi",
+		Address: "noreply@example.go.id",
+	}
+	testDate = time.Date(2026, 9, 25, 14, 30, 0, 0,
+		time.FixedZone("WIB", 7*60*60))
+)
+
+// shape renders an entity's structure, "multipart/mixed[text/plain,
+// application/pdf]" say.
+func shape(e entity) string {
+	if len(e.children) == 0 {
+		return e.mediaType
+	}
+	kids := make([]string, len(e.children))
+	for i, c := range e.children {
+		kids[i] = shape(c)
+	}
+	return e.mediaType + "[" + strings.Join(kids, ",") + "]"
 }
 
 // build composes m the way Send does, with the date and Message-ID
@@ -126,19 +142,8 @@ func root(t *testing.T, msg *mail.Message) entity {
 	return decode(t, msg.Header.Get, msg.Body)
 }
 
-// shape renders an entity's structure, "multipart/mixed[text/plain,
-// application/pdf]" say.
-func shape(e entity) string {
-	if len(e.children) == 0 {
-		return e.mediaType
-	}
-	kids := make([]string, len(e.children))
-	for i, c := range e.children {
-		kids[i] = shape(c)
-	}
-	return e.mediaType + "[" + strings.Join(kids, ",") + "]"
-}
-
+// The headers read back through a recipient's parser match what was sent,
+// a non-ASCII subject and display name included.
 func TestComposeHeadersReadBack(t *testing.T) {
 	t.Parallel()
 	subject := "Laporan realisasi — Triwulan III ✓"
@@ -265,6 +270,8 @@ func TestASubjectCannotAddAHeader(t *testing.T) {
 	}
 }
 
+// The body takes the shape content documents for each combination of
+// text, HTML and attachments.
 func TestComposeStructure(t *testing.T) {
 	t.Parallel()
 	pdf := Attachment{Filename: "a.pdf", Data: []byte("%PDF-1.7")}
@@ -348,6 +355,8 @@ func TestInvalidUTF8BecomesTheReplacementCharacter(t *testing.T) {
 	}
 }
 
+// An attachment holding every byte value decodes back unchanged from the
+// composed message.
 func TestAttachmentRoundTrips(t *testing.T) {
 	t.Parallel()
 	data := make([]byte, 256*300)
@@ -389,6 +398,9 @@ func TestAttachmentRoundTrips(t *testing.T) {
 	}
 }
 
+// attachmentType uses the given media type when it parses, the type
+// registered for the extension otherwise, and application/octet-stream
+// last.
 func TestAttachmentType(t *testing.T) {
 	t.Parallel()
 	xlsx := "application/vnd.openxmlformats-officedocument." +
@@ -417,6 +429,8 @@ func TestAttachmentType(t *testing.T) {
 	}
 }
 
+// attachmentName keeps only the last path element, shortens an over-long
+// name with its extension kept, and names an empty one attachment.
 func TestAttachmentName(t *testing.T) {
 	t.Parallel()
 	for _, c := range []struct{ in, want string }{
@@ -470,6 +484,8 @@ func TestBccAppearsNowhereInTheMessage(t *testing.T) {
 	}
 }
 
+// parseEnvelope skips blank entries, keeps each field as it was given, and
+// hands the relay every recipient once, whatever its case.
 func TestParseEnvelope(t *testing.T) {
 	t.Parallel()
 
@@ -557,6 +573,8 @@ func TestWriteHeaderUnfoldsToTheValue(t *testing.T) {
 	}
 }
 
+// A message is empty only when it has no subject, no body and no
+// attachment, white space counting as nothing.
 func TestMessageEmpty(t *testing.T) {
 	t.Parallel()
 	for _, c := range []struct {

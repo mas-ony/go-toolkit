@@ -72,17 +72,23 @@
 // it, and that changes two things:
 //
 //	msg := email.Message{...} // built here, from copies
+//	ctx := context.WithoutCancel(c.Context())
 //	go func() {
-//		ctx := context.WithoutCancel(reqCtx)
 //		if err := mailer.Send(ctx, msg); err != nil {
 //			log.Error().Err(err).Msg("notification email")
 //		}
 //	}()
 //
 // The context has to lose its cancellation, or the send dies the moment
-// the handler returns. WithoutCancel keeps its values, so a request ID
-// still reaches the log, and it leaves the timeout as the only bound,
-// which is why Validate requires one.
+// the handler returns, and it leaves the timeout as the only bound, which
+// is why Validate requires one. Derive it before the goroutine starts, and
+// from c.Context(), the context.Context the request carries, rather than
+// from anything tied to the fiber.Ctx: WithoutCancel keeps a reference to
+// its parent and reads values through it for as long as the send runs.
+// Those values are the parent's, so a request ID reaches the goroutine
+// only if it was stored there. Fiber's requestid middleware stores it
+// there only while fiber.pass_locals_to_context is on; otherwise copy the
+// ID out before the goroutine starts.
 //
 // And the Message has to be built before the goroutine starts. Fiber
 // reuses a request's memory once the handler returns, so a string or byte

@@ -61,8 +61,8 @@ func NewWhatsAppConfig(v *viper.Viper) *WhatsAppConfig {
 	}
 }
 
-// Validate returns a joined error for every invalid or missing
-// WhatsAppConfig field.
+// Validate reports a WhatsAppConfig that was never built, and nothing
+// else: no field of this section can hold an invalid value.
 //
 // Deliberately unchecked:
 //
@@ -75,14 +75,10 @@ func NewWhatsAppConfig(v *viper.Viper) *WhatsAppConfig {
 //     value, so there is nothing to reject beyond a receiver that was
 //     never built. What each setting costs is on NotificationConfig.
 //
-// That accounts for all fields, so this method has no checks beyond the
-// nil guard, and returns nil directly rather than joining an empty list.
-//
-// The other Validate implementations open with `var errs []error` above
-// their nil check so that the two statements read in the same order
-// everywhere; there is nothing here to append to it, and a
-// declared-but-never-appended slice would take three paragraphs to
-// explain what one return says.
+// That accounts for every field, so this method has no checks beyond the
+// nil guard and returns nil directly. Like RecoverConfig's, it does not
+// open with the `var errs []error` the other Validate methods start with,
+// because there is nothing here to append to one.
 func (c *WhatsAppConfig) Validate() error {
 	if c == nil {
 		return errors.New("whatsapp config was not initialised")

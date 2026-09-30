@@ -1,5 +1,10 @@
 package xlsx
 
+// Tests for link.go: every shape a hyperlink target takes — relative,
+// absolute, UNC, a file URL, a scheme that is not a file — resolved against
+// a fixed workbook directory, with percent-decoding done exactly once and
+// never a Base that names something other than a file.
+
 import (
 	"errors"
 	"path/filepath"
@@ -84,6 +89,7 @@ func TestResolveLinkNonFile(t *testing.T) {
 	}
 }
 
+// A blank target is ErrNoLink: the cell carries no hyperlink at all.
 func TestResolveLinkEmpty(t *testing.T) {
 	if _, err := ResolveLink("   ", "/data"); !errors.Is(err, ErrNoLink) {
 		t.Errorf("ResolveLink(blank) error = %v, want ErrNoLink", err)

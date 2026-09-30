@@ -31,9 +31,8 @@ import (
 
 	"github.com/go-sql-driver/mysql"
 	"github.com/jmoiron/sqlx"
-	"github.com/microsoft/go-mssqldb/msdsn"
-
 	"github.com/mas-ony/go-toolkit/config"
+	"github.com/microsoft/go-mssqldb/msdsn"
 )
 
 // itLocation is the zone the converted AppConfig carries.
@@ -202,6 +201,8 @@ func mustOpen(
 	return db
 }
 
+// A pool New opens answers a query, and carries the open limit it was
+// given rather than database/sql's unlimited default.
 func TestIntegrationNewOpensAPingedPool(t *testing.T) {
 	forEachEngineConfig(t, func(
 		t *testing.T,

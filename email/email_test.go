@@ -27,10 +27,22 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rs/zerolog"
-
 	"github.com/mas-ony/go-toolkit/config"
+	"github.com/rs/zerolog"
 )
+
+// session is what one connection told the relay.
+type session struct {
+	helo    string
+	tls     bool // encrypted by the end
+	user    string
+	mech    string
+	authTLS bool // encrypted when the login happened
+	from    string
+	mailTLS bool // encrypted when MAIL FROM arrived
+	rcpts   []string
+	data    []byte // after dot-unstuffing, with LF line endings
+}
 
 // relay is an SMTP server on loopback. Its fields set its behaviour and
 // are read-only once start has been called.
@@ -69,69 +81,10 @@ type relay struct {
 	sessions []*session
 }
 
-// session is what one connection told the relay.
-type session struct {
-	helo    string
-	tls     bool // encrypted by the end
-	user    string
-	mech    string
-	authTLS bool // encrypted when the login happened
-	from    string
-	mailTLS bool // encrypted when MAIL FROM arrived
-	rcpts   []string
-	data    []byte // after dot-unstuffing, with LF line endings
-}
-
-// start listens on a free loopback port and serves until the test ends.
-func (r *relay) start(t *testing.T) *relay {
+// text is the decoded body of a single-part message.
+func text(t *testing.T, raw []byte) string {
 	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if r.implicit {
-		ln = tls.NewListener(ln, r.tlsConf)
-	}
-	r.ln = ln
-	r.wg.Add(1)
-	go r.accept()
-	t.Cleanup(r.stop)
-	return r
-}
-
-func (r *relay) stop() {
-	r.mu.Lock()
-	r.closed = true
-	for _, c := range r.conns {
-		_ = c.Close()
-	}
-	r.mu.Unlock()
-	_ = r.ln.Close()
-	r.wg.Wait()
-}
-
-func (r *relay) accept() {
-	defer r.wg.Done()
-	for {
-		conn, err := r.ln.Accept()
-		if err != nil {
-			return
-		}
-		r.mu.Lock()
-		if r.closed {
-			r.mu.Unlock()
-			_ = conn.Close()
-			return
-		}
-		r.conns = append(r.conns, conn)
-		r.mu.Unlock()
-
-		r.wg.Add(1)
-		go func() {
-			defer r.wg.Done()
-			r.serve(conn)
-		}()
-	}
+	return string(root(t, read(t, raw)).body)
 }
 
 // note records into s under the relay's lock, which is what a test's
@@ -165,6 +118,69 @@ func (r *relay) only(t *testing.T) session {
 	return s[0]
 }
 
+// login returns a config change that sets the relay credentials.
+func login(user, pass string) func(*config.EmailConfig) {
+	return func(c *config.EmailConfig) {
+		c.Username, c.Password = user, pass
+	}
+}
+
+// login runs the server half of AUTH PLAIN or LOGIN.
+func (r *relay) login(
+	tp *textproto.Conn,
+	arg string,
+) (user, mech string, ok bool) {
+	mech, initial, _ := strings.Cut(arg, " ")
+	mech = strings.ToUpper(mech)
+	ask := func(prompt string) string {
+		_ = tp.PrintfLine("334 %s",
+			base64.StdEncoding.EncodeToString([]byte(prompt)))
+		line, _ := tp.ReadLine()
+		b, _ := base64.StdEncoding.DecodeString(line)
+		return string(b)
+	}
+
+	var pass string
+	switch mech {
+	case "PLAIN":
+		b, err := base64.StdEncoding.DecodeString(initial)
+		fields := strings.Split(string(b), "\x00")
+		if err != nil || len(fields) != 3 {
+			return "", mech, false
+		}
+		user, pass = fields[1], fields[2]
+	case "LOGIN":
+		user = ask("Username:")
+		pass = ask("Password:")
+	default:
+		return "", mech, false
+	}
+	want, known := r.users[user]
+	return user, mech, known && pass == want
+}
+
+// offer is what EHLO lists after the greeting line.
+func (r *relay) offer(encrypted bool) []string {
+	ext := slices.Clone(r.ext)
+	if r.tlsConf != nil && !encrypted {
+		ext = append(ext, "STARTTLS")
+	}
+	if len(r.mechs) > 0 && (encrypted || !r.authAfterTLS) {
+		ext = append(ext, "AUTH "+strings.Join(r.mechs, " "))
+	}
+	return ext
+}
+
+// between returns the text of s after the first open and before the close
+// that follows it.
+func between(s, open, close string) string {
+	_, rest, _ := strings.Cut(s, open)
+	inside, _, _ := strings.Cut(rest, close)
+	return inside
+}
+
+// serve holds one SMTP conversation on conn, as the relay's fields
+// direct, and records what it was told.
 func (r *relay) serve(conn net.Conn) {
 	defer conn.Close()
 	s := &session{}
@@ -266,56 +282,46 @@ func (r *relay) serve(conn net.Conn) {
 	}
 }
 
-// offer is what EHLO lists after the greeting line.
-func (r *relay) offer(encrypted bool) []string {
-	ext := slices.Clone(r.ext)
-	if r.tlsConf != nil && !encrypted {
-		ext = append(ext, "STARTTLS")
-	}
-	if len(r.mechs) > 0 && (encrypted || !r.authAfterTLS) {
-		ext = append(ext, "AUTH "+strings.Join(r.mechs, " "))
-	}
-	return ext
-}
-
-// login runs the server half of AUTH PLAIN or LOGIN.
-func (r *relay) login(
-	tp *textproto.Conn,
-	arg string,
-) (user, mech string, ok bool) {
-	mech, initial, _ := strings.Cut(arg, " ")
-	mech = strings.ToUpper(mech)
-	ask := func(prompt string) string {
-		_ = tp.PrintfLine("334 %s",
-			base64.StdEncoding.EncodeToString([]byte(prompt)))
-		line, _ := tp.ReadLine()
-		b, _ := base64.StdEncoding.DecodeString(line)
-		return string(b)
-	}
-
-	var pass string
-	switch mech {
-	case "PLAIN":
-		b, err := base64.StdEncoding.DecodeString(initial)
-		fields := strings.Split(string(b), "\x00")
-		if err != nil || len(fields) != 3 {
-			return "", mech, false
+// accept serves each connection the listener takes, until it is closed.
+func (r *relay) accept() {
+	defer r.wg.Done()
+	for {
+		conn, err := r.ln.Accept()
+		if err != nil {
+			return
 		}
-		user, pass = fields[1], fields[2]
-	case "LOGIN":
-		user = ask("Username:")
-		pass = ask("Password:")
-	default:
-		return "", mech, false
+		r.mu.Lock()
+		if r.closed {
+			r.mu.Unlock()
+			_ = conn.Close()
+			return
+		}
+		r.conns = append(r.conns, conn)
+		r.mu.Unlock()
+
+		r.wg.Add(1)
+		go func() {
+			defer r.wg.Done()
+			r.serve(conn)
+		}()
 	}
-	want, known := r.users[user]
-	return user, mech, known && pass == want
 }
 
-func between(s, open, close string) string {
-	_, rest, _ := strings.Cut(s, open)
-	inside, _, _ := strings.Cut(rest, close)
-	return inside
+// start listens on a free loopback port and serves until the test ends.
+func (r *relay) start(t *testing.T) *relay {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.implicit {
+		ln = tls.NewListener(ln, r.tlsConf)
+	}
+	r.ln = ln
+	r.wg.Add(1)
+	go r.accept()
+	t.Cleanup(r.stop)
+	return r
 }
 
 // service builds a Service for r through New, the way an application
@@ -344,18 +350,20 @@ func service(
 	return s
 }
 
-func login(user, pass string) func(*config.EmailConfig) {
-	return func(c *config.EmailConfig) {
-		c.Username, c.Password = user, pass
+// stop ends the relay at the end of the test that started it.
+func (r *relay) stop() {
+	r.mu.Lock()
+	r.closed = true
+	for _, c := range r.conns {
+		_ = c.Close()
 	}
+	r.mu.Unlock()
+	_ = r.ln.Close()
+	r.wg.Wait()
 }
 
-// text is the decoded body of a single-part message.
-func text(t *testing.T, raw []byte) string {
-	t.Helper()
-	return string(root(t, read(t, raw)).body)
-}
-
+// A send delivers one message the relay reads back intact, and logs its
+// success line.
 func TestSendDeliversOneMessage(t *testing.T) {
 	t.Parallel()
 	r := (&relay{}).start(t)
@@ -417,6 +425,8 @@ func TestSendDeliversOneMessage(t *testing.T) {
 	}
 }
 
+// Login uses PLAIN where the relay offers it, and LOGIN where the relay
+// offers that and not PLAIN.
 func TestSendLogsInWithPlainOrLogin(t *testing.T) {
 	t.Parallel()
 	for _, c := range []struct {
@@ -450,6 +460,7 @@ func TestSendLogsInWithPlainOrLogin(t *testing.T) {
 	}
 }
 
+// A relay that refuses the credentials fails the send at AUTH.
 func TestSendReportsARefusedLogin(t *testing.T) {
 	t.Parallel()
 	r := (&relay{
@@ -471,6 +482,8 @@ func TestSendReportsARefusedLogin(t *testing.T) {
 	}
 }
 
+// A relay offering neither PLAIN nor LOGIN fails the send at AUTH, and the
+// error names what it does offer.
 func TestSendRefusesAServerWithNeitherMechanism(t *testing.T) {
 	t.Parallel()
 	r := (&relay{mechs: []string{"CRAM-MD5", "XOAUTH2"}}).start(t)
@@ -550,6 +563,8 @@ func TestSendStopsAtTheFirstRefusedRecipient(t *testing.T) {
 	}
 }
 
+// A message over the relay's announced SIZE fails with ErrTooLarge before
+// MAIL FROM, so nothing about it reaches the relay.
 func TestSendChecksTheAnnouncedSizeFirst(t *testing.T) {
 	t.Parallel()
 	r := (&relay{ext: []string{"SIZE 2000"}}).start(t)
@@ -622,6 +637,8 @@ func TestNothingToSendNeverDials(t *testing.T) {
 	}
 }
 
+// An address that does not parse is ErrInvalidAddress, returned without a
+// connection being made.
 func TestABadAddressFailsBeforeDialing(t *testing.T) {
 	t.Parallel()
 	r := (&relay{}).start(t)
@@ -639,6 +656,7 @@ func TestABadAddressFailsBeforeDialing(t *testing.T) {
 	}
 }
 
+// A context cancelled before the send ends it with context.Canceled.
 func TestSendUnderACancelledContext(t *testing.T) {
 	t.Parallel()
 	r := (&relay{}).start(t)
@@ -652,6 +670,8 @@ func TestSendUnderACancelledContext(t *testing.T) {
 	}
 }
 
+// A nil *Service answers every send with ErrNotConfigured instead of
+// panicking.
 func TestNilServiceIsNotConfigured(t *testing.T) {
 	t.Parallel()
 	var s *Service
@@ -761,6 +781,7 @@ func TestLoginAnswersPromptsInOrder(t *testing.T) {
 	}
 }
 
+// names lists the first three recipients and counts the rest.
 func TestNamesCountsWhatItDoesNotList(t *testing.T) {
 	t.Parallel()
 	for _, c := range []struct {
@@ -781,6 +802,7 @@ func TestNamesCountsWhatItDoesNotList(t *testing.T) {
 	}
 }
 
+// Two Message-IDs never repeat, and each sits under the sender's domain.
 func TestMessageIDIsUniqueUnderTheSendersDomain(t *testing.T) {
 	t.Parallel()
 	a, b := messageID("noreply@example.go.id"),

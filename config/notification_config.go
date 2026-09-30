@@ -24,29 +24,11 @@ import (
 	"github.com/spf13/viper"
 )
 
-// The channels notification.channels accepts. Each is also the name of
-// the section that configures it, nested under notification.
-const (
-	ChannelWhatsApp = "whatsapp"
-	ChannelEmail    = "email"
-)
-
-// validChannels is the allowlist checked by NotificationConfig.Validate.
-//
-// Checked because a typo here is INVISIBLE at runtime. Enabled answers
-// false for a channel spelled "emial", so no mail is ever sent, and the
-// only symptom is a recipient who never hears about anything.
-var validChannels = map[string]struct{}{
-	ChannelWhatsApp: {},
-	ChannelEmail:    {},
-}
-
-// normaliseChannel is the form a channel is compared in.
-func normaliseChannel(s string) string {
-	return strings.ToLower(strings.TrimSpace(s))
-}
-
 // NotificationConfig chooses the channels notifications go out on.
+//
+// It is the switch for the channel sections, as AuthConfig is for the
+// authentication ones: a channel's section is used, and validated, only
+// while Enabled reports that channel.
 //
 // It holds the choice and nothing else. How a channel sends is in that
 // channel's own section, so switching a channel off is one word here, and
@@ -70,18 +52,52 @@ func normaliseChannel(s string) string {
 //     reflected in the HTTP response, and a notification still in flight
 //     when the process shuts down is dropped.
 //
-// Async gives up no guarantee that sync provides, PROVIDED the application
-// treats delivery as best-effort in both modes — every send error logged
-// rather than surfaced to the caller, and never allowed to roll back the
-// row. An application that does surface the error is making a different
-// trade, and the async key is where it disappears.
+// Apart from shutdown, async gives up no guarantee that sync provides,
+// PROVIDED the application treats delivery as best-effort in both modes —
+// every send error logged rather than surfaced to the caller, and never
+// allowed to roll back the row. An application that does surface the error
+// is making a different trade, and the async key is where it disappears.
+//
+// Shutdown is the one real difference. A graceful stop waits for the
+// requests in flight, so a synchronous send finishes inside one of them.
+// Nothing waits for a background goroutine unless the application tracks
+// its sends, with a sync.WaitGroup for instance, and waits for them once
+// the server has stopped accepting requests.
 type NotificationConfig struct {
 	// Channels lists the channels in use: ChannelWhatsApp, ChannelEmail,
-	// both, or neither. It is read as a YAML sequence or as a
-	// comma-separated string alike, and NewNotificationConfig lowercases
-	// and trims each entry. Empty means no channel sends, which is also
-	// what a deployment without this section gets.
+	// both, or neither. It is read as a YAML sequence, or as a string
+	// separated by commas or by spaces, and NewNotificationConfig
+	// lowercases and trims each entry. Empty means no channel sends, which
+	// is also what a deployment without this section gets.
 	Channels []string
+}
+
+// The channels notification.channels accepts. Each is also the name of
+// the section that configures it, nested under notification.
+const (
+	ChannelWhatsApp = "whatsapp"
+	ChannelEmail    = "email"
+)
+
+// validChannels is the allowlist checked by NotificationConfig.Validate.
+//
+// Checked because a typo here is INVISIBLE at runtime. Enabled answers
+// false for a channel spelled "emial", so no mail is ever sent, and the
+// only symptom is a recipient who never hears about anything.
+var validChannels = map[string]struct{}{
+	ChannelWhatsApp: {},
+	ChannelEmail:    {},
+}
+
+// normaliseChannel returns the form a channel name is compared in:
+// lowercased, with surrounding space trimmed.
+//
+// NewNotificationConfig stores every entry in this form. Validate and
+// Enabled apply it again to what they compare, because a
+// NotificationConfig built as a struct literal never passed through the
+// constructor.
+func normaliseChannel(s string) string {
+	return strings.ToLower(strings.TrimSpace(s))
 }
 
 // NewNotificationConfig reads NotificationConfig fields from the provided
@@ -106,6 +122,26 @@ func NewNotificationConfig(v *viper.Viper) *NotificationConfig {
 	return &NotificationConfig{Channels: channels}
 }
 
+// Enabled reports whether channel is one of Channels, ignoring case and
+// surrounding spaces. It is safe on a nil receiver, which enables nothing.
+//
+// It is the branch a service takes before sending on a channel, and
+// before validating that channel's section: an entry given twice is still
+// one channel, and a channel not listed is off however completely its
+// section is filled in.
+func (c *NotificationConfig) Enabled(channel string) bool {
+	if c == nil {
+		return false
+	}
+	want := normaliseChannel(channel)
+	for _, ch := range c.Channels {
+		if normaliseChannel(ch) == want {
+			return true
+		}
+	}
+	return false
+}
+
 // Validate returns a joined error for every invalid or missing
 // NotificationConfig field.
 //
@@ -117,8 +153,10 @@ func NewNotificationConfig(v *viper.Viper) *NotificationConfig {
 //
 //   - Whether a chosen channel is CONFIGURED. Validate sees one section,
 //     and whether notification.email was supplied is another section's
-//     answer. The application asks at wiring time instead, where
-//     email.New fails for a channel chosen without its section.
+//     answer. The application sees both, and answers it by validating a
+//     chosen channel's section whether or not anything supplied it; the
+//     email package refuses an empty section on its own account too, as
+//     email.ErrNotConfigured.
 //   - Whether any service actually honours the choice. It is passed to each
 //     notifying service by hand at wiring time; a path added tomorrow that
 //     ignores it is invisible from here.
@@ -148,21 +186,6 @@ func (c *NotificationConfig) Validate() error {
 	}
 
 	return errors.Join(errs...)
-}
-
-// Enabled reports whether channel is one of Channels, ignoring case and
-// surrounding spaces. It is safe on a nil receiver, which enables nothing.
-func (c *NotificationConfig) Enabled(channel string) bool {
-	if c == nil {
-		return false
-	}
-	want := normaliseChannel(channel)
-	for _, ch := range c.Channels {
-		if normaliseChannel(ch) == want {
-			return true
-		}
-	}
-	return false
 }
 
 // String returns a loggable representation of NotificationConfig.

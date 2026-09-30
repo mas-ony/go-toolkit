@@ -44,14 +44,50 @@ import (
 	"time"
 )
 
-const itID = 4321
-
 // firstError is a one-shot error slot: the first failure wins and the
 // reader goroutine stops, so a genuine partial read is reported once
 // rather than thousands of times.
 type firstError struct {
 	mu  sync.Mutex
 	msg string
+}
+
+// itID is the record id every integration test stores under.
+const itID = 4321
+
+// describe summarises a mismatched read without dumping a megabyte into
+// the test log.
+func describe(b []byte) string {
+	if len(b) == 0 {
+		return "0 bytes"
+	}
+	return fmt.Sprintf("%d bytes, starting %q and ending %q",
+		len(b), b[0], b[len(b)-1])
+}
+
+// set records s unless a message is already held.
+func (a *firstError) set(s string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.msg == "" {
+		a.msg = s
+	}
+}
+
+// get returns the first message recorded, or "" when there was none.
+func (a *firstError) get() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.msg
+}
+
+// requireUnprivileged skips when permission bits will not bite, which they
+// do not for root.
+func requireUnprivileged(t *testing.T) {
+	t.Helper()
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: permission bits do not bite")
+	}
 }
 
 // caseSensitiveDir reports whether dir distinguishes two names differing
@@ -67,37 +103,6 @@ func caseSensitiveDir(t *testing.T, dir string) bool {
 	defer func() { _ = os.Remove(probe) }()
 	_, err := os.Stat(filepath.Join(dir, ".CASE-PROBE"))
 	return err != nil
-}
-
-func requireUnprivileged(t *testing.T) {
-	t.Helper()
-	if os.Geteuid() == 0 {
-		t.Skip("running as root: permission bits do not bite")
-	}
-}
-
-// describe summarises a mismatched read without dumping a megabyte into
-// the test log.
-func describe(b []byte) string {
-	if len(b) == 0 {
-		return "0 bytes"
-	}
-	return fmt.Sprintf("%d bytes, starting %q and ending %q",
-		len(b), b[0], b[len(b)-1])
-}
-
-func (a *firstError) set(s string) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.msg == "" {
-		a.msg = s
-	}
-}
-
-func (a *firstError) get() string {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	return a.msg
 }
 
 // SafeName deliberately preserves case — a stored name is handed back to a
@@ -317,7 +322,8 @@ func TestIntegrationUnwritableUploadRootFails(t *testing.T) {
 func TestIntegrationUploadRootIsAFile(t *testing.T) {
 	parent := t.TempDir()
 	root := filepath.Join(parent, "uploads")
-	if err := os.WriteFile(root, []byte("not a directory"), 0o644); err != nil {
+	if err := os.WriteFile(root, []byte("not a directory"),
+		0o644); err != nil {
 		t.Fatal(err)
 	}
 

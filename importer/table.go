@@ -4,28 +4,13 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/shopspring/decimal"
-
 	"github.com/mas-ony/go-toolkit/datetime"
 	"github.com/mas-ony/go-toolkit/xlsx"
+	"github.com/shopspring/decimal"
 )
 
 // epoch1904 is a workbook read as though it declared the 1904 epoch.
 type epoch1904 struct{ *xlsx.File }
-
-// Date1904 always reports true.
-func (epoch1904) Date1904() bool { return true }
-
-// Source is the part of a workbook a Table reads. It is an interface
-// rather than *xlsx.File so a table can be tested against a grid held
-// in the test, without a file on disk.
-//
-// NewSource adapts an open workbook to it.
-type Source interface {
-	Cell(row int, col string) string
-	Hyperlink(row int, col string) string
-	Date1904() bool
-}
 
 // Cell is one mapped cell as a setter sees it.
 //
@@ -42,6 +27,36 @@ type Cell struct {
 	Link     string
 	Date1904 bool
 }
+
+// Source is the part of a workbook a Table reads. It is an interface
+// rather than *xlsx.File so a table can be tested against a grid held
+// in the test, without a file on disk.
+//
+// NewSource adapts an open workbook to it.
+type Source interface {
+	Cell(row int, col string) string
+	Hyperlink(row int, col string) string
+	Date1904() bool
+}
+
+// Table is a dataset's full column mapping: the letter, the accepted
+// captions and the coercion for every column it reads, in sheet order so
+// problems are reported left to right rather than in map-iteration order.
+//
+// It yields the two things an import needs from a spreadsheet — the
+// layout contract the header check runs against, through Columns, and the
+// code that fills one row's worth of a domain type, through Apply.
+//
+// # Why a table rather than a parse function
+//
+// A parser written by hand states every column three times: once as a
+// letter constant, once in the caption contract, and once in the parse
+// function. The three drift. A column moved in the contract but not in
+// the parser passes the header check and then reads the wrong cell, which
+// is precisely the failure the header check exists to catch. Here the
+// letter, the captions and the coercion are one entry, so a column moves
+// in a single edit or not at all.
+type Table[T any] []Field[T]
 
 // Field is one column of the layout contract plus the rule for what its
 // cell becomes.
@@ -69,10 +84,11 @@ type Field[T any] struct {
 	// warning. Set it through Must.
 	Required bool
 
-	// Key names the value this column writes, for a field built by the
-	// keyed constructors. It is empty for a field that writes into a
-	// typed struct, where the destination is the accessor and there is
-	// no name to record.
+	// Key names the value this column writes. No constructor in this
+	// package sets it: a field that writes into a typed struct has its
+	// destination in an accessor, where there is no name to record. A
+	// dataset whose fields write into a map or a keyed record sets Key
+	// itself, on the struct literal or through constructors of its own.
 	//
 	// Nothing reads it at run time. It exists so Validate can see what
 	// a closure would otherwise hide, and catch two columns writing the
@@ -95,6 +111,23 @@ type Field[T any] struct {
 	Set func(dst *T, c Cell) error
 }
 
+// isColumnLetter reports whether s is a spreadsheet column name: one to
+// three ASCII letters and nothing else.
+func isColumnLetter(s string) bool {
+	if s == "" || len(s) > 3 {
+		return false
+	}
+	for _, r := range s {
+		if r < 'A' || r > 'Z' {
+			return false
+		}
+	}
+	return true
+}
+
+// Date1904 always reports true.
+func (epoch1904) Date1904() bool { return true }
+
 // NewSource adapts an open workbook to the Source a Table reads,
 // honouring the -date1904 override.
 //
@@ -109,46 +142,14 @@ func NewSource(wb *xlsx.File, force bool) Source {
 	return wb
 }
 
-// Column renders the field as the layout contract entry workbook wants.
+// Column renders the field as its entry in the layout contract: the
+// xlsx.Column that VerifyHeaders and DataRows read.
 func (f Field[T]) Column() xlsx.Column {
 	return xlsx.Column{
 		Col:      f.Col,
 		Captions: f.Captions,
 		Purpose:  f.Purpose,
 	}
-}
-
-// Table is a dataset's full column mapping: the letter, the accepted
-// captions and the coercion for every column it reads, in sheet order so
-// problems are reported left to right rather than in map-iteration order.
-//
-// It yields the two things an import needs from a spreadsheet — the
-// layout contract the header check runs against, through Columns, and the
-// code that fills one row's worth of a domain type, through Apply.
-//
-// # Why a table rather than a parse function
-//
-// A parser written by hand states every column three times: once as a
-// letter constant, once in the caption contract, and once in the parse
-// function. The three drift. A column moved in the contract but not in
-// the parser passes the header check and then reads the wrong cell, which
-// is precisely the failure the header check exists to catch. Here the
-// letter, the captions and the coercion are one entry, so a column moves
-// in a single edit or not at all.
-type Table[T any] []Field[T]
-
-// isColumnLetter reports whether s is a spreadsheet column name: one to
-// three ASCII letters and nothing else.
-func isColumnLetter(s string) bool {
-	if s == "" || len(s) > 3 {
-		return false
-	}
-	for _, r := range s {
-		if r < 'A' || r > 'Z' {
-			return false
-		}
-	}
-	return true
 }
 
 // Columns renders the whole table as the layout contract, for
@@ -218,9 +219,8 @@ func (t Table[T]) Apply(
 }
 
 // Validate checks the table itself: a column letter that is not one, a
-// letter mapped twice, a field with no accepted caption, and — for a
-// table built with the keyed constructors — two columns writing the same
-// value.
+// letter mapped twice, a field with no accepted caption, and — among the
+// fields whose Key is set — two columns writing the same value.
 //
 // Worth calling once at start-up. Every one of these is a typo in a
 // table nobody reads end to end, and each fails in a way that looks like
@@ -235,7 +235,12 @@ func (t Table[T]) Validate() error {
 	seen := make(map[string]bool, len(t))
 	wrote := make(map[string]string, len(t))
 	for _, f := range t {
-		col := strings.ToUpper(strings.TrimSpace(f.Col))
+		// Upper-cased, because the cell lookup is case-insensitive, so "c"
+		// and "C" name one column and have to collide here. NOT trimmed,
+		// because the lookup trims nothing: " C" reads as an empty cell on
+		// every row and fails the header check, the kind of typo this
+		// method exists to catch before the workbook is blamed for it.
+		col := strings.ToUpper(f.Col)
 
 		if f.Key != "" {
 			if first, dup := wrote[f.Key]; dup {

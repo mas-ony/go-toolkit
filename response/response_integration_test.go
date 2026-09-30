@@ -24,8 +24,9 @@ package response
 //
 //	go test -tags integration -run Integration ./response
 //
-// It needs no server and no configuration; the framework's own in-process
-// test transport carries the requests.
+// It needs no server and no configuration. The framework's own in-process
+// test transport carries the requests, except in the body-limit test,
+// which binds a loopback listener for the reason given there.
 
 import (
 	"encoding/json"
@@ -111,6 +112,8 @@ func waitForListener(t *testing.T, addr string) {
 	t.Fatal("the listener never accepted a connection")
 }
 
+// do sends req through the in-process transport and decodes the answer as
+// a client would, recording which optional keys were present at all.
 func do(t *testing.T, app *fiber.App, req *http.Request) (int, decoded) {
 	t.Helper()
 	resp, err := app.Test(req, fiber.TestConfig{Timeout: 0})

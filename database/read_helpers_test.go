@@ -4,7 +4,7 @@ package database
 //
 // The clause builders inspect strings and open nothing. GetOne, CountQuery
 // and SelectList reach a driver, so they are exercised twice: here against
-// the fake at the bottom of this file, which is what makes their contract
+// the fake at the top of this file, which is what makes their contract
 // hold on a plain `go test`, and in read_helpers_integration_test.go
 // against real servers, which is what shows the SQL they build is accepted.
 
@@ -19,38 +19,6 @@ import (
 	"testing"
 
 	"github.com/jmoiron/sqlx"
-)
-
-type queryDriver struct{}
-
-type queryConnector struct{ db *queryDB }
-
-// queryConn implements driver.QueryerContext, which is what lets
-// database/sql skip Prepare entirely and hand the statement over in one
-// call. A conn with only Prepare would work too, at the cost of a Stmt type
-// whose sole job is to carry the query text to the same place.
-type queryConn struct{ db *queryDB }
-
-type queryRows struct {
-	cols []string
-	rows [][]driver.Value
-	i    int
-}
-
-// A fixture in the shape every repository uses: short names a request may
-// ask for, mapped to the SQL each one emits. unit_name comes from a JOIN,
-// and key is a second name for the primary-key expression.
-var (
-	testAllowedCols = map[string]string{
-		"id":        "t.id",
-		"key":       "t.id",
-		"code":      "t.code",
-		"title":     "t.title",
-		"unit_name": "u.name AS unit_name",
-	}
-	testDefaultCols = []string{"id", "code", "title", "unit_name"}
-	testJoinCols    = []string{"unit_name"}
-	testSortCols    = []string{"t.code", "t.title", "u.name"}
 )
 
 // queryDB is a driver that answers every query with the same canned result
@@ -73,6 +41,27 @@ type queryDB struct {
 	seen []seenQuery
 }
 
+// queryDriver is the driver.Driver behind queryConnector. Its Open refuses,
+// because the fake is reached only through the connector.
+type queryDriver struct{}
+
+// queryConnector hands out connections to one queryDB, so that sql.OpenDB
+// can use the fake without registering a driver name.
+type queryConnector struct{ db *queryDB }
+
+// queryConn implements driver.QueryerContext, which is what lets
+// database/sql skip Prepare entirely and hand the statement over in one
+// call. A conn with only Prepare would work too, at the cost of a Stmt type
+// whose sole job is to carry the query text to the same place.
+type queryConn struct{ db *queryDB }
+
+// queryRows replays a canned result set, one row per Next.
+type queryRows struct {
+	cols []string
+	rows [][]driver.Value
+	i    int
+}
+
 // seenQuery is one query as the driver received it, after BindNamed.
 type seenQuery struct {
 	query string
@@ -85,6 +74,22 @@ type oneRow struct {
 	Code string `db:"code"`
 }
 
+// A fixture in the shape every repository uses: short names a request may
+// ask for, mapped to the SQL each one emits. unit_name comes from a JOIN,
+// and key is a second name for the primary-key expression.
+var (
+	testAllowedCols = map[string]string{
+		"id":        "t.id",
+		"key":       "t.id",
+		"code":      "t.code",
+		"title":     "t.title",
+		"unit_name": "u.name AS unit_name",
+	}
+	testDefaultCols = []string{"id", "code", "title", "unit_name"}
+	testJoinCols    = []string{"unit_name"}
+	testSortCols    = []string{"t.code", "t.title", "u.name"}
+)
+
 // selected joins expressions the way SelectClause does, so the cases below
 // read as column lists rather than as escaped strings.
 func selected(exprs ...string) string {
@@ -96,8 +101,8 @@ func selected(exprs ...string) string {
 // driverName never reaches a registry: sql.OpenDB takes the connector
 // directly, so no mysql or sqlserver driver is involved and the name's only
 // job is to pick the placeholder style through sqlx.BindType. That is
-// exactly the coupling doc.go describes, which is why the tests below run
-// under both names.
+// exactly the coupling buildDSN's doc comment describes, which is why the
+// tests below run under both names.
 func (q *queryDB) open(t *testing.T, driverName string) *sqlx.DB {
 	t.Helper()
 	db := sqlx.NewDb(sql.OpenDB(&queryConnector{db: q}), driverName)
@@ -122,27 +127,36 @@ func (q *queryDB) count() int {
 	return len(q.seen)
 }
 
+// Driver returns the driver the connector belongs to.
 func (c *queryConnector) Driver() driver.Driver { return queryDriver{} }
 
+// Columns returns the canned column names.
 func (r *queryRows) Columns() []string { return r.cols }
 
+// Connect opens a connection onto the shared queryDB.
 func (c *queryConnector) Connect(context.Context) (driver.Conn, error) {
 	return &queryConn{db: c.db}, nil
 }
 
+// Open refuses: the fake is reachable only through its connector.
 func (queryDriver) Open(string) (driver.Conn, error) {
 	return nil, errors.New(
 		"fake: this driver is only reachable through its connector")
 }
 
+// Prepare refuses. database/sql never calls it, because queryConn
+// implements QueryContext.
 func (c *queryConn) Prepare(string) (driver.Stmt, error) {
 	return nil, errors.New("fake: prepare is not supported")
 }
 
+// Begin refuses: the read helpers never start a transaction.
 func (c *queryConn) Begin() (driver.Tx, error) {
 	return nil, errors.New("fake: transactions are not supported")
 }
 
+// QueryContext records the query as the driver received it and answers
+// with the canned result, or the canned error.
 func (c *queryConn) QueryContext(
 	_ context.Context,
 	query string,
@@ -160,6 +174,7 @@ func (c *queryConn) QueryContext(
 	return &queryRows{cols: cols, rows: rows}, nil
 }
 
+// Next copies the next canned row into dest, or reports io.EOF.
 func (r *queryRows) Next(dest []driver.Value) error {
 	if r.i >= len(r.rows) {
 		return io.EOF
@@ -169,10 +184,14 @@ func (r *queryRows) Next(dest []driver.Value) error {
 	return nil
 }
 
-func (r *queryRows) Close() error { return nil }
-
+// Close releases nothing; the fake holds no resources.
 func (c *queryConn) Close() error { return nil }
 
+// Close releases nothing; the rows live in memory.
+func (r *queryRows) Close() error { return nil }
+
+// SelectClause resolves a request the way activeCols does, emits each
+// expression once, and puts the key first when the request left it out.
 func TestSelectClause(t *testing.T) {
 	all := selected("t.id", "t.code", "t.title", "u.name AS unit_name")
 	cases := []struct {
@@ -206,11 +225,13 @@ func TestSelectClause(t *testing.T) {
 // written in code, so it is the loud end of a misconfiguration.
 func TestSelectClausePanicsWhenNothingResolves(t *testing.T) {
 	allowed := map[string]string{"code": "t.code"}
-	mustPanic(t, "selectClause with unknown defaults and pk", func() {
+	mustPanic(t, "SelectClause with unknown defaults and pk", func() {
 		SelectClause([]string{"bogus"}, allowed, []string{"missing"}, "gone")
 	})
 }
 
+// NeedsJoin answers true exactly when the resolved columns include one the
+// JOIN supplies, the defaults included.
 func TestNeedsJoin(t *testing.T) {
 	cases := map[string]struct {
 		cols []string
@@ -227,7 +248,7 @@ func TestNeedsJoin(t *testing.T) {
 		got := NeedsJoin(c.cols, testAllowedCols, testDefaultCols,
 			testJoinCols)
 		if got != c.want {
-			t.Errorf("%s: needsJoin(%v) = %v, want %v",
+			t.Errorf("%s: NeedsJoin(%v) = %v, want %v",
 				name, c.cols, got, c.want)
 		}
 	}
@@ -252,12 +273,14 @@ func TestSelectClauseAndNeedsJoinAgree(t *testing.T) {
 		selectsJoined := strings.Contains(list, "u.name")
 		if joined := NeedsJoin(cols, testAllowedCols, testDefaultCols,
 			testJoinCols); joined != selectsJoined {
-			t.Errorf("cols %v: needsJoin = %v but select list %q",
+			t.Errorf("cols %v: NeedsJoin = %v but select list %q",
 				cols, joined, list)
 		}
 	}
 }
 
+// activeCols keeps known names in order, drops unknown and repeated ones,
+// and falls back to the defaults when nothing known is left.
 func TestActiveCols(t *testing.T) {
 	cases := []struct {
 		name string
@@ -283,6 +306,8 @@ func TestActiveCols(t *testing.T) {
 	}
 }
 
+// SortClause emits only allowlisted columns, each once, with a normalised
+// direction, and falls back rather than emitting an empty ORDER BY.
 func TestSortClause(t *testing.T) {
 	const fallback = "t.id DESC"
 	cases := []struct {
@@ -325,11 +350,13 @@ func TestSortClause(t *testing.T) {
 	for _, c := range cases {
 		got := SortClause(c.fields, testSortCols, fallback)
 		if got != c.want {
-			t.Errorf("%s: sortClause = %q, want %q", c.name, got, c.want)
+			t.Errorf("%s: SortClause = %q, want %q", c.name, got, c.want)
 		}
 	}
 }
 
+// GroupClause groups only by a column spelled exactly as the allowlist
+// spells it, and otherwise adds nothing.
 func TestGroupClause(t *testing.T) {
 	allowed := []string{"t.code", "t.unit_id"}
 	cases := map[string]string{
@@ -341,25 +368,28 @@ func TestGroupClause(t *testing.T) {
 	}
 	for col, want := range cases {
 		if got := GroupClause(col, allowed); got != want {
-			t.Errorf("groupClause(%q) = %q, want %q", col, got, want)
+			t.Errorf("GroupClause(%q) = %q, want %q", col, got, want)
 		}
 	}
 }
 
+// ExistsFlag wraps the subquery in the CASE that both engines accept in a
+// select list.
 func TestExistsFlag(t *testing.T) {
 	got := ExistsFlag("SELECT 1 FROM child c WHERE c.parent_id = t.id",
 		"has_children")
 	want := "CASE WHEN EXISTS (SELECT 1 FROM child c WHERE " +
 		"c.parent_id = t.id) THEN 1 ELSE 0 END AS has_children"
 	if got != want {
-		t.Errorf("existsFlag =\n %q\nwant %q", got, want)
+		t.Errorf("ExistsFlag =\n %q\nwant %q", got, want)
 	}
 }
 
+// AsText casts with the one spelling both engines accept.
 func TestAsText(t *testing.T) {
 	if got, want := AsText("t.amount"),
 		"CAST(t.amount AS CHAR(20))"; got != want {
-		t.Errorf("asText = %q, want %q", got, want)
+		t.Errorf("AsText = %q, want %q", got, want)
 	}
 }
 
@@ -388,6 +418,7 @@ func TestGetOneReportsAMissingRowAsFalse(t *testing.T) {
 	}
 }
 
+// A row that exists is scanned into dest and reported as found.
 func TestGetOneScansASingleRow(t *testing.T) {
 	q := &queryDB{
 		cols: []string{"id", "code"},

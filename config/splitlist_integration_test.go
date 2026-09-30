@@ -14,7 +14,7 @@ package config
 //	go test -tags integration -run Integration ./config
 
 import (
-	"reflect"
+	"slices"
 	"testing"
 )
 
@@ -27,14 +27,21 @@ func TestIntegrationListKeyFromARealVariable(t *testing.T) {
 	v := NewViper()
 	got := splitList(v, "zqlist.items")
 	want := []string{"status", "method", "latency"}
-	if !reflect.DeepEqual(got, want) {
+	if !slices.Equal(got, want) {
 		t.Errorf("splitList = %#v, want %#v", got, want)
 	}
 
 	// The failure it prevents, stated beside it: the default reader
-	// returns ONE element.
+	// returns ONE element. This is the premise splitList's documentation
+	// rests on, so a version of spf13/cast that splits on commas fails the
+	// test, as NewViper's premise does in section_integration_test.go,
+	// rather than leaving that documentation describing a hazard that is
+	// not there.
 	if raw := v.GetStringSlice("zqlist.items"); len(raw) != 1 {
-		t.Logf("GetStringSlice now splits on commas (%#v); splitList's "+
-			"comment describing the hazard should be revisited", raw)
+		t.Errorf("GetStringSlice read %d elements (%#v), not one: the "+
+			"whitespace-only split splitList's documentation describes "+
+			"does not hold for this version of spf13/cast, so revisit "+
+			"that comment",
+			len(raw), raw)
 	}
 }

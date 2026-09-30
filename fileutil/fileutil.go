@@ -15,6 +15,16 @@ import (
 	"unicode/utf8"
 )
 
+// plainText is what Go's sniffer reports for any file it recognises as text
+// and has no closer signature for. It is a containerSniffs value, never an
+// entry in allowedTypes; see the warning on OfficeExts.
+const plainText = "text/plain; charset=utf-8"
+
+// maxCopySuffix bounds the search for a free name in CopyUnique. A directory
+// holding ten thousand copies of one document is a runaway loop somewhere
+// else, and failing with a message beats spinning inside a syscall.
+const maxCopySuffix = 10000
+
 // The zip-backed office media types, named rather than written inline because
 // containerSniffs has to key on exactly these values and a second copy of a
 // seventy-character string is a typo waiting to become a silent
@@ -42,46 +52,32 @@ const (
 	filePerm os.FileMode = 0o644
 )
 
-// plainText is what Go's sniffer reports for any file it recognises as text
-// and has no closer signature for. It is a containerSniffs value, never an
-// entry in allowedTypes; see the warning on OfficeExts.
-const plainText = "text/plain; charset=utf-8"
-
-// maxCopySuffix bounds the search for a free name in CopyUnique. A directory
-// holding ten thousand copies of one document is a runaway loop somewhere
-// else, and failing with a message beats spinning inside a syscall.
-const maxCopySuffix = 10000
-
-// Accepted file types.
+// FallbackName is what SafeName returns for input that reduces to nothing
+// usable. It is a named constant rather than a literal because Remove has to
+// be able to tell a SUBSTITUTED fallback from a file the caller genuinely
+// stored under this name; see the guard there.
 //
-// The default table is the conservative one, scans and photographs, because a
-// package that silently accepts an .xlsx everywhere it is imported is worse
-// than one a caller has to widen on purpose. Callers that handle office
-// documents call RegisterExts(OfficeExts) at startup.
+// The word is arbitrary and safe to change; it only has to be a legal single
+// path element. Changing it does not strand existing files: a row naming the
+// OLD fallback still resolves through Path to the file on disk, and Remove's
+// guard compares against the current value, so that file stays removable.
+// What changes is only what a NEW unusable name folds onto.
 //
-// The mutex is for correctness under the race detector, not contention:
-// registration happens once at startup and the reads happen once per upload.
-var (
-	extMu    sync.RWMutex
-	extTypes = map[string]string{
-		".pdf":  "application/pdf",
-		".jpg":  "image/jpeg",
-		".jpeg": "image/jpeg",
-		".png":  "image/png",
-		".gif":  "image/gif",
-		".webp": "image/webp",
-		".tif":  "image/tiff",
-		".tiff": "image/tiff",
-		".bmp":  "image/bmp",
-	}
-	// allowedTypes is the VALUE side of extTypes, used by DetectContentType
-	// to decide whether a sniffed type is one the caller is willing to record
-	// and later hand back as a Content-Type header.
-	//
-	// Derived rather than written out so the two can never drift: registering
-	// an extension automatically admits its type here.
-	allowedTypes = deriveAllowed(extTypes)
-)
+// It carries no extension, deliberately. HasAllowedExt therefore rejects it,
+// so a file that arrived with no usable name cannot pass the extension gate
+// on a later round trip — which is the right answer, since nothing known
+// about it says what it is.
+//
+// A caller may genuinely store a file under this exact name; that is what
+// Remove's guard is for, and why the word being a common one costs nothing.
+const FallbackName = "unnamed"
+
+// errNotDir is the cause carried by the fs.PathError mkdirAll returns for a
+// path that exists as something other than a directory. It is unexported
+// because the shape is what callers match on (errors.As for *fs.PathError)
+// and a second exported sentinel for a state os.MkdirAll already models would
+// be API surface for nothing.
+var errNotDir = errors.New("not a directory")
 
 // containerSniffs records the coarser type Go's sniffer reports for formats
 // whose bytes it can only classify one layer too shallow: a ZIP with a
@@ -114,87 +110,36 @@ var containerSniffs = map[string]string{
 	rtfType:  plainText,
 }
 
-// errNotDir is the cause carried by the fs.PathError mkdirAll returns for a
-// path that exists as something other than a directory. It is unexported
-// because the shape is what callers match on (errors.As for *fs.PathError)
-// and a second exported sentinel for a state os.MkdirAll already models would
-// be API surface for nothing.
-var errNotDir = errors.New("not a directory")
-
-// FallbackName is what SafeName returns for input that reduces to nothing
-// usable. It is a named constant rather than a literal because Remove has to
-// be able to tell a SUBSTITUTED fallback from a file the caller genuinely
-// stored under this name; see the guard there.
+// Accepted file types.
 //
-// The word is arbitrary and safe to change; it only has to be a legal single
-// path element. Changing it does not strand existing files: a row naming the
-// OLD fallback still resolves through Path to the file on disk, and Remove's
-// guard compares against the current value, so that file stays removable.
-// What changes is only what a NEW unusable name folds onto.
+// The default table is the conservative one, scans and photographs, because a
+// package that silently accepts an .xlsx everywhere it is imported is worse
+// than one a caller has to widen on purpose. Callers that handle office
+// documents call RegisterExts(OfficeExts) at startup.
 //
-// It carries no extension, deliberately. HasAllowedExt therefore rejects it,
-// so a file that arrived with no usable name cannot pass the extension gate
-// on a later round trip — which is the right answer, since nothing known
-// about it says what it is.
-//
-// A caller may genuinely store a file under this exact name; that is what
-// Remove's guard is for, and why the word being a common one costs nothing.
-const FallbackName = "unnamed"
-
-// OfficeExts is a ready-made set for services that store correspondence
-// rather than scans. Pass it to RegisterExts; it is additive, so the image and
-// PDF defaults remain accepted.
-//
-// Treat it as READ-ONLY. It is an exported map, so it is writable, and
-// RegisterExts copies the entries it is handed rather than the map itself, so
-// adding to this one is a way to change what the package accepts that leaves
-// no RegisterExts call for anybody to find. Build a fresh map and register
-// that instead.
-//
-// Deliberately absent: .txt and .csv. Go's sniffer has no signature for
-// either one and reports both as plain text, so registering them takes more
-// thought than registering a format with magic bytes, and there are two ways
-// to do it that differ in how much they give away.
-//
-// The narrow one treats plain text as a CONTAINER, which is the same shape as
-// a .docx inside a zip: the sniff is not contradicting the name, it is one
-// layer too shallow to confirm it, and only the extension can say which text
-// format it holds.
-//
-//	fileutil.RegisterExt(".csv", "text/csv")
-//	fileutil.RegisterContainer("text/csv", "text/plain; charset=utf-8")
-//
-// Both lines are needed. The first alone leaves a genuine CSV sniffing as
-// text/plain, which is recognised and not accepted, so it collapses to
-// application/octet-stream and the registration achieves nothing beyond
-// letting the name through HasAllowedExt. With the second, a real CSV is
-// recorded as text/csv, HTML named .csv still collapses to generic, and no
-// OTHER extension gains anything.
-//
-// The wide one registers the sniffed type itself:
-//
-//	fileutil.RegisterExt(".txt", "text/plain; charset=utf-8")
-//
-// That admits text/plain into the accepted set, and DetectContentType TRUSTS
-// an accepted sniff, so from that point on any file whose bytes are plain
-// text is recorded as text/plain whatever it is called, including a .pdf.
-// That is honest for a caller that genuinely accepts text files and a silent
-// loosening for one that does not, which is why neither is done here.
-//
-// .rtf is present, and it is the one entry here that needs the narrow
-// treatment: RTF is ASCII text, so it sniffs as plain text like a CSV does.
-// The containerSniffs entry below is what completes its registration.
-var OfficeExts = map[string]string{
-	".doc":  "application/msword",
-	".docx": docxType,
-	".xls":  "application/vnd.ms-excel",
-	".xlsx": xlsxType,
-	".ppt":  "application/vnd.ms-powerpoint",
-	".pptx": pptxType,
-	".odt":  odtType,
-	".ods":  odsType,
-	".rtf":  rtfType,
-}
+// The mutex is for correctness under the race detector, not contention:
+// registration happens once at startup and the reads happen once per upload.
+var (
+	extMu    sync.RWMutex
+	extTypes = map[string]string{
+		".pdf":  "application/pdf",
+		".jpg":  "image/jpeg",
+		".jpeg": "image/jpeg",
+		".png":  "image/png",
+		".gif":  "image/gif",
+		".webp": "image/webp",
+		".tif":  "image/tiff",
+		".tiff": "image/tiff",
+		".bmp":  "image/bmp",
+	}
+	// allowedTypes is the VALUE side of extTypes, used by DetectContentType
+	// to decide whether a sniffed type is one the caller is willing to record
+	// and later hand back as a Content-Type header.
+	//
+	// Derived rather than written out so the two can never drift: registering
+	// an extension automatically admits its type here.
+	allowedTypes = deriveAllowed(extTypes)
+)
 
 // Upload limits.
 //
@@ -253,6 +198,64 @@ var (
 	MaxNameLen = 100
 )
 
+// OfficeExts is a ready-made set for services that store correspondence
+// rather than scans. Pass it to RegisterExts; it is additive, so the image and
+// PDF defaults remain accepted.
+//
+// Treat it as READ-ONLY. It is an exported map, so it is writable, and
+// RegisterExts copies the entries it is handed rather than the map itself, so
+// adding to this one is a way to change what the package accepts that leaves
+// no RegisterExts call for anybody to find. Build a fresh map and register
+// that instead.
+//
+// Deliberately absent: .txt and .csv. Go's sniffer has no signature for
+// either one and reports both as plain text, so registering them takes more
+// thought than registering a format with magic bytes, and there are two ways
+// to do it that differ in how much they give away.
+//
+// The narrow one treats plain text as a CONTAINER, which is the same shape as
+// a .docx inside a zip: the sniff is not contradicting the name, it is one
+// layer too shallow to confirm it, and only the extension can say which text
+// format it holds.
+//
+//	fileutil.RegisterExt(".csv", "text/csv")
+//	fileutil.RegisterContainer("text/csv", "text/plain; charset=utf-8")
+//
+// Both lines are needed. The first alone leaves a genuine CSV sniffing as
+// text/plain, which is recognised and not accepted, so it collapses to
+// application/octet-stream and the registration achieves nothing beyond
+// letting the name through HasAllowedExt. With the second, a real CSV is
+// recorded as text/csv, HTML named .csv still collapses to generic, and no
+// OTHER extension gains anything.
+//
+// The wide one registers the sniffed type itself:
+//
+//	fileutil.RegisterExt(".txt", "text/plain; charset=utf-8")
+//
+// That admits text/plain into the accepted set, and DetectContentType TRUSTS
+// an accepted sniff, so from that point on any file whose bytes are plain
+// text is recorded as text/plain whatever it is called, including a .pdf.
+// That is honest for a caller that genuinely accepts text files and a silent
+// loosening for one that does not, which is why neither is done here.
+//
+// .rtf is present, and it is the one entry here that needs the narrow
+// treatment: RTF is ASCII text, so it sniffs as plain text like a CSV does.
+// Its containerSniffs entry, above, is what completes its registration.
+var OfficeExts = map[string]string{
+	".doc":  "application/msword",
+	".docx": docxType,
+	".xls":  "application/vnd.ms-excel",
+	".xlsx": xlsxType,
+	".ppt":  "application/vnd.ms-powerpoint",
+	".pptx": pptxType,
+	".odt":  odtType,
+	".ods":  odsType,
+	".rtf":  rtfType,
+}
+
+// deriveAllowed returns the set of content types types maps to, which is
+// what allowedTypes holds. RegisterExts calls it again after every change,
+// so the set cannot fall behind the table.
 func deriveAllowed(types map[string]string) map[string]struct{} {
 	m := make(map[string]struct{}, len(types))
 	for _, ct := range types {
@@ -293,6 +296,108 @@ func stripDataURLPrefix(payload string) string {
 		return payload[comma+1:]
 	}
 	return payload
+}
+
+// reserveUnique claims a free filename inside dir by creating it exclusively,
+// returning the name it managed to claim.
+//
+// The suffix is inserted before the extension rather than appended after it,
+// so a copied ".docx" stays a ".docx". filepath.Ext returns a suffix of the
+// name (or ""), so the slice below is always in range.
+//
+// Each candidate goes back through SafeName, and that is load-bearing. Write
+// sanitises whatever name it is handed, so a candidate SafeName would alter
+// is reserved under one spelling and stored under another: the reservation
+// survives as a zero-byte file nothing will ever claim, and the name the
+// caller persists is not the name on disk. The case that reaches it is a
+// desired name that is all extension: filepath.Ext(".pdf") is the whole
+// string, so base is empty, the second candidate reads " (2).pdf", and the
+// leading space is exactly what SafeName trims.
+//
+// # The suffix can push a legal name over the column width
+//
+// This is the one place in the package that MANUFACTURES a filename rather
+// than sanitising one it was given, so it is the one place where a name that
+// fits MaxNameLen can turn into one that does not: " (2)" is four more bytes
+// and " (1000)" is seven, so a desired name sitting on the cap crosses it on
+// the second copy. CopyUnique's contract is that the caller persists the
+// returned name, so an unchecked overflow here lands as a driver truncation
+// error AFTER the bytes are on disk, precisely the outcome MaxNameLen exists
+// to prevent.
+//
+// The check is therefore on the CANDIDATE and not on the desired name, and it
+// makes CopyUnique stricter than Write, which stores whatever it is handed
+// and leaves the cap to the caller. That asymmetry is deliberate: Write's
+// name came from a client the handler has already checked, and this one came
+// from here.
+//
+// The name is refused rather than shortened to make room. Shortening produces
+// a name the caller did not ask for and cannot predict, for a case that only
+// arises when the desired name was already within a few bytes of the limit:
+// four for the second copy, eight for the last one maxCopySuffix allows.
+func reserveUnique(dir, desired string) (string, error) {
+	name := SafeName(desired)
+	ext := filepath.Ext(name)
+	base := name[:len(name)-len(ext)]
+
+	for n := 1; n <= maxCopySuffix; n++ {
+		candidate := name
+		if n > 1 {
+			candidate = SafeName(fmt.Sprintf("%s (%d)%s", base, n, ext))
+		}
+		if NameTooLong(candidate) {
+			return "", fmt.Errorf(
+				"reserving a name for %q in %q: %q is %d bytes, over the "+
+					"%s limit",
+				name,
+				dir,
+				candidate,
+				len(candidate),
+				MaxNameLabel())
+		}
+		f, err := os.OpenFile(
+			filepath.Join(dir, candidate),
+			os.O_CREATE|os.O_EXCL|os.O_WRONLY,
+			filePerm)
+		if err == nil {
+			_ = f.Close()
+			return candidate, nil
+		}
+		if !errors.Is(err, os.ErrExist) {
+			return "", fmt.Errorf(
+				"reserving %q in %q: %w",
+				candidate,
+				dir,
+				err)
+		}
+	}
+	return "", fmt.Errorf(
+		"reserving a name for %q in %q: %d variants already exist",
+		name,
+		dir,
+		maxCopySuffix)
+}
+
+// removable reports whether name names a file this package is willing to
+// delete: anything except a name SafeName folded onto FallbackName from a
+// spelling that was not already the fallback itself. See the fallback guard
+// note on Remove.
+//
+// The second half of the test is a trim rather than another SafeName call,
+// which makes it narrower than "SafeName substituted" for most routes to the
+// fallback: a name reaching it through a directory prefix, a non-whitespace
+// control byte, or an invalid UTF-8 byte is refused even though Path would
+// resolve it. All three are beyond anything that reaches a name column, and
+// the direction of the error is to leave a file rather than to delete the
+// wrong one.
+//
+// It is NOT narrower for a control byte TrimSpace itself removes. A tab or a
+// newline around the fallback trims away and the name is accepted, which is
+// the right answer rather than a gap, since Path resolves that name to the
+// fallback file, so the row does name the file being deleted.
+func removable(name string) bool {
+	return SafeName(name) != FallbackName ||
+		strings.TrimSpace(name) == FallbackName
 }
 
 // mkdirAll is os.MkdirAll with the process umask defeated on every directory
@@ -359,105 +464,18 @@ func mkdirAll(dir string, perm os.FileMode) error {
 	return nil
 }
 
-// reserveUnique claims a free filename inside dir by creating it exclusively,
-// returning the name it managed to claim.
+// HasAllowedExt reports whether name carries one of the accepted extensions.
 //
-// The suffix is inserted before the extension rather than appended after it,
-// so a copied ".docx" stays a ".docx". filepath.Ext returns a suffix of the
-// name (or ""), so the slice below is always in range.
-//
-// Each candidate goes back through SafeName, and that is load-bearing. Write
-// sanitises whatever name it is handed, so a candidate SafeName would alter
-// is reserved under one spelling and stored under another: the reservation
-// survives as a zero-byte file nothing will ever claim, and the name the
-// caller persists is not the name on disk. The case that reaches it is a
-// desired name that is all extension: filepath.Ext(".pdf") is the whole
-// string, so base is empty, the second candidate reads " (2).pdf", and the
-// leading space is exactly what SafeName trims.
-//
-// # The suffix can push a legal name over the column width
-//
-// This is the one place in the package that MANUFACTURES a filename rather
-// than sanitising one it was given, so it is the one place where a name that
-// fits MaxNameLen can turn into one that does not: " (2)" is four more bytes
-// and " (1000)" is six, so a desired name sitting on the cap crosses it on
-// the second copy. CopyUnique's contract is that the caller persists the
-// returned name, so an unchecked overflow here lands as a driver truncation
-// error AFTER the bytes are on disk, precisely the outcome MaxNameLen exists
-// to prevent.
-//
-// The check is therefore on the CANDIDATE and not on the desired name, and it
-// makes CopyUnique stricter than Write, which stores whatever it is handed
-// and leaves the cap to the caller. That asymmetry is deliberate: Write's
-// name came from a client the handler has already checked, and this one came
-// from here.
-//
-// The name is refused rather than shortened to make room. Shortening produces
-// a name the caller did not ask for and cannot predict, for a case that only
-// arises when the desired name was already within four bytes of the limit.
-func reserveUnique(dir, desired string) (string, error) {
-	name := SafeName(desired)
-	ext := filepath.Ext(name)
-	base := name[:len(name)-len(ext)]
-
-	for n := 1; n <= maxCopySuffix; n++ {
-		candidate := name
-		if n > 1 {
-			candidate = SafeName(fmt.Sprintf("%s (%d)%s", base, n, ext))
-		}
-		if NameTooLong(candidate) {
-			return "", fmt.Errorf(
-				"reserving a name for %q in %q: %q is %d bytes, over the "+
-					"%s limit",
-				name,
-				dir,
-				candidate,
-				len(candidate),
-				MaxNameLabel())
-		}
-		f, err := os.OpenFile(
-			filepath.Join(dir, candidate),
-			os.O_CREATE|os.O_EXCL|os.O_WRONLY,
-			filePerm)
-		if err == nil {
-			_ = f.Close()
-			return candidate, nil
-		}
-		if !errors.Is(err, os.ErrExist) {
-			return "", fmt.Errorf(
-				"reserving %q in %q: %w",
-				candidate,
-				dir,
-				err)
-		}
-	}
-	return "", fmt.Errorf(
-		"reserving a name for %q in %q: %d variants already exist",
-		name,
-		dir,
-		maxCopySuffix)
-}
-
-// removable reports whether name names a file this package is willing to
-// delete: anything except a name SafeName folded onto FallbackName from a
-// spelling that was not already the fallback itself. See the fallback guard
-// note on Remove.
-//
-// The second half of the test is a trim rather than another SafeName call,
-// which makes it narrower than "SafeName substituted" for most routes to the
-// fallback: a name reaching it through a directory prefix, a non-whitespace
-// control byte, or an invalid UTF-8 byte is refused even though Path would
-// resolve it. All three are beyond anything that reaches a name column, and
-// the direction of the error is to leave a file rather than to delete the
-// wrong one.
-//
-// It is NOT narrower for a control byte TrimSpace itself removes. A tab or a
-// newline around the fallback trims away and the name is accepted, which is
-// the right answer rather than a gap, since Path resolves that name to the
-// fallback file, so the row does name the file being deleted.
-func removable(name string) bool {
-	return SafeName(name) != FallbackName ||
-		strings.TrimSpace(name) == FallbackName
+// This is an extension check only, a deliberate first gate rather than the
+// whole story. It rejects the obvious mistakes (an .exe, a .zip, a stray
+// binary) at the edge of the system before any bytes are written, while
+// DetectContentType decides what the file actually is once the content is in
+// hand.
+func HasAllowedExt(name string) bool {
+	extMu.RLock()
+	defer extMu.RUnlock()
+	_, ok := extTypes[strings.ToLower(filepath.Ext(name))]
+	return ok
 }
 
 // NameTooLong reports whether name exceeds MaxNameLen.
@@ -612,20 +630,6 @@ func SafeName(name string) string {
 		return FallbackName
 	}
 	return name
-}
-
-// HasAllowedExt reports whether name carries one of the accepted extensions.
-//
-// This is an extension check only, a deliberate first gate rather than the
-// whole story. It rejects the obvious mistakes (an .exe, a .zip, a stray
-// binary) at the edge of the system before any bytes are written, while
-// DetectContentType decides what the file actually is once the content is in
-// hand.
-func HasAllowedExt(name string) bool {
-	extMu.RLock()
-	defer extMu.RUnlock()
-	_, ok := extTypes[strings.ToLower(filepath.Ext(name))]
-	return ok
 }
 
 // AllowedExts returns the accepted extensions, sorted, for use in error
@@ -872,7 +876,17 @@ func DetectContentType(name string, data []byte) string {
 // Use it only for container formats: an archive or a text encoding holding a
 // known payload. It is not a way to make a mismatched file report whatever
 // its name claims.
+//
+// Both values are trimmed, and a pair with either one empty is skipped, as
+// RegisterExts does with its own. They are compared exactly, against the
+// type registered for an extension and against the sniff, so a stray space
+// would make the declaration match nothing, and nothing would say so.
 func RegisterContainer(contentType, sniffedAs string) {
+	contentType = strings.TrimSpace(contentType)
+	sniffedAs = strings.TrimSpace(sniffedAs)
+	if contentType == "" || sniffedAs == "" {
+		return
+	}
 	extMu.Lock()
 	defer extMu.Unlock()
 	containerSniffs[contentType] = sniffedAs

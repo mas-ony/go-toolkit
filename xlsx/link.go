@@ -9,24 +9,6 @@ import (
 	"strings"
 )
 
-// winAbs matches an absolute Windows path with a drive letter, in either
-// separator style: "C:\Data\scan.pdf" or "C:/Data/scan.pdf".
-var winAbs = regexp.MustCompile(`^[A-Za-z]:[\\/]`)
-
-// Errors returned by ResolveLink.
-var (
-	// ErrNoLink means the cell carries no hyperlink.
-	ErrNoLink = errors.New("no hyperlink on the cell")
-
-	// ErrNotAFile means the hyperlink points at a web page, a mailbox, or
-	// another cell in the workbook rather than at a document on disk.
-	//
-	// Callers are expected to branch on this one: it is the difference between
-	// "this link is not the sort of thing you were looking for, try your other
-	// route" and "this link is broken".
-	ErrNotAFile = errors.New("hyperlink does not point at a file")
-)
-
 // LinkTarget is a hyperlink resolved into something the caller can act on.
 type LinkTarget struct {
 	// Path is the local filesystem path to try. Empty when the target is not a
@@ -69,6 +51,24 @@ type LinkTarget struct {
 	// extension gate applied when the file is read, not this field.
 	Foreign bool
 }
+
+// winAbs matches an absolute Windows path with a drive letter, in either
+// separator style: "C:\Data\scan.pdf" or "C:/Data/scan.pdf".
+var winAbs = regexp.MustCompile(`^[A-Za-z]:[\\/]`)
+
+// Errors returned by ResolveLink.
+var (
+	// ErrNoLink means the cell carries no hyperlink.
+	ErrNoLink = errors.New("no hyperlink on the cell")
+
+	// ErrNotAFile means the hyperlink points at a web page, a mailbox, or
+	// another cell in the workbook rather than at a document on disk.
+	//
+	// Callers are expected to branch on this one: it is the difference between
+	// "this link is not the sort of thing you were looking for, try your other
+	// route" and "this link is broken".
+	ErrNotAFile = errors.New("hyperlink does not point at a file")
+)
 
 // namesNoFile reports whether a filepath.Base result names something other
 // than a file.
@@ -123,6 +123,64 @@ func foreignTarget(slashed, target string) (LinkTarget, error) {
 		Path:    filepath.FromSlash(slashed),
 		Base:    base,
 		Foreign: true,
+	}, nil
+}
+
+// decodeURI percent-decodes a target, returning it unchanged when it is not
+// valid encoding.
+//
+// Leaving a malformed value alone rather than failing is deliberate: a raw
+// Windows path containing a percent sign — legal, and not rare in scanned
+// filenames — is not URI-encoded at all, and rejecting it would lose a link
+// that works perfectly well as written.
+//
+// The decision is all-or-nothing, which matters for the one target that
+// mixes the two: PathUnescape fails on the FIRST bad escape and this returns
+// the whole string raw, so "100% raw%20(2).pdf" keeps its literal "%20" as
+// well as its "%". Both routes into this function reach that shape — the
+// plain-path branch directly, and resolveFileURL's recovery branch after
+// url.Parse refused the target for the same bad escape — and it ends as a
+// Base with "%20" in it that no scan directory holds. Decoding what is
+// decodable would fix that case and would need a hand-rolled scanner,
+// which is more machinery than the case is worth.
+func decodeURI(s string) string {
+	if decoded, err := url.PathUnescape(s); err == nil {
+		return decoded
+	}
+	return s
+}
+
+// resolvePlainPath handles a bare path with no scheme, which is what a link
+// created by browsing to a nearby file looks like.
+func resolvePlainPath(target, baseDir string) (LinkTarget, error) {
+	// Every backslash becomes a forward slash before any test below runs, so
+	// the prefix checks and filepath.Base see one separator style whatever the
+	// workbook was written on. filepath.ToSlash is deliberately NOT also
+	// called: on Windows it would repeat exactly this replacement, and on Unix
+	// it is a no-op, so it can only ever look like it is doing something.
+	slashed := strings.ReplaceAll(target, `\`, "/")
+	base := filepath.Base(slashed)
+
+	if namesNoFile(base) {
+		return LinkTarget{}, fmt.Errorf("%w: %s", ErrNotAFile, target)
+	}
+
+	// The three absolute shapes — a UNC share, a drive letter, and a POSIX
+	// root — share an outcome rather than a reason: each names a location on
+	// the author's machine, so it is used as written and flagged Foreign
+	// instead of being joined onto the workbook directory.
+	switch {
+	case strings.HasPrefix(slashed, "//"),
+		winAbs.MatchString(slashed),
+		strings.HasPrefix(slashed, "/"):
+		return foreignTarget(slashed, target)
+	}
+
+	// Relative: resolve against the workbook's own directory, which is what
+	// Excel does when the link is followed.
+	return LinkTarget{
+		Path: filepath.Join(baseDir, filepath.FromSlash(slashed)),
+		Base: base,
 	}, nil
 }
 
@@ -233,64 +291,6 @@ func resolveFileURL(target, baseDir string) (LinkTarget, error) {
 	// An absolute POSIX path in a file URL. Absolute is absolute — it is used
 	// as given rather than joined onto the workbook directory.
 	return foreignTarget(path, target)
-}
-
-// resolvePlainPath handles a bare path with no scheme, which is what a link
-// created by browsing to a nearby file looks like.
-func resolvePlainPath(target, baseDir string) (LinkTarget, error) {
-	// Every backslash becomes a forward slash before any test below runs, so
-	// the prefix checks and filepath.Base see one separator style whatever the
-	// workbook was written on. filepath.ToSlash is deliberately NOT also
-	// called: on Windows it would repeat exactly this replacement, and on Unix
-	// it is a no-op, so it can only ever look like it is doing something.
-	slashed := strings.ReplaceAll(target, `\`, "/")
-	base := filepath.Base(slashed)
-
-	if namesNoFile(base) {
-		return LinkTarget{}, fmt.Errorf("%w: %s", ErrNotAFile, target)
-	}
-
-	// The three absolute shapes — a UNC share, a drive letter, and a POSIX
-	// root — share an outcome rather than a reason: each names a location on
-	// the author's machine, so it is used as written and flagged Foreign
-	// instead of being joined onto the workbook directory.
-	switch {
-	case strings.HasPrefix(slashed, "//"),
-		winAbs.MatchString(slashed),
-		strings.HasPrefix(slashed, "/"):
-		return foreignTarget(slashed, target)
-	}
-
-	// Relative: resolve against the workbook's own directory, which is what
-	// Excel does when the link is followed.
-	return LinkTarget{
-		Path: filepath.Join(baseDir, filepath.FromSlash(slashed)),
-		Base: base,
-	}, nil
-}
-
-// decodeURI percent-decodes a target, returning it unchanged when it is not
-// valid encoding.
-//
-// Leaving a malformed value alone rather than failing is deliberate: a raw
-// Windows path containing a percent sign — legal, and not rare in scanned
-// filenames — is not URI-encoded at all, and rejecting it would lose a link
-// that works perfectly well as written.
-//
-// The decision is all-or-nothing, which matters for the one target that
-// mixes the two: PathUnescape fails on the FIRST bad escape and this returns
-// the whole string raw, so "100% raw%20(2).pdf" keeps its literal "%20" as
-// well as its "%". Both routes into this function reach that shape — the
-// plain-path branch directly, and resolveFileURL's recovery branch after
-// url.Parse refused the target for the same bad escape — and it ends as a
-// Base with "%20" in it that no scan directory holds. Decoding what is
-// decodable would fix that case and would need a hand-rolled scanner,
-// which is more machinery than the case is worth.
-func decodeURI(s string) string {
-	if decoded, err := url.PathUnescape(s); err == nil {
-		return decoded
-	}
-	return s
 }
 
 // ResolveLink turns the raw hyperlink stored in the workbook into a local path

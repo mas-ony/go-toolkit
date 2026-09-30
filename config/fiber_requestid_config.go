@@ -21,36 +21,6 @@ import (
 	"github.com/spf13/viper"
 )
 
-// tokenSpecials is the non-alphanumeric half of the RFC 9110 "token" character
-// set, which is what an HTTP field name is allowed to contain.
-//
-// Checked because the value is written verbatim into every response header. A
-// name with a space or a colon in it is not a header Fiber will reject on the
-// way out — it is a malformed response line, and the failure surfaces at a
-// client or an intermediary rather than at startup, which is the wrong place
-// for a typo in config.yaml to be discovered.
-const tokenSpecials = "!#$%&'*+-.^_`|~"
-
-// DefaultRequestIDHeader is "X-Request-ID", and it is the only value of
-// fiber.requestid.header that the request-log field agrees with.
-//
-// The name has TWO consumers and only one of them reads the configured value:
-//
-//   - The requestid middleware, which reads fiber.requestid.header and both
-//     looks for an inbound id under that name and writes the outbound one
-//     there. Fully configurable.
-//   - The zerolog middleware's "requestId" field, which does
-//     fc.GetRespHeader(fiber.HeaderXRequestID) — a compile-time constant in
-//     gofiber/contrib/v3/zerolog. It cannot be pointed anywhere else.
-//
-// So renaming the header while "requestId" is in fiber.zerolog.fields does not
-// rename the log field's source; it removes it, and the field is emitted as an
-// empty string on every request with no error anywhere.
-// Cross-section validation rejects that pairing, which is the only reason
-// this constant is exported rather than inlined — it is what the error message
-// tells the operator to type.
-const DefaultRequestIDHeader = fiber.HeaderXRequestID
-
 // RequestIDConfig wraps requestid.Config so it participates in the standard
 // Validate/String lifecycle used by all other sub-configs.
 //
@@ -67,8 +37,8 @@ const DefaultRequestIDHeader = fiber.HeaderXRequestID
 //     requestid.FromContext(c), and that id is what ties the 500 a client saw
 //     to the two log lines that explain it.
 //
-// the application carries the full argument; the point to preserve here is
-// that the id has to exist before anything that might fail runs.
+// doc.go lays out the whole stack; the point to preserve here is that the id
+// has to exist before anything that might fail runs.
 //
 // # Where the id is readable, which is narrower than it looks
 //
@@ -90,8 +60,42 @@ type RequestIDConfig struct {
 	*requestid.Config
 }
 
+// tokenSpecials is the non-alphanumeric half of the RFC 9110 "token" character
+// set, which is what an HTTP field name is allowed to contain — and a method
+// name too, which is why FiberConfig.Validate checks request_methods entries
+// with the same set.
+//
+// Checked here because the value is written verbatim into every response
+// header. A name with a space or a colon in it is not a header Fiber will
+// reject on the way out — it is a malformed response line, and the failure
+// surfaces at a client or an intermediary rather than at startup, which is
+// the wrong place for a typo in config.yaml to be discovered.
+const tokenSpecials = "!#$%&'*+-.^_`|~"
+
+// DefaultRequestIDHeader is "X-Request-ID", and it is the only value of
+// fiber.requestid.header that the request-log field agrees with.
+//
+// The name has TWO consumers and only one of them reads the configured value:
+//
+//   - The requestid middleware, which reads fiber.requestid.header and both
+//     looks for an inbound id under that name and writes the outbound one
+//     there. Fully configurable.
+//   - The zerolog middleware's "requestId" field, which does
+//     fc.GetRespHeader(fiber.HeaderXRequestID) — a compile-time constant in
+//     gofiber/contrib/v3/zerolog. It cannot be pointed anywhere else.
+//
+// So renaming the header while "requestId" is in fiber.zerolog.fields does not
+// rename the log field's source; it removes it, and the field is emitted as an
+// empty string on every request with no error anywhere. The application's
+// cross-section validation rejects that pairing, and its message tells the
+// operator to type this value, which is the only reason the constant is
+// exported rather than inlined.
+const DefaultRequestIDHeader = fiber.HeaderXRequestID
+
 // isHTTPFieldName reports whether s is a valid HTTP field name: a non-empty
 // RFC 9110 token, i.e. letters, digits, and the characters in tokenSpecials.
+// A method name is a token as well, so FiberConfig.Validate asks the same
+// question of each fiber.request_methods entry.
 //
 // Bytes are compared rather than runes because a field name is ASCII by
 // definition — indexing a string yields bytes, and any multi-byte rune fails
@@ -162,7 +166,7 @@ func NewRequestIDConfig(v *viper.Viper) *RequestIDConfig {
 			// the default Generator, and it is also the unconditional fallback
 			// sanitizeRequestID takes when a custom Generator returns an
 			// invalid value three times running — so it is the shape to expect
-			// whatever a future Generator does.
+			// whatever Generator is installed.
 			//
 			// Length of an ADOPTED id is bounded only by
 			// fiber.read_buffer_size, since the header has to fit the read
@@ -197,22 +201,22 @@ func NewRequestIDConfig(v *viper.Viper) *RequestIDConfig {
 //     perfectly good configuration — "X-Correlation-Id" is a real convention
 //     and the middleware honours it end to end. It only breaks in combination
 //     with "requestId" in fiber.zerolog.fields, and this method cannot see
-//     that section. Cross-section validation holds both and rejects the
-//     pairing there.
+//     that section. The application's cross-section validation holds both
+//     and rejects the pairing there.
 //   - Generator and Next. Both are nil here by design; the middleware's
 //     configDefault substitutes utils.SecureToken for the nil Generator, and
 //     never consults a nil Next. Neither can be expressed in YAML. "Nil here"
 //     is all this method can speak to, and the distinction matters for
-//     Generator. the application hands *cfg.RequestID.Config to requestid.New
+//     Generator: an application hands *cfg.RequestID.Config to requestid.New
 //     by value, so a Generator assigned onto that copy — the shape
 //     RecoverConfig.WithStackTraceHandler and ZerologConfig.WithLogger both
 //     use deliberately — would be invisible from here, exactly as a
 //     LimiterMiddleware assigned at the registration site is invisible to
-//     LimiterConfig.Validate. Nothing does that today. String below therefore
-//     DERIVES what it reports about this field rather than asserting it, which
-//     is the only defence available: a check here could not see the
-//     assignment, but a log line that reads the field cannot describe a
-//     generator that is not the one running.
+//     LimiterConfig.Validate. String below therefore DERIVES what it reports
+//     about this field rather than asserting it, which is the only defence
+//     available: a check here could not see the assignment, but a log line
+//     that reads the field cannot describe a generator that is not the one
+//     running.
 //
 // Every check appends rather than returning early, so one restart surfaces
 // every fiber.requestid.* problem at once.
@@ -252,13 +256,12 @@ func (c *RequestIDConfig) Validate() error {
 // Printing a value copy (%v on RequestIDConfig, not &RequestIDConfig) bypasses
 // it and dumps the struct fields directly.
 //
-// The nil check is TWO-PART, mirroring Validate's. zerolog reaches this method
-// through fmt.Stringer, and its own guard — `if val == nil` in
-// internal/json.AppendStringer — is an INTERFACE nil, which neither a typed
-// nil pointer nor a wrapper around a nil embedded pointer satisfies. So it
-// calls String on both, and without the second half the half-built one panics
-// inside the startup log line rather than rendering a placeholder.
-// The section list carries the argument.
+// The nil check is TWO-PART, mirroring Validate's. A logger's own guard, such
+// as zerolog's `if val == nil` before it calls a Stringer, compares an
+// INTERFACE with nil, which neither a typed nil pointer nor a wrapper around
+// a nil embedded pointer satisfies. Without the second half, the half-built
+// one would panic inside the startup log line instead of rendering a
+// placeholder.
 //
 // # Generator is DERIVED, not asserted
 //
