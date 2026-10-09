@@ -117,6 +117,9 @@ var sections = []section{
 	{"WhatsAppConfig", func(v *viper.Viper) SectionConfig {
 		return NewWhatsAppConfig(v)
 	}, (*WhatsAppConfig)(nil)},
+	{"TelegramConfig", func(v *viper.Viper) SectionConfig {
+		return NewTelegramConfig(v)
+	}, (*TelegramConfig)(nil)},
 }
 
 // numberWords maps each count word a header may open with, "Zero" to
@@ -384,6 +387,9 @@ func TestStringNeverPrintsASecret(t *testing.T) {
 		}},
 		{"notification.email.password", func(v *viper.Viper) SectionConfig {
 			return NewEmailConfig(v)
+		}},
+		{"notification.telegram.token", func(v *viper.Viper) SectionConfig {
+			return NewTelegramConfig(v)
 		}},
 	} {
 		t.Run(c.key, func(t *testing.T) {

@@ -9,7 +9,8 @@ package config
 // shell running go test cannot leak in.
 //
 // Nothing here calls t.Parallel: t.Setenv panics in a parallel test,
-// because the environment belongs to the whole process.
+// because the environment belongs to the whole process, and so does
+// fileutil.MaxFileBytes, which some cases set.
 
 import (
 	"bytes"
@@ -38,6 +39,9 @@ const committedConfig = "../../config.yaml"
 const (
 	testUser     = "svc_user"
 	testPassword = "s3cret;pass"
+
+	// testBotToken has the shape BotFather issues and is worth nothing.
+	testBotToken = "123456789:AAFakeTokenForTests_0123456789abcdefg"
 )
 
 // base is a small configuration New accepts once the credentials come
@@ -45,8 +49,8 @@ const (
 // required keys, session mode, and no notification channel. Each case
 // in TestRules changes it one concern at a time.
 //
-// body_limit is the exact floor validateCrossSection accepts under the
-// default fileutil.MaxFileBytes: 20 MiB of file plus the 1 MiB
+// body_limit is the exact floor validateCrossSection accepts under
+// fileutil's default MaxFileBytes: 20 MiB of file plus the 1 MiB
 // multipartAllowance.
 const base = `
 app:
@@ -100,6 +104,13 @@ const (
 		"    cookie_secure: true\n"
 )
 
+// bodyLimitLine and idHeaderLine are single lines of base, verbatim,
+// for the cases that leave them out with cut.
+const (
+	bodyLimitLine = "  body_limit: 22020096  # the floor: 20 MiB + 1 MiB\n"
+	idHeaderLine  = "    header: X-Request-ID\n"
+)
+
 // databaseBlock is base's database section, verbatim, for the case that
 // leaves it out with cut.
 const databaseBlock = "database:\n" +
@@ -129,6 +140,15 @@ var jwtMode = env{
 var prefork = env{
 	"FIBER_LISTEN_ENABLE_PREFORK":                "true",
 	"FIBER_LISTEN_PREFORK_SHUTDOWN_GRACE_PERIOD": "15s",
+}
+
+// telegramOn switches telegram on with the two keys its section
+// requires, the token supplied the way a deployment would supply it, from
+// the environment.
+var telegramOn = env{
+	"NOTIFICATION_CHANNELS":         "telegram",
+	"NOTIFICATION_TELEGRAM_TOKEN":   testBotToken,
+	"NOTIFICATION_TELEGRAM_TIMEOUT": "30s",
 }
 
 // isolate blanks every environment variable that routes to a section,
@@ -234,6 +254,16 @@ func merge(a, b env) env {
 	return out
 }
 
+// setMaxFileBytes sets fileutil.MaxFileBytes, the upload cap the
+// body_limit rule reads, for the rest of the test and restores it when
+// the test ends.
+func setMaxFileBytes(t *testing.T, n int) {
+	t.Helper()
+	prev := fileutil.MaxFileBytes
+	fileutil.MaxFileBytes = n
+	t.Cleanup(func() { fileutil.MaxFileBytes = prev })
+}
+
 // logSections runs Log on c and returns each section line's config
 // field, keyed by section name, along with the whole log as written. The
 // source line has no section field, so it appears only in the latter.
@@ -252,11 +282,30 @@ func logSections(t *testing.T, c *Config) (map[string]string, string) {
 	return got, buf.String()
 }
 
+// logSource runs Log on c and returns the file field of the
+// "configuration source" line, the first one written.
+func logSource(t *testing.T, c *Config) string {
+	t.Helper()
+	var buf bytes.Buffer
+	c.Log(zerolog.New(&buf))
+	line, _, _ := strings.Cut(buf.String(), "\n")
+	var entry struct{ File string }
+	if err := json.Unmarshal([]byte(line), &entry); err != nil {
+		t.Fatalf("log line %q: %v", line, err)
+	}
+	return entry.File
+}
+
 // TestCommittedConfigLoads loads the repository's own config.yaml with
 // the environment supplying what the file leaves blank, as a deployment
 // would. If this fails, the committed file cannot start the service.
-// FIBER_JWT_SECRET is supplied although the file selects session mode,
-// so the test keeps passing if the file switches to jwt.
+// FIBER_JWT_SECRET is supplied although the file selects no
+// authentication mode, so the test keeps passing if the file switches
+// to jwt.
+//
+// fileutil.MaxFileBytes is left at its default, the cap main runs with.
+// A main that assigns another cap has to assign it here too, or this
+// test checks the committed body_limit against the wrong floor.
 func TestCommittedConfigLoads(t *testing.T) {
 	isolate(t)
 	t.Setenv("DATABASE_USERNAME", testUser)
@@ -264,6 +313,40 @@ func TestCommittedConfigLoads(t *testing.T) {
 	t.Setenv("FIBER_JWT_SECRET", jwtMode["FIBER_JWT_SECRET"])
 	if _, err := New(committedConfig); err != nil {
 		t.Fatalf("%s does not load:\n%v", committedConfig, err)
+	}
+}
+
+// TestCommittedConfigLoadsWithEveryChannel switches all three channels on
+// in the repository's own config.yaml, supplying only the token the file
+// leaves blank. The examples in the file are then known to be valid when
+// they are used, and not only while their channels are off, and the
+// values it gives telegram are the ones the section reads.
+func TestCommittedConfigLoadsWithEveryChannel(t *testing.T) {
+	isolate(t)
+	t.Setenv("DATABASE_USERNAME", testUser)
+	t.Setenv("DATABASE_PASSWORD", testPassword)
+	t.Setenv("FIBER_JWT_SECRET", jwtMode["FIBER_JWT_SECRET"])
+	t.Setenv("NOTIFICATION_CHANNELS", "whatsapp,email,telegram")
+	t.Setenv("NOTIFICATION_TELEGRAM_TOKEN", testBotToken)
+
+	c, err := New(committedConfig)
+	if err != nil {
+		t.Fatalf("%s does not load with every channel on:\n%v",
+			committedConfig, err)
+	}
+	if got := strings.Join(c.Notification.Channels, ","); got !=
+		"whatsapp,email,telegram" {
+		t.Errorf("channels = %q, want all three", got)
+	}
+
+	got, raw := logSections(t, c)
+	const want = "Token=(set) APIURL=https://api.telegram.org (default) " +
+		"Timeout=30s Async=true"
+	if got["telegram"] != want {
+		t.Errorf("telegram logged %q, want %q", got["telegram"], want)
+	}
+	if strings.Contains(raw, testBotToken) {
+		t.Errorf("the startup log carries the bot token:\n%s", raw)
 	}
 }
 
@@ -287,6 +370,54 @@ func TestMissingFileIsNamed(t *testing.T) {
 	wantErr(t, err, "absent.yaml not found", "app.name is required")
 }
 
+// TestEnvironmentAloneLoads gives New no file to read, in both ways
+// that can happen: no path at all, and a path that does not exist. The
+// environment supplies everything the always-validated sections and
+// the cross-section rules require, which is a complete configuration,
+// so both load, and the startup log's source line says which of the
+// two it was.
+func TestEnvironmentAloneLoads(t *testing.T) {
+	set := env{
+		"APP_NAME":                      "test-service",
+		"APP_VERSION":                   "1.0.0",
+		"APP_ENV":                       "development",
+		"APP_PORT":                      "3000",
+		"APP_LOCATION":                  "Asia/Jakarta",
+		"FIBER_BODY_LIMIT":              "22020096",
+		"FIBER_LIMITER_MAX":             "100",
+		"FIBER_LIMITER_EXPIRATION":      "1m",
+		"FIBER_LIMITER_STRATEGY":        "sliding",
+		"FIBER_LISTEN_SHUTDOWN_TIMEOUT": "10s",
+		"FIBER_REQUESTID_HEADER":        "X-Request-ID",
+		"FIBER_ZEROLOG_FIELDS":          "error,status,requestId",
+	}
+	absent := filepath.Join(t.TempDir(), "absent.yaml")
+	for _, c := range []struct {
+		name string
+		path string
+		want string
+	}{
+		{"no path", "", "(none: environment only)"},
+		{"missing file", absent,
+			absent + " (not found: environment only)"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			isolate(t)
+			for name, value := range set {
+				t.Setenv(name, value)
+			}
+			cfg, err := New(c.path)
+			if err != nil {
+				t.Fatalf("refused:\n%v", err)
+			}
+			if got := logSource(t, cfg); got != c.want {
+				t.Errorf("file logged %q, want %q",
+					got, c.want)
+			}
+		})
+	}
+}
+
 // TestUnparseableFileIsRefused feeds New malformed YAML. It has to be
 // refused as a read error, not mistaken for a missing file and replaced
 // by the environment.
@@ -296,6 +427,27 @@ func TestUnparseableFileIsRefused(t *testing.T) {
 	wantErr(t, err, "reading ")
 	if strings.Contains(err.Error(), "not found") {
 		t.Errorf("a parse error reads as a missing file:\n%v", err)
+	}
+}
+
+// TestFileIsYAMLWhateverItsName loads base from a file whose extension
+// names no format. New has to parse it as YAML all the same, where
+// Viper left to itself would go by the extension and refuse the file,
+// and the startup log's source line has to name the file as given.
+func TestFileIsYAMLWhateverItsName(t *testing.T) {
+	isolate(t)
+	t.Setenv("DATABASE_USERNAME", testUser)
+	t.Setenv("DATABASE_PASSWORD", testPassword)
+	path := filepath.Join(t.TempDir(), "service.conf")
+	if err := os.WriteFile(path, []byte(base), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := New(path)
+	if err != nil {
+		t.Fatalf("%s does not load:\n%v", path, err)
+	}
+	if got := logSource(t, cfg); got != path {
+		t.Errorf("file logged %q, want %q", got, path)
 	}
 }
 
@@ -334,6 +486,19 @@ func TestRules(t *testing.T) {
 		{"a channel not chosen is not validated", env{
 			"NOTIFICATION_EMAIL_HOST": "smtp.example.go.id",
 		}, ""},
+		{"telegram demands its section",
+			env{"NOTIFICATION_CHANNELS": "telegram"},
+			"notification.telegram.token is required"},
+		{"telegram with its section", telegramOn, ""},
+		{"a chosen telegram section is held to its rules",
+			merge(telegramOn, env{
+				"NOTIFICATION_TELEGRAM_API_URL": "http://bot.example.go.id",
+			}), "clear text"},
+		// The timeout alone would fail the telegram section's own
+		// checks, so loading shows the section was skipped.
+		{"telegram not chosen is not validated", env{
+			"NOTIFICATION_TELEGRAM_TIMEOUT": "1ns",
+		}, ""},
 
 		// plan: an optional section is validated once any of its keys
 		// is supplied. Left out, as in base, it is not.
@@ -342,6 +507,9 @@ func TestRules(t *testing.T) {
 			"fiber.client.retries cannot be negative"},
 		{"a supplied optional section that is valid",
 			env{"FIBER_CLIENT_RETRIES": "2"}, ""},
+		{"a supplied notification section is validated",
+			env{"NOTIFICATION_CHANNELS": "sms"},
+			"notification.channels[0] is not a channel"},
 
 		// validateCrossSection, one rule at a time. base sits exactly
 		// on the body_limit floor, so "the base loads" is that rule's
@@ -353,6 +521,10 @@ func TestRules(t *testing.T) {
 		{"a unix socket demands app.host",
 			env{"FIBER_LISTEN_LISTENER_NETWORK": "unix"},
 			"app.host is required when"},
+		{"a unix socket refuses a blank app.host", env{
+			"FIBER_LISTEN_LISTENER_NETWORK": "unix",
+			"APP_HOST":                      "  ",
+		}, "app.host is required when"},
 		{"a unix socket with app.host", env{
 			"FIBER_LISTEN_LISTENER_NETWORK": "unix",
 			"APP_HOST":                      "/run/service.sock",
@@ -360,6 +532,9 @@ func TestRules(t *testing.T) {
 
 		{"a renamed id header while requestId is logged",
 			env{"FIBER_REQUESTID_HEADER": "X-Correlation-ID"},
+			`fiber.requestid.header must be "X-Request-ID"`},
+		{"a re-cased id header while requestId is logged",
+			env{"FIBER_REQUESTID_HEADER": "x-request-id"},
 			`fiber.requestid.header must be "X-Request-ID"`},
 		{"a renamed id header while requestId is not logged", env{
 			"FIBER_REQUESTID_HEADER": "X-Correlation-ID",
@@ -394,6 +569,38 @@ func TestRules(t *testing.T) {
 	}
 }
 
+// TestEveryProblemIsReported breaks two sections and two cross-section
+// rules in one configuration. New has to name all of it in one error,
+// or fixing what it did report would only uncover the rest on the next
+// restart: a failed section must hide neither another section nor the
+// cross-section rules, and a rule must report every value it refuses.
+func TestEveryProblemIsReported(t *testing.T) {
+	_, err := load(t, base, env{
+		"APP_ENV":                "prod",
+		"FIBER_LIMITER_MAX":      "0",
+		"FIBER_REQUESTID_HEADER": "X-Correlation-ID",
+		"FIBER_ZEROLOG_LEVELS":   "error,debug,trace",
+	})
+	wantErr(t, err,
+		"app.env must be one of",
+		"fiber.limiter.max must be a positive number",
+		`fiber.requestid.header must be "X-Request-ID"`,
+		"fiber.zerolog.levels includes debug",
+		"fiber.zerolog.levels includes trace")
+}
+
+// TestAbsentIDHeaderIsReportedOnce leaves fiber.requestid.header out
+// while requestId is logged. The requestid section reports the missing
+// key, and the header rule in validateCrossSection has to stay silent
+// rather than report the same gap again as a wrong spelling.
+func TestAbsentIDHeaderIsReportedOnce(t *testing.T) {
+	_, err := load(t, cut(t, base, idHeaderLine), nil)
+	wantErr(t, err, "fiber.requestid.header is required")
+	if strings.Contains(err.Error(), "fiber.requestid.header must be") {
+		t.Errorf("the absent header is reported twice:\n%v", err)
+	}
+}
+
 // TestAddr covers the shapes Addr produces: host:port with an empty or
 // a specific host, a bracketed IPv6 address, and a bare socket path on
 // a unix listener.
@@ -421,20 +628,28 @@ func TestAddr(t *testing.T) {
 }
 
 // TestLogShowsWhatIsInUse checks the startup log's section lines. The
-// case supplies keys for two switched-off sections, fiber.jwt through
-// its secret and notification.email through its host, so the log has
-// to mark those inactive with the reason, mark untouched optional and
-// switched-off sections as not configured, print a section in use with
-// its values, and never print a credential.
+// case supplies keys for three switched-off sections, fiber.jwt through
+// its secret, notification.email through its host and
+// notification.whatsapp through its one key, so the log has to mark
+// those inactive with the reason, mark untouched optional and
+// switched-off sections as not configured, print the sections in use
+// with their values, and never print a credential.
+//
+// notification itself stays not configured, which holds only while each
+// channel's prefix routes the channel's variables to it and not to the
+// section above it.
 func TestLogShowsWhatIsInUse(t *testing.T) {
 	c := mustLoad(t, base, env{
-		"FIBER_JWT_SECRET":        jwtMode["FIBER_JWT_SECRET"],
-		"NOTIFICATION_EMAIL_HOST": "smtp.example.go.id",
+		"FIBER_JWT_SECRET":            jwtMode["FIBER_JWT_SECRET"],
+		"NOTIFICATION_EMAIL_HOST":     "smtp.example.go.id",
+		"NOTIFICATION_WHATSAPP_ASYNC": "true",
 	})
 	got, raw := logSections(t, c)
 	for name, want := range map[string]string{
 		"notification": "<not configured>",
-		"whatsapp":     "<not configured>",
+		"telegram":     "<not configured>",
+		"whatsapp": "<inactive: whatsapp is not in " +
+			"notification.channels>",
 		"email": "<inactive: email is not in " +
 			"notification.channels>",
 		"jwt":    "<inactive: fiber.auth.mode is session>",
@@ -443,6 +658,15 @@ func TestLogShowsWhatIsInUse(t *testing.T) {
 		if got[name] != want {
 			t.Errorf("section %s logged %q, want %q",
 				name, got[name], want)
+		}
+	}
+	for _, name := range []string{
+		"app", "database", "fiber", "auth", "session", "limiter",
+		"listen", "recover", "requestid", "zerolog",
+	} {
+		if v := got[name]; v == "" || strings.HasPrefix(v, "<") {
+			t.Errorf("section %s logged %q, want its values",
+				name, v)
 		}
 	}
 	if !strings.HasPrefix(got["session"], "AbsoluteTimeout=8h0m0s ") {
@@ -454,6 +678,47 @@ func TestLogShowsWhatIsInUse(t *testing.T) {
 		if strings.Contains(raw, secret) {
 			t.Errorf("the startup log carries %q", secret)
 		}
+	}
+}
+
+// TestLogShowsTelegramWithoutItsToken switches telegram on and checks the
+// startup line it gets: the values the environment gave it, and the token
+// reported as set and never printed.
+func TestLogShowsTelegramWithoutItsToken(t *testing.T) {
+	c := mustLoad(t, base, telegramOn)
+	got, raw := logSections(t, c)
+
+	const want = "Token=(set) APIURL=https://api.telegram.org (default) " +
+		"Timeout=30s Async=false"
+	if got["telegram"] != want {
+		t.Errorf("telegram logged %q, want %q", got["telegram"], want)
+	}
+	if strings.Contains(raw, testBotToken) {
+		t.Errorf("the startup log carries the bot token:\n%s", raw)
+	}
+}
+
+// TestLogMarksASuppliedTelegramSectionInactive supplies the token without
+// choosing the channel. The section is skipped, and the log says it was
+// supplied and why it is not in use. That holds only while the section's
+// prefix routes NOTIFICATION_TELEGRAM_* to it and not to notification,
+// which would otherwise count the variable as its own.
+func TestLogMarksASuppliedTelegramSectionInactive(t *testing.T) {
+	c := mustLoad(t, base, env{"NOTIFICATION_TELEGRAM_TOKEN": testBotToken})
+	got, raw := logSections(t, c)
+
+	for name, want := range map[string]string{
+		"telegram": "<inactive: telegram is not in " +
+			"notification.channels>",
+		"notification": "<not configured>",
+	} {
+		if got[name] != want {
+			t.Errorf("section %s logged %q, want %q",
+				name, got[name], want)
+		}
+	}
+	if strings.Contains(raw, testBotToken) {
+		t.Errorf("the startup log carries the bot token:\n%s", raw)
 	}
 }
 
@@ -509,16 +774,9 @@ func TestLogNamesItsSource(t *testing.T) {
 		{"no file", Config{}, "(none: environment only)"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			var buf bytes.Buffer
-			c.cfg.Log(zerolog.New(&buf))
-			var entry struct{ File string }
-			err := json.Unmarshal(buf.Bytes(), &entry)
-			if err != nil {
-				t.Fatalf("log line %q: %v", buf.String(), err)
-			}
-			if entry.File != c.want {
+			if got := logSource(t, &c.cfg); got != c.want {
 				t.Errorf("file logged %q, want %q",
-					entry.File, c.want)
+					got, c.want)
 			}
 		})
 	}
@@ -547,21 +805,58 @@ func TestDatabaseIsOptional(t *testing.T) {
 	wantErr(t, err, "database.host is required")
 }
 
-// Fiber enforces its own 4 MiB where fiber.body_limit is 0 or absent, and
-// the floor is held against what Fiber enforces rather than against the
-// literal 0. Under the default file cap that is refused, and the message
-// says what 0 turns into; under a cap small enough for 4 MiB to cover,
-// the same file loads.
+// TestBodyLimitIsJudgedAsFiberEnforcesIt leaves fiber.body_limit out.
+// Fiber then enforces its own 4 MiB, and the floor is held against that
+// rather than against the literal 0: under fileutil's default 20 MiB
+// cap it is refused, with a message saying what 0 turns into, and under
+// a 2 MiB cap, which 4 MiB covers, the same file loads.
 func TestBodyLimitIsJudgedAsFiberEnforcesIt(t *testing.T) {
-	noLimit := cut(t, base,
-		"  body_limit: 22020096  # the floor: 20 MiB + 1 MiB\n")
+	noLimit := cut(t, base, bodyLimitLine)
 
 	_, err := load(t, noLimit, nil)
 	wantErr(t, err, "fiber.body_limit must be at least 22020096",
 		"which Fiber replaces with its own 4194304")
 
-	prev := fileutil.MaxFileBytes
-	fileutil.MaxFileBytes = 2 << 20
-	t.Cleanup(func() { fileutil.MaxFileBytes = prev })
+	setMaxFileBytes(t, 2<<20)
 	mustLoad(t, noLimit, nil)
+}
+
+// TestBodyLimitFollowsTheFileCap raises fileutil.MaxFileBytes before
+// New, the way main has to. The floor moves with it, so a cap raised in
+// code is caught at startup when config.yaml's body_limit was left
+// behind.
+func TestBodyLimitFollowsTheFileCap(t *testing.T) {
+	setMaxFileBytes(t, 50<<20)
+
+	_, err := load(t, base, nil)
+	wantErr(t, err, "fiber.body_limit must be at least 53477376",
+		"fileutil.MaxFileBytes (52428800)")
+
+	mustLoad(t, base, env{"FIBER_BODY_LIMIT": "53477376"})
+}
+
+// TestBodyLimitWithoutAFileCap switches fileutil's cap off, which 0 and
+// every negative value do alike. The floor is then the multipart
+// envelope alone, and the refusal says that no cap is set instead of
+// quoting a cap of 0 bytes.
+func TestBodyLimitWithoutAFileCap(t *testing.T) {
+	for _, c := range []struct {
+		name     string
+		maxBytes int
+	}{
+		{"zero", 0},
+		{"negative", -1},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			setMaxFileBytes(t, c.maxBytes)
+
+			_, err := load(t, base,
+				env{"FIBER_BODY_LIMIT": "1048575"})
+			wantErr(t, err,
+				"fiber.body_limit must be at least 1048576",
+				"sets no file cap")
+
+			mustLoad(t, base, env{"FIBER_BODY_LIMIT": "1048576"})
+		})
+	}
 }

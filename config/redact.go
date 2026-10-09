@@ -1,9 +1,9 @@
 package config
 
-// Quoting a URL that may carry a credential, for the one section that holds
-// such a URL: fiber.client.base_url. Like splitlist.go, it lives outside that
-// section's file, so that each section file stays the authoritative list of
-// its own keys and nothing else.
+// Quoting a URL that may carry a credential, for the sections that hold such
+// a URL: fiber.client.base_url and notification.telegram.api_url. Like
+// splitlist.go, it lives outside those sections' files, so that each section
+// file stays the authoritative list of its own keys and nothing else.
 //
 // A credential can reach an error message by two routes, and each helper
 // closes one: redactUserinfo masks the URL as written, and urlParseCause

@@ -1,9 +1,12 @@
 package xlsx
 
-// Tests for value.go: the separator rules in Decimal, both epochs and every
-// text layout in Date along with the serials no DATE column can hold, the
-// range guards in Int, the byte-measured cap in StrMax, the emptiness rules
-// in Str and Trim, and a date that keeps its day through datetime's Value.
+// Tests for value.go: the separator rules and scientific notation in
+// Decimal, the strict notation of DecimalDotGrouped, both epochs and every
+// text layout in Date along with the serials no DATE column can hold and
+// the month names of both languages, the range guards in Int, the
+// byte-measured cap in StrMax, the emptiness rules in Str and Trim, the
+// escapes Unescape decodes, and a date that keeps its day through
+// datetime's Value.
 
 import (
 	"strconv"
@@ -38,6 +41,20 @@ func TestDecimal(t *testing.T) {
 		{"1,234.56", "1234.56", false},  // both: dot last → decimal
 		{"1285 m2", "1285", false},      // stray unit stripped
 		{" 1 285 ", "1285", false},      // space grouping stripped
+		{".5", "0.5", false},            // below one, written bare
+		{",75", "0.75", false},          // the same, decimal comma
+		{"-.5", "-0.5", false},
+		{"$.50", "0.5", false},
+		{"Rp.5", "5", false},     // the dot of an abbreviation
+		{"... 5", "5", false},    // the last of a row of dots
+		{".234.567", "", true},   // a decimal point, then another
+		{"1285,", "1285", false}, // a closing separator: a typo
+		{"1285.5,", "1285.5", false},
+		{"12,5.", "12.5", false},
+		{"1.234,56.", "1234.56", false},
+		{"1.234.567.", "1234567", false},
+		{"Rp 5.000,-", "5000", false}, // closed by its decimal comma
+		{"5,000.", "5000", false},     // and by its decimal point
 		{"abc", "", true},
 	}
 	for _, c := range cases {
@@ -119,9 +136,19 @@ func TestDate(t *testing.T) {
 		{"2005-09-23", "2005-09-23", false},
 		{"23/09/2005", "2005-09-23", false}, // dd/mm/yyyy — day-first
 		{"3/4/2005", "2005-04-03", false},   // 3 April, NOT 4 March
+		{"03/04/2005", "2005-04-03", false}, // the same day, padded
 		{"23-09-2005", "2005-09-23", false},
+		{"3-4-2005", "2005-04-03", false}, // the unpadded dashed form
 		{"23.09.2005", "2005-09-23", false},
 		{"3.4.2005", "2005-04-03", false}, // the unpadded dotted form
+		{"2005-09-23 14:30:00", "2005-09-23", false},
+		{"2005-09-23T14:30:00", "2005-09-23", false},
+		{"2005-09-23T14:30:00Z", "2005-09-23", false},
+		// A stated offset keeps the day it was written with, whatever
+		// zone the test runs in.
+		{"2005-09-23T23:30:00-05:00", "2005-09-23", false},
+		{"0", "", true}, // a serial has to be positive
+		{"-36573", "", true},
 		{"not a date", "", true},
 	}
 	for _, c := range cases {
@@ -164,18 +191,23 @@ func TestDateHonoursThe1904Epoch(t *testing.T) {
 	}
 }
 
-// Each of these reaches excelize as a float and comes back, without the guard,
-// as a nil error and a date no column can hold. "NaN" and "Inf" get there
-// because ParseFloat accepts both, case-insensitively, and because a NaN
-// compares false against everything — including the `serial <= 0` check that
-// looks like it covers them. "1e308" gets there because the day arithmetic
-// overflows and wraps into a negative year. The years are -5005 and -4713.
+// None of these is a date, and each would reach excelize as a float if the
+// serial were not bounded first. ParseFloat accepts "NaN" and "Inf" in any
+// letter case, and a NaN compares false against everything, a check on zero
+// included. What the conversion makes of a serial past the range of int
+// depends on the processor: a year before 1 on amd64, which a check on the
+// result would still catch, and a day in the 2190s on arm64, which it would
+// not.
 //
-// The check is on the RESULT rather than the input, which is what makes one
-// guard cover all three and stay correct under either epoch.
+// The two eighteen-digit serials hold the guard in place on every processor.
+// Each fits an int, wraps the day arithmetic, and comes back under the 1900
+// epoch as an ordinary date, 30 December 1899 and 7 March 2023, so a Date
+// that judged only the result would accept both.
 func TestDateRejectsNonFiniteAndOutOfRangeSerials(t *testing.T) {
 	for _, in := range []string{
-		"NaN", "nan", "Inf", "inf", "+Inf", "-Inf", "1e308", "2958466",
+		"NaN", "nan", "Inf", "inf", "+Inf", "-Inf", "1e308", "1e19",
+		"9223372036854775808", "144115188075855872",
+		"144115188075900872", "2958466",
 	} {
 		for _, date1904 := range []bool{false, true} {
 			got, err := Date(in, date1904)
@@ -188,18 +220,33 @@ func TestDateRejectsNonFiniteAndOutOfRangeSerials(t *testing.T) {
 	}
 }
 
-// The upper bound is a real date, not a round number: serial 2958465 is
-// 9999-12-31, the last day a DATE column holds, and it must still parse.
+// The upper bound is a real date, not a round number: 9999-12-31 is the last
+// day a DATE column holds, and it must still parse. It is serial 2958465
+// under the 1900 epoch and 2957003 under 1904, which reaches every day 1462
+// serials sooner, and one serial on is past it under either.
+//
+// Under 1904 that next serial is still below the bound Date holds its input
+// to, so it is the check on the year that refuses it.
 func TestDateAcceptsTheLastRepresentableDay(t *testing.T) {
-	got, err := Date("2958465", false)
-	if err != nil || got == nil {
-		t.Fatalf("Date(2958465): %v", err)
-	}
-	if want := "9999-12-31"; got.Time.Format("2006-01-02") != want {
-		t.Errorf(
-			"Date(\"2958465\") = %s, want %s",
-			got.Time.Format("2006-01-02"),
-			want)
+	for _, c := range []struct {
+		date1904   bool
+		last, past string
+	}{
+		{false, "2958465", "2958466"},
+		{true, "2957003", "2957004"},
+	} {
+		got, err := Date(c.last, c.date1904)
+		if err != nil || got == nil {
+			t.Fatalf("Date(%q, %v): %v", c.last, c.date1904, err)
+		}
+		if day := got.Time.Format("2006-01-02"); day != "9999-12-31" {
+			t.Errorf("Date(%q, %v) = %s, want 9999-12-31",
+				c.last, c.date1904, day)
+		}
+		if got, err := Date(c.past, c.date1904); err == nil {
+			t.Errorf("Date(%q, %v) = %v, want an error",
+				c.past, c.date1904, got)
+		}
 	}
 }
 
@@ -231,19 +278,25 @@ func TestInt(t *testing.T) {
 // On amd64 the conversion wraps to the minimum int and the round-trip catches
 // every case, so this test passes with the guard removed. On arm64 it
 // saturates: int(2^63) is the maximum int, float64 of that rounds back to
-// exactly 2^63, the round-trip compares equal, and "9223372036854775808" is
-// read as 9223372036854775807. That is the case a developer on Apple silicon
-// meets and CI on amd64 does not, so the assertion is written to pin the
-// answer rather than the platform.
+// exactly 2^63, the round-trip compares equal, and "9223372036854775808.0"
+// is read as 9223372036854775807. That is the case a developer on Apple
+// silicon meets and CI on amd64 does not, so the assertion is written to pin
+// the answer rather than the platform.
 //
-// The last entry and the constant after the loop are the boundary. 2^63 is
-// the first float64 no int64 holds; 2^63-1024 is the largest one that fits,
-// and it must still parse — a guard written with the wrong comparison
-// rejects both.
+// The boundary is written with a fraction of zero on both sides of it,
+// because digits alone are read as an integer and never meet the guard.
+// 2^63 is the first float64 no int64 holds; 2^63-1024 is the largest one
+// that fits, and it must still parse — a guard written with the wrong
+// comparison rejects both.
+//
+// Digits alone that run past int are refused on their own account, and the
+// last entry is why they are kept from the float: it rounds onto the minimum
+// there, which is in range, and would come back as a number nobody typed.
 func TestIntRejectsNonFiniteAndOutOfRangeValues(t *testing.T) {
 	for _, in := range []string{
 		"NaN", "nan", "Inf", "inf", "+Inf", "-Inf",
-		"1e308", "-1e308", "9223372036854775808",
+		"1e308", "-1e308", "9223372036854775808.0",
+		"9223372036854775808", "-9223372036854775809",
 	} {
 		if got, err := Int(in); err == nil {
 			t.Errorf("Int(%q) = %v, want an error", in, *got)
@@ -254,7 +307,7 @@ func TestIntRejectsNonFiniteAndOutOfRangeValues(t *testing.T) {
 	if strconv.IntSize < 64 {
 		t.Skip("int is narrower than 64 bits on this target")
 	}
-	const largestThatFits = "9223372036854774784" // 2^63 - 1024
+	const largestThatFits = "9223372036854774784.0" // 2^63 - 1024
 	got, err := Int(largestThatFits)
 	if err != nil || got == nil {
 		t.Fatalf("Int(%q): %v", largestThatFits, err)
@@ -331,12 +384,18 @@ func TestStrIsNilForAnEmptyCell(t *testing.T) {
 
 // A non-breaking space arriving via copy-paste must not make a populated cell
 // look empty, nor an otherwise identical value fail to compare equal.
+//
+// The last case is the one that needs Trim's own rewrite. TrimSpace takes a
+// non-breaking space off either end by itself, and leaves one in the middle.
 func TestTrimNormalisesNonBreakingSpace(t *testing.T) {
 	if got := Trim("\u00a0"); got != "" {
 		t.Errorf("Trim(NBSP) = %q, want empty", got)
 	}
 	if got := Trim("\u00a035.002\u00a0"); got != "35.002" {
 		t.Errorf("Trim = %q, want 35.002", got)
+	}
+	if got := Trim("Jl.\u00a0Merdeka\u00a045"); got != "Jl. Merdeka 45" {
+		t.Errorf("Trim = %q, want the spaces inside made ordinary", got)
 	}
 }
 
@@ -407,6 +466,161 @@ func TestDateKeepsItsDayThroughValueWestOfGreenwich(t *testing.T) {
 		if day := tm.Format("2006-01-02"); day != "2000-02-17" {
 			t.Errorf("Date(%q) reaches the driver as %s, want 2000-02-17",
 				in, day)
+		}
+	}
+}
+
+// A number in scientific notation is how a numeric cell arrives when the
+// program that wrote it put it so, and the separator rules stop at the E:
+// read by them, "1.5E7" is 1.5, wrong by ten million and with no error.
+// So it is read whole, and a power of ten no DECIMAL column holds is
+// refused rather than written out as a gigabyte of digits.
+func TestDecimalReadsScientificNotation(t *testing.T) {
+	for in, want := range map[string]string{
+		"1.5E7":    "15000000",
+		"1.5e+07":  "15000000",
+		"-2.5E-1":  "-0.25",
+		" 1E3 ":    "1000",
+		".5E1":     "5",
+		"1E65":     "1" + strings.Repeat("0", 65),
+		"12345E-3": "12.345",
+	} {
+		got, err := Decimal(in)
+		if err != nil || got == nil || got.String() != want {
+			t.Errorf("Decimal(%q) = %v, %v; want %s", in, got, err, want)
+		}
+	}
+	// The value is not printed when one comes back: written out, the
+	// last of these is a gigabyte of digits.
+	for _, in := range []string{"1E66", "1E-66", "1E+999999999"} {
+		got, err := Decimal(in)
+		if got != nil || err == nil || !strings.Contains(err.Error(), in) {
+			t.Errorf("Decimal(%q) returned a value: %t, and %v; want "+
+				"an error quoting it", in, got != nil, err)
+		}
+	}
+}
+
+// DecimalDotGrouped reads the notation it is named for and nothing else.
+// A full stop only ever groups thousands, so 300.000 is three hundred
+// thousand, which Decimal reads as three hundred; a comma only ever
+// starts the decimals; and a cell in any other form is refused.
+func TestDecimalDotGrouped(t *testing.T) {
+	for in, want := range map[string]string{
+		"":             "",
+		"0":            "0",
+		"500":          "500",
+		"300.000":      "300000",
+		"1.300.000":    "1300000",
+		"1.234.567,89": "1234567.89",
+		"-5.000":       "-5000",
+		"1250000":      "1250000",
+		" 75.000 ":     "75000",
+		"12,5":         "12.5",
+	} {
+		got, err := DecimalDotGrouped(in)
+		switch {
+		case err != nil:
+			t.Errorf("DecimalDotGrouped(%q): %v", in, err)
+		case want == "" && got != nil:
+			t.Errorf("DecimalDotGrouped(%q) = %s, want nil", in, got)
+		case want != "" && (got == nil || got.String() != want):
+			t.Errorf("DecimalDotGrouped(%q) = %v, want %s", in, got, want)
+		}
+	}
+	for _, in := range []string{
+		"1,234.56", "1.23", "12.3456", "1.000.00", "Rp 5.000",
+		"5.000,", "lima ribu", "1e3", "1.5E7", "+5.000",
+	} {
+		got, err := DecimalDotGrouped(in)
+		if err == nil {
+			t.Errorf("DecimalDotGrouped(%q) = %v, want an error", in, got)
+			continue
+		}
+		if !strings.Contains(err.Error(), in) {
+			t.Errorf("DecimalDotGrouped(%q): the error %q does not "+
+				"quote the cell", in, err)
+		}
+	}
+}
+
+// A date spelled out may name its month in Indonesian, in full, by its
+// usual abbreviation, or under the older spellings Pebruari and Nopember,
+// in any letter case, and English names read beside them, in full or
+// abbreviated. A day its month does not have is refused, in either
+// language, and so is a date with anything written after its year.
+func TestDateReadsIndonesianMonths(t *testing.T) {
+	for in, want := range map[string]string{
+		"2 Januari 2026":   "2026-01-02",
+		"17 agustus 2025":  "2025-08-17",
+		"28 Pebruari 2026": "2026-02-28",
+		"30 Nopember 2026": "2026-11-30",
+		"1 MEI 2026":       "2026-05-01",
+		"05 Okt 2026":      "2026-10-05",
+		"17 Agu 2025":      "2025-08-17",
+		"24  Des  2026":    "2026-12-24",
+		"9 April 2026":     "2026-04-09",
+		"2 January 2026":   "2026-01-02",
+		"5 Oct 2026":       "2026-10-05",
+		"31 Desember 2026": "2026-12-31",
+		"29 Februari 2024": "2024-02-29",
+		"1 September 2026": "2026-09-01",
+		"3 Juni 2026":      "2026-06-03",
+		"14 Juli 2026":     "2026-07-14",
+		"21 Maret 2026":    "2026-03-21",
+	} {
+		got, err := Date(in, false)
+		if err != nil || got == nil || got.Format("2006-01-02") != want {
+			t.Errorf("Date(%q) = %v, %v; want %s", in, got, err, want)
+		}
+	}
+	for _, in := range []string{
+		"31 Februari 2026", "29 Pebruari 2026", "0 Januari 2026",
+		"2 Januari 0", "32 Mei 2026", "2 Smarch 2026", "2 Januar 2026",
+		"Januari 2026", "2 Januari", "2 Januari 2026 10:00",
+	} {
+		got, err := Date(in, false)
+		if err == nil || !strings.Contains(err.Error(), in) {
+			t.Errorf("Date(%q) = %v, %v; want an error quoting it",
+				in, got, err)
+		}
+	}
+}
+
+// One table serves both languages only because they never disagree: no
+// spelling in it names one month in Indonesian and another in English.
+// Each entry is offered to time.Parse as English, and wherever English
+// reads it at all it has to read the same month. "Jan", "Feb", "Mar",
+// "Jun" and "Jul" are the names that make this worth holding; "Mei" and
+// "Des" are among the ones English does not know.
+func TestNoMonthNameMeansTwoMonths(t *testing.T) {
+	for name, month := range bulan {
+		for _, layout := range []string{"2 January 2006", "2 Jan 2006"} {
+			got, err := time.Parse(layout, "1 "+name+" 2026")
+			if err == nil && got.Month() != month {
+				t.Errorf("%q is %v in Indonesian and %v in English",
+					name, month, got.Month())
+			}
+		}
+	}
+}
+
+// Unescape decodes the escapes a workbook writes a character as when its
+// XML cannot hold it, leaves alone what only looks like one, and decodes
+// the escaped underscore once, so the literal text of an escape survives.
+func TestUnescape(t *testing.T) {
+	for in, want := range map[string]string{
+		"baris 1_x000D_\nbaris 2": "baris 1\r\nbaris 2",
+		"_x005F_x000D_":           "_x000D_",
+		"tab_x0009_tab":           "tab\ttab",
+		"kode_x":                  "kode_x",
+		"_x00e9_":                 "\u00e9",
+		"half _xD83D_ a pair":     "half _xD83D_ a pair",
+		"_x12G4_":                 "_x12G4_",
+		"no escape at all":        "no escape at all",
+	} {
+		if got := Unescape(in); got != want {
+			t.Errorf("Unescape(%q) = %q, want %q", in, got, want)
 		}
 	}
 }

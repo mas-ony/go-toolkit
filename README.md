@@ -35,6 +35,7 @@ go get github.com/mas-ony/go-toolkit
 | `logger`     | zerolog configured per environment                 |
 | `request`    | Fiber route and query parameter helpers            |
 | `response`   | The JSON envelope every handler returns            |
+| `telegram`   | Sends text or documents as a Telegram bot          |
 | `whatsapp`   | Pairs a device and sends text or documents         |
 | `xlsx`       | Reads a workbook against an expected layout        |
 
@@ -60,6 +61,7 @@ Sections, and the key prefix each is nested behind:
 | Notification | `notification`          | Channels in use                   |
 | WhatsApp     | `notification.whatsapp` | Sync or async sending             |
 | Email        | `notification.email`    | SMTP relay, TLS, sender, async    |
+| Telegram     | `notification.telegram` | Token, API URL, timeout, async    |
 | Fiber        | `fiber`                 | Server and router settings        |
 | Auth         | `fiber.auth`            | Session, JWT, or none             |
 | JWT          | `fiber.jwt`             | Secret and expiry                 |
@@ -75,18 +77,25 @@ Every section implements `SectionConfig` — `Validate() error` and
 `String() string` — so one list drives both the startup check and the
 startup log line.
 
-The Fiber sections embed the middleware's own config type, so each drops
-straight into its constructor: `fiber.New(*cfg.Fiber.Config)`,
-`limiter.New(*cfg.Limiter.Config)`. Two need a value only the application
-holds — build the access logger from `cfg.Zerolog.WithLogger(log)` and
-the recover middleware from `cfg.Recover.WithStackTraceHandler(h)`.
-Skipping either is not an error: the middleware falls back to its own
-stderr writer, and the service logs in two formats.
+Seven of the Fiber sections — Fiber, Limiter, Listen, Recover, RequestID,
+Session and Zerolog — embed the framework's or the middleware's own
+config type, so each drops straight into the call that takes it:
+`fiber.New(*cfg.Fiber.Config)`, `limiter.New(*cfg.Limiter.Config)`. Auth,
+JWT and Client are plain structs. Two carry a method for a value only the
+application holds — build the access logger from
+`cfg.Zerolog.WithLogger(log)` and the recover middleware from
+`cfg.Recover.WithStackTraceHandler(h)`. Skipping either is not an error:
+the middleware falls back to its own stderr writer, and the service logs
+in two formats. Fiber's `ErrorHandler` and Listen's `GracefulContext` are
+the application's as well, assigned on the copy it passes: without the
+first an error answers in plain text, and without the second
+`fiber.listen.shutdown_timeout` is read by nothing.
 
-The four middleware sections assume one order, outermost first, and each
-section's documentation says which guarantee its position carries: every
-request logged, a panic's stack trace carrying the request id, a panic in
-the limiter recovered.
+Four of them configure the middleware every request passes through —
+Zerolog, RequestID, Recover and Limiter — and assume one order, outermost
+first. Each section's documentation says which guarantee its position
+carries: every request logged, a panic's stack trace carrying the request
+id, a panic in the limiter recovered.
 
 ```go
 app.Use(fiberzerolog.New(cfg.Zerolog.WithLogger(log)))
@@ -111,8 +120,12 @@ which keys exist at all.
 key for, reading both the process environment and every key registered on
 the Viper — the file's, and any set or defaulted in code. Swapping an
 unsupplied section for `AbsentSection` spares it validation and keeps its
-zero values out of the startup log, where `expiration=0s` reads as a
-setting somebody chose rather than as no setting at all.
+zero values out of the startup log, where `Timeout=0s` reads as a
+setting somebody chose rather than as no setting at all. Swap only a
+section the service can run without: one it needs stays in the list as
+itself and is validated, so a deployment that leaves out a key it
+requires is refused, with the key named, rather than started on a zero
+value.
 
 The environment half matches variable names by prefix, so a
 `DATABASE_URL` exported for another tool marks `database` as supplied.
@@ -138,9 +151,13 @@ sections := []config.Section{
         Value: config.NewEmailConfig(v)},
 }
 
+// The sections this service runs without. Any other is validated even
+// when nothing supplied it, so its missing keys are named at startup.
+optional := map[string]bool{"database": true, "email": true}
+
 supplied := config.SuppliedSections(v, sections)
 for i, s := range sections {
-    if !supplied.Configured(s.Name) {
+    if optional[s.Name] && !supplied.Configured(s.Name) {
         sections[i].Value = config.AbsentSection{}
     }
 }
@@ -188,35 +205,45 @@ breaks it fails `go test ./...` instead of leaving a stale example behind.
 ### Notification channels
 
 `notification.channels` chooses the channels in use — `whatsapp`,
-`email`, both, or neither — and each channel is configured by the section
-named after it. Each carries its own `async`, because a WhatsApp document
-upload and an SMTP conversation are different waits, and a deployment may
-want one in the background and the other waited for.
+`email`, `telegram`, any of them together, or none — and each channel is
+configured by the section named after it. Each carries its own `async`,
+because a WhatsApp document upload and an SMTP conversation are different
+waits, and a deployment may want one in the background and another waited
+for.
 
 ```go
 notif := config.NewNotificationConfig(v)
 
-var mailer *email.Service  // nil: every send returns ErrNotConfigured
+var mailer *email.Service // nil: every send returns ErrNotConfigured
 if notif.Enabled(config.ChannelEmail) {
     mailer, err = email.New(config.NewEmailConfig(v), log)
     if err != nil {
-        return err  // chosen, so a missing section is fatal too
+        return err // chosen, so a missing section is fatal too
     }
 }
 
-var wa *whatsapp.Service  // nil: NOT safe to call, so guard each send
+var bot *telegram.Service // nil: every send returns ErrNotConfigured
+if notif.Enabled(config.ChannelTelegram) {
+    bot, err = telegram.New(config.NewTelegramConfig(v), log)
+    if err != nil {
+        return err // chosen, so a missing section is fatal too
+    }
+}
+
+var wa *whatsapp.Service // nil: NOT safe to call, so guard each send
 if notif.Enabled(config.ChannelWhatsApp) {
     wa, err = whatsapp.New(log)
     if err != nil {
-        return err  // ErrNotPaired if the QR window closed
+        return err // ErrNotPaired if the QR window closed
     }
 }
 ```
 
 Leaving a channel out of the list switches it off and keeps its section.
-The two services differ when switched off: a nil email `*Service` answers
-every send with `ErrNotConfigured`, while a nil WhatsApp one panics, so
-WhatsApp sends sit behind `notif.Enabled(config.ChannelWhatsApp)`.
+The services differ when switched off: a nil email or telegram `*Service`
+answers every send with `ErrNotConfigured`, while a nil WhatsApp one
+panics, so WhatsApp sends sit behind
+`notif.Enabled(config.ChannelWhatsApp)`.
 
 ## Database
 
@@ -262,7 +289,7 @@ startup ping early.
 `SetDialect` and `Configure` are process-wide and belong at startup,
 before the first repository is constructed. Until `SetDialect` runs,
 every helper that needs the grammar panics rather than guess an engine.
-`Configure` is a plain variable, so calling it while requests are in
+`Configure` writes a plain variable, so calling it while requests are in
 flight is a data race; `SetDialect` is atomic, but a query built while it
 changes can still mix both grammars.
 
@@ -303,10 +330,11 @@ let a builder leave a `JOIN` out.
 
 Table references are qualified rather than left bare, because a bare name
 resolves against the connection's default database and is right only by
-coincidence. The prefix is rendered by whoever knows the driver — three
-parts on SQL Server, two on MySQL — and `Qualify` joins it to the name,
-quoting only when the name would not parse bare on both engines (`user`
-is reserved in T-SQL, `rank` in MySQL).
+coincidence. A qualified name has three parts on SQL Server and two on
+MySQL, so the prefix is rendered by whoever knows the driver, and
+`Qualify` joins it to the table name, quoting that name only when it
+would not parse bare on both engines (`user` is reserved in T-SQL, `rank`
+in MySQL).
 
 ```go
 database.Qualify("app2026.dbo", "invoice")     // app2026.dbo.invoice
@@ -413,16 +441,16 @@ asked for too much notices.
 
 `DefaultPage`, `DefaultLimit` and `MaxLimit` are package variables. A
 service that serves wider pages assigns them at startup, before the first
-request. Strings the helpers return are cloned, because they would
-otherwise point into a request buffer the framework recycles under
-keep-alive.
+request. Strings the helpers return are cloned: without
+`fiber.immutable` they would point into a request buffer the framework
+reuses once the handler returns.
 
 ### response
 
 One envelope for every response, success or failure.
 
 ```go
-return c.JSON(response.OK("created", item))
+return c.Status(201).JSON(response.OK("created", item))
 return c.Status(404).JSON(response.Fail("invoice not found"))
 return c.JSON(response.OKList("ok", items))
 return c.JSON(response.OK("ok",
@@ -449,6 +477,9 @@ c, err := httpclient.New(cfg.Client, httpclient.Options{
     Headers:        map[string]string{"X-App": "example"},
     Log:            log,
 })
+if err != nil {
+    return err
+}
 
 var out httpclient.Envelope[Invoice]
 err = c.Do(ctx, fiber.MethodGet,
@@ -462,14 +493,20 @@ ceiling of 8s, with no jitter. POST gets one attempt unless
 whose first attempt landed writes a second row.
 
 A non-2xx yields an `*httpclient.Error` carrying the status, the method,
-the path and whatever message the envelope held; `errors.Is` reaches
-`ErrNotFound`, `ErrConflict` and `ErrUnprocessable`, the statuses worth
-branching on. Error bodies are capped on the way out, and the message
-carried on the error is capped shorter still.
+the URL and the message the envelope held, or the body itself when it is
+no envelope. Once the retries are spent it arrives wrapped, so reach it
+with `errors.As`; `errors.Is` reaches `ErrNotFound`, `ErrConflict` and
+`ErrUnprocessable`, the statuses worth branching on. A non-2xx body is
+capped at 1 MiB as it is copied out of the transport, and the message
+carried on the error is cut at 200 characters, with `...` marking the
+cut.
 
-A base URL carrying a credential is refused, and no error repeats one,
+A base URL carrying userinfo is refused, and no error repeats one,
 including the fragment of a malformed URL that `url.Parse` would quote,
-which for a password holding a `/` is the whole password. A credential
+which for a password holding a `/` is the password up to that slash. The
+exception is a password that begins with `/`, `?` or `#`, or with digits
+and then one of them: `url.Parse` finds a host where userinfo was meant,
+so the URL passes and every error naming it quotes it whole. A credential
 belongs in `fiber.client.token` or a header.
 
 ## Spreadsheets
@@ -488,7 +525,7 @@ cols := []xlsx.Column{
 
 wb, err := xlsx.Open(path, xlsx.Layout{
     Sheet:     "Data",
-    HeaderRow: 6,   // GroupRow defaults to the row above
+    HeaderRow: 6, // GroupRow defaults to the row above
     FirstRow:  8,
 })
 if err != nil {
@@ -497,7 +534,7 @@ if err != nil {
 defer wb.Close()
 
 if err := wb.VerifyHeaders(cols); err != nil {
-    return err  // *xlsx.LayoutError, wrap it with your own advice
+    return err // *xlsx.LayoutError, wrap it with your own advice
 }
 
 for _, row := range wb.DataRows(cols) {
@@ -525,7 +562,44 @@ without an error: text dates are read day-first only, so `03/04/2005` is
 3 April; a lone `.` or `,` in a number is a decimal point, so `1,234` is
 1.234; and the 1904 epoch is taken from the workbook, where a wrong one
 shifts every date by four years and a day. Read the package documentation
-before importing a workbook from another locale.
+before importing a workbook from another locale. A column known to be
+written as `1.234.567,89` is read without the guess by
+`DecimalDotGrouped`, and a written date may name its month in English or
+in Indonesian.
+
+An upload is opened where it is, in memory, and a program's export is
+laid out from its captions:
+
+```go
+wb, err := xlsx.OpenBytes(data, xlsx.Layout{
+    HeaderRow: 5, GroupRow: -1, FirstRow: 6,
+})
+if err != nil {
+    // ErrNotWorkbook, ErrTooLarge and *TruncatedError are safe to
+    // show the sender; anything else wraps excelize's own error.
+    return err
+}
+// The grid stays readable after Close. Only links need the workbook
+// open: on a closed one Hyperlink answers "" and Link ErrClosed.
+_ = wb.Close()
+
+cols := xlsx.ColumnsFromA("Kode SKPD", "Nama SKPD", "Nilai")
+if err := wb.VerifyHeaders(cols); err != nil {
+    return err
+}
+```
+
+The workbook is checked before it is read: content that is no ZIP
+archive or lists no sheet is refused, and so is one whose ZIP directory
+alone says it would expand past `MaxUnzippedBytes`, a variable set to
+1 GiB. After the rows are read they are held against the sheet's XML,
+because excelize takes the first fault in it for the end of the sheet and
+would hand back the rows above it as all there is. The sheet is kept as
+the text of its cells, and opening it never asks excelize for its model
+of every cell, which is what lets a large export be read at all;
+`Hyperlink` and `Link` do ask for that model, on first use. `HasMacros`
+reports a VBA project for a caller with a policy on them, and `Unescape`
+decodes the `_x000D_` escapes some writers leave in a cell.
 
 ### importer
 
@@ -630,12 +704,12 @@ complete old file or the complete new one and never a truncated prefix.
 Extensions are allowlisted — PDF and the common image types by default;
 `RegisterExts(OfficeExts)` adds the office formats and `RegisterExt` any
 other — and `DetectContentType` will only report a type the allowlist
-admits, so a `.pdf` full of text never comes back as `text/plain`. A text
-format such as CSV also needs `RegisterContainer`, or a genuine file
-sniffs as plain text and is recorded as `application/octet-stream`.
-`MaxFileBytes` (20 MiB) and `MaxNameLen` (100 bytes) are variables;
-`MaxNameLen` mirrors a database column width, so widen the column before
-raising it.
+admits or the generic `application/octet-stream`, so a `.pdf` full of
+text never comes back as `text/plain`. A text format such as CSV also
+needs `RegisterContainer`, or a genuine file sniffs as plain text and is
+recorded as `application/octet-stream`. `MaxFileBytes` (20 MiB) and
+`MaxNameLen` (100 bytes) are variables; `MaxNameLen` mirrors a database
+column width, so widen the column before raising it.
 
 ### document
 
@@ -645,6 +719,9 @@ the file on disk is `1.PDF`.
 
 ```go
 idx, err := document.NewIndex(dir, true)
+if err != nil {
+    return err
+}
 log.Info().Int("files", idx.Count()).
     Int("skipped", idx.Skipped()).Send()
 
@@ -708,7 +785,7 @@ A thin wrapper over `whatsmeow` with a pure-Go SQLite credential store.
 ```go
 svc, err := whatsapp.New(log)
 if err != nil {
-    return err  // ErrNotPaired if the QR window closed
+    return err // ErrNotPaired if the QR window closed
 }
 defer svc.Disconnect()
 
@@ -783,6 +860,48 @@ is uploaded, and the error unwraps to `*textproto.Error`: 4xx is worth
 retrying, 5xx is not. `ErrInvalidAddress` marks a stored address that
 does not parse. Each entry holds one address, never a list.
 
+### telegram
+
+Sends notifications as a Telegram bot, over the Bot API with the standard
+library's `net/http`. Building the service is shown under
+[Notification channels](#notification-channels).
+
+```go
+err = bot.SendText(ctx, "123456789", "Laporan sudah siap")
+err = bot.SendDocument(ctx, "-1001234567890", pdf,
+    "realisasi.pdf", "Laporan realisasi Triwulan III")
+```
+
+A chat is a numeric id, negative for a group or channel, or `@username`
+for a public channel. A person cannot be written to by username: the bot
+reaches them only after they have started it, so store the id their first
+message carries. An empty chat, blank text or an empty document is a
+silent no-op, and a chat that is neither a number nor `@name` is
+`ErrInvalidChatID`.
+
+Text goes as plain text, so nothing needs escaping. The Bot API takes 4096
+characters of text and 1024 of caption; more is `ErrTooLong`, returned
+before any request. A blank document name is sent as `document`.
+
+Without any `notification.telegram.*` key, `New` returns
+`ErrNotConfigured`, which is fatal where telegram is chosen. A nil
+`*Service` returns the same error from every send rather than panic, so
+call sites need no guard.
+
+The token is part of every request URL. Errors and logs from the package
+never carry it, a redirect is never followed, and an `http://` API URL is
+refused unless it is on loopback.
+
+Every send is bounded by `notification.telegram.timeout` and by the
+context. Under `notification.telegram.async`, send on
+`context.WithoutCancel(ctx)` and pass copies of the arguments, since Fiber
+reuses request memory once the handler returns.
+
+A nil error means the API accepted the message, not that it was read. A
+refusal is an `*APIError` with Telegram's own code and description: 403
+when the person blocked the bot, 400 for a chat that does not exist, and
+429 with `RetryAfter` when sending too fast. Nothing retries.
+
 ## Testing
 
 ```
@@ -845,11 +964,11 @@ racing — the ones a unit test would have to assume rather than assert.
   value somebody chose. Cell coercion and query parameters both rely on
   the distinction.
 - **Startup state is set once, at startup.** The SQL grammar and table
-  prefix, the paging defaults, the upload limits and allowlist, and the
-  import registry are process-wide. Most are plain variables read without
-  synchronisation, so changing one while requests are in flight is a data
-  race; `SetDialect` and the allowlist are synchronised, and changing
-  them mid-flight is merely a bug.
+  prefix, the paging defaults, the upload limits and allowlist, the
+  workbook size cap, and the import registry are process-wide. Most are
+  plain variables read without synchronisation, so changing one while
+  requests are in flight is a data race; `SetDialect` and the allowlist
+  are synchronised, and changing them mid-flight is merely a bug.
 - **The doc comment carries the reasoning.** What a function does is in
   the signature; why it does it that way, and what breaks if it changes,
   is in `doc.go` and above the declaration.

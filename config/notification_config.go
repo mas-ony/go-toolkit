@@ -12,9 +12,10 @@ package config
 // NewViper; see the package documentation.
 //
 // Each channel has a section of its own nested here and named after it:
-// notification.whatsapp.* in notification_whatsapp_config.go and
-// notification.email.* in notification_email_config.go. This key chooses
-// which channels send; their sections say how.
+// notification.whatsapp.* in notification_whatsapp_config.go,
+// notification.email.* in notification_email_config.go and
+// notification.telegram.* in notification_telegram_config.go. This key
+// chooses which channels send; their sections say how.
 
 import (
 	"errors"
@@ -65,10 +66,11 @@ import (
 // the server has stopped accepting requests.
 type NotificationConfig struct {
 	// Channels lists the channels in use: ChannelWhatsApp, ChannelEmail,
-	// both, or neither. It is read as a YAML sequence, or as a string
-	// separated by commas or by spaces, and NewNotificationConfig
-	// lowercases and trims each entry. Empty means no channel sends, which
-	// is also what a deployment without this section gets.
+	// ChannelTelegram, any of them together, or none. It is read as a YAML
+	// sequence, or as a string separated by commas or by spaces, and
+	// NewNotificationConfig lowercases and trims each entry. Empty means no
+	// channel sends, which is also what a deployment without this section
+	// gets.
 	Channels []string
 }
 
@@ -77,6 +79,7 @@ type NotificationConfig struct {
 const (
 	ChannelWhatsApp = "whatsapp"
 	ChannelEmail    = "email"
+	ChannelTelegram = "telegram"
 )
 
 // validChannels is the allowlist checked by NotificationConfig.Validate.
@@ -87,6 +90,7 @@ const (
 var validChannels = map[string]struct{}{
 	ChannelWhatsApp: {},
 	ChannelEmail:    {},
+	ChannelTelegram: {},
 }
 
 // normaliseChannel returns the form a channel name is compared in:
@@ -155,8 +159,8 @@ func (c *NotificationConfig) Enabled(channel string) bool {
 //     and whether notification.email was supplied is another section's
 //     answer. The application sees both, and answers it by validating a
 //     chosen channel's section whether or not anything supplied it; the
-//     email package refuses an empty section on its own account too, as
-//     email.ErrNotConfigured.
+//     email and telegram packages refuse an empty section on their own
+//     account too, as ErrNotConfigured.
 //   - Whether any service actually honours the choice. It is passed to each
 //     notifying service by hand at wiring time; a path added tomorrow that
 //     ignores it is invisible from here.
@@ -176,12 +180,13 @@ func (c *NotificationConfig) Validate() error {
 	for i, ch := range c.Channels {
 		if _, ok := validChannels[normaliseChannel(ch)]; !ok {
 			errs = append(errs, fmt.Errorf("notification.channels[%d] is "+
-				"not a channel (got %q): want %s or %s, since any other "+
-				"spelling is never enabled and nothing reports it",
+				"not a channel (got %q): want %s, %s or %s, since any "+
+				"other spelling is never enabled and nothing reports it",
 				i,
 				ch,
 				ChannelWhatsApp,
-				ChannelEmail))
+				ChannelEmail,
+				ChannelTelegram))
 		}
 	}
 

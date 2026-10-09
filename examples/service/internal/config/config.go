@@ -11,7 +11,7 @@
 //	cfg, err := config.New("config.yaml")
 //	if err != nil {
 //		fmt.Fprintln(os.Stderr, err)
-//		os.Exit(1)
+//		os.Exit(2)
 //	}
 //	log := logger.New(cfg.App.Env)
 //	cfg.Log(log)
@@ -19,19 +19,26 @@
 // Whether a section is validated depends on what switches it:
 //
 //   - fiber.jwt and fiber.session are switched by fiber.auth.mode, and
-//     notification.whatsapp and notification.email by
-//     notification.channels. A switched-on section is validated even
-//     when nothing supplied it, so its missing keys are named at
-//     startup; a switched-off one is skipped even when supplied. An
-//     absent fiber.auth.mode switches both auth sections off, as an
-//     absent notification.channels switches off both channels.
+//     notification.whatsapp, notification.email and
+//     notification.telegram by notification.channels. A switched-on
+//     section is validated even when nothing supplied it, so its missing
+//     keys are named at startup; a switched-off one is skipped even when
+//     supplied. An absent fiber.auth.mode switches both auth sections
+//     off, as an absent notification.channels switches off every channel.
 //   - database, notification, fiber.auth and fiber.client are optional:
 //     each is validated once any of its keys is supplied, by the file or
 //     the environment.
 //   - Every other section is always validated.
 //
-// fiber.body_limit is checked against fileutil.MaxFileBytes, so a
-// service that changes that limit assigns it before calling New.
+// fiber.body_limit is checked against fileutil.MaxFileBytes, the upload
+// size cap, which is set in code rather than configured. A caller that
+// changes the cap assigns it before calling New, or the check holds the
+// body limit against the old value.
+//
+// New reads configuration and nothing else: it opens no file but the
+// one at path and connects to nothing. Whether the database answers is
+// for the caller to check at startup, once a logger exists to report
+// it.
 package config
 
 import (
@@ -65,12 +72,13 @@ type inactive string
 //
 // Every section field is non-nil, whether or not this deployment uses
 // the section. One it does not use still holds whatever its keys read
-// as: zero values when nothing supplied them, which email.New answers
-// with email.ErrNotConfigured and httpclient.New refuses by name, or
-// the supplied values of a section that is switched off. Check the
-// switch (Auth.IsSession, Auth.IsJWT or Notification.Enabled) before
-// relying on a switched section. Only validation and the startup log
-// treat an unused section differently; see plan.
+// as: zero values when nothing supplied them, which email.New and
+// telegram.New answer with ErrNotConfigured and httpclient.New refuses
+// as an empty base URL, or the supplied values of a section that is
+// switched off. Check the switch (Auth.IsSession, Auth.IsJWT or
+// Notification.Enabled) before relying on a switched section. Only
+// validation and the startup log treat an unused section differently;
+// see plan.
 type Config struct {
 	// App is app.*: service identity, runtime environment, bind
 	// address and time zone.
@@ -94,6 +102,10 @@ type Config struct {
 	// Email is notification.email.*: the SMTP relay mail is handed to.
 	// In use only while notification.channels lists email.
 	Email *config.EmailConfig
+
+	// Telegram is notification.telegram.*: the bot messages are sent
+	// as. In use only while notification.channels lists telegram.
+	Telegram *config.TelegramConfig
 
 	// Fiber is fiber.*: the HTTP server's own settings.
 	Fiber *config.FiberConfig
@@ -191,6 +203,8 @@ func (c *Config) sectionList() []config.Section {
 		{Name: "whatsapp", Prefix: "notification.whatsapp",
 			Value: c.WhatsApp},
 		{Name: "email", Prefix: "notification.email", Value: c.Email},
+		{Name: "telegram", Prefix: "notification.telegram",
+			Value: c.Telegram},
 		{Name: "fiber", Prefix: "fiber", Value: c.Fiber},
 		{Name: "auth", Prefix: "fiber.auth", Value: c.Auth},
 		{Name: "jwt", Prefix: "fiber.jwt", Value: c.JWT},
@@ -230,6 +244,9 @@ func (c *Config) inUse(name string) (bool, string) {
 	case "email":
 		return c.Notification.Enabled(config.ChannelEmail),
 			"email is not in notification.channels"
+	case "telegram":
+		return c.Notification.Enabled(config.ChannelTelegram),
+			"telegram is not in notification.channels"
 	}
 	return true, ""
 }
@@ -277,16 +294,27 @@ func (c *Config) validateCrossSection() []error {
 	var errs []error
 
 	// fiber.body_limit against fileutil.MaxFileBytes. For a request
-	// larger than the body limit, Fiber answers 413 before any handler
-	// runs, so the limit has to cover the largest file fileutil accepts
-	// plus the multipart envelope around it. A cap of 0 or less means
-	// fileutil accepts any size, and the floor is then the envelope
-	// alone.
+	// larger than the body limit, Fiber answers 413 and the route's
+	// handler never runs, so the limit has to cover the largest file
+	// fileutil accepts plus the multipart envelope around it. Otherwise
+	// the upload handler's own size check, whose message names the limit,
+	// could never be the one that fires.
+	//
+	// The floor is sized for multipart uploads. A file sent as base64
+	// in a JSON body (fileutil.DecodeBase64File) is a third larger on
+	// the wire than the file itself, which this floor does not cover: a
+	// route taking one would need a higher limit, and nothing here
+	// would check that it was set.
+	//
+	// The cap is read as it stands when New runs, which is why a caller
+	// that changes it does so first. A cap of 0 or less means fileutil
+	// accepts any size: the floor is then the envelope alone, and the
+	// body limit is the only bound on a file.
 	//
 	// Fiber replaces a limit of 0 or less, which is what an absent key
 	// reads as, with its own fiber.DefaultBodyLimit, and the floor is
 	// held against that replacement, since it is the limit Fiber
-	// enforces. Under the default file cap the replacement is far too
+	// enforces. Under the default 20 MiB cap the replacement is far too
 	// small, so an absent key is still refused there.
 	minBody := multipartAllowance
 	if fileutil.MaxFileBytes > 0 {
@@ -299,11 +327,19 @@ func (c *Config) validateCrossSection() []error {
 			limit)
 	}
 	if limit < minBody {
+		why := fmt.Sprintf("one upload request carries a file of up "+
+			"to fileutil.MaxFileBytes (%d) plus %d bytes of "+
+			"multipart envelope",
+			fileutil.MaxFileBytes, multipartAllowance)
+		if fileutil.MaxFileBytes <= 0 {
+			why = fmt.Sprintf("fileutil.MaxFileBytes (%d) sets "+
+				"no file cap, which leaves the %d bytes of "+
+				"multipart envelope around an upload as the "+
+				"floor",
+				fileutil.MaxFileBytes, multipartAllowance)
+		}
 		errs = append(errs, fmt.Errorf("fiber.body_limit must be "+
-			"at least %d (got %s): one upload request carries a "+
-			"file of up to fileutil.MaxFileBytes (%d) plus %d "+
-			"bytes of multipart envelope",
-			minBody, got, fileutil.MaxFileBytes, multipartAllowance))
+			"at least %d (got %s): %s", minBody, got, why))
 	}
 
 	// app.host against fiber.listen.listener_network. On a unix socket
@@ -438,6 +474,7 @@ func New(path string) (*Config, error) {
 		Notification: config.NewNotificationConfig(v),
 		WhatsApp:     config.NewWhatsAppConfig(v),
 		Email:        config.NewEmailConfig(v),
+		Telegram:     config.NewTelegramConfig(v),
 		Fiber:        config.NewFiberConfig(v),
 		Auth:         config.NewAuthConfig(v),
 		JWT:          config.NewJWTConfig(v),

@@ -8,10 +8,16 @@ package xlsx
 // in workbook_integration_test.go.
 
 import (
+	"bytes"
 	"errors"
+	"fmt"
 	"path/filepath"
+	"runtime"
 	"slices"
+	"strings"
 	"testing"
+	"time"
+	"unsafe"
 
 	"github.com/xuri/excelize/v2"
 )
@@ -52,8 +58,8 @@ func fixtureColumns() []Column {
 //	12   D-1      26    9     2
 //
 // Every path Caption can take is represented: a caption written where it
-// is (B), one merged across from a neighbour (C), one with no group above
-// it (D and E), one that exists only on the group row (F), and one that is
+// is (B and D), one merged across from a neighbour (C), one with no group
+// above it (E), one that exists only on the group row (F), and one that is
 // both merged and on the group row (G).
 func writeFixture(t *testing.T) string {
 	t.Helper()
@@ -233,6 +239,82 @@ func TestGroupRowCanBeDisabled(t *testing.T) {
 	}
 }
 
+// A group row that is not the row above the header is named, and is then
+// the row a column with no caption of its own takes one from.
+func TestGroupRowCanBeNamed(t *testing.T) {
+	// Row 7 numbers the columns B to E, and row 5 is two rows above it.
+	wb := openFixture(t, Layout{HeaderRow: 7, GroupRow: 5, FirstRow: 9})
+
+	if got := wb.GroupRow(); got != 5 {
+		t.Errorf("GroupRow = %d, want the 5 the layout names", got)
+	}
+	if got := wb.Caption("F"); got != "Extra" {
+		t.Errorf("Caption(\"F\") = %q, want Extra from row 5", got)
+	}
+	if got := wb.Caption("B"); got != "1" {
+		t.Errorf("Caption(\"B\") = %q, want the 1 on the header row",
+			got)
+	}
+}
+
+// A heading that spans every row of the header is one block merged DOWN
+// the sheet, with its caption in the block's top cell. The header row
+// holds nothing for that column, nor does the group row above it, and
+// the caption is read through the block all the same.
+func TestCaptionResolvesThroughAMergeDownTheHeader(t *testing.T) {
+	f := excelize.NewFile()
+	t.Cleanup(func() { _ = f.Close() })
+	for cell, value := range map[string]string{
+		"A1": "Kode", "B3": "Lemari", "A4": "K-1",
+	} {
+		if err := f.SetCellValue(fixtureSheet, cell, value); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := f.MergeCell(fixtureSheet, "A1", "A3"); err != nil {
+		t.Fatal(err)
+	}
+	buf, err := f.WriteToBuffer()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	wb, err := OpenBytes(buf.Bytes(), Layout{HeaderRow: 3, FirstRow: 4})
+	if err != nil {
+		t.Fatalf("OpenBytes: %v", err)
+	}
+	t.Cleanup(func() { _ = wb.Close() })
+	if got := wb.Caption("A"); got != "Kode" {
+		t.Errorf("Caption(\"A\") = %q, want Kode from the top of its "+
+			"block", got)
+	}
+	if got := wb.Caption("B"); got != "Lemari" {
+		t.Errorf("Caption(\"B\") = %q, want Lemari", got)
+	}
+}
+
+// A merged range is the same block from whichever corner it is written,
+// and a reference that names no range is passed over.
+func TestMergedRangesReadsARangeFromEitherCorner(t *testing.T) {
+	rows := [][]string{{"", "Lokasi"}}
+	got := mergedRanges([]string{"D1:B1", "B2", "1B:2C"}, rows)
+	if len(got) != 1 {
+		t.Fatalf("%d blocks were read, want the one range", len(got))
+	}
+	for col, inside := range map[int]bool{
+		1: false, 2: true, 3: true, 4: true, 5: false,
+	} {
+		if got[0].contains(1, col) != inside {
+			t.Errorf("column %d of row 1 inside the block: %t, want %t",
+				col, !inside, inside)
+		}
+	}
+	if got[0].value != "Lokasi" {
+		t.Errorf("the block holds %q, want the Lokasi of its top-left "+
+			"cell", got[0].value)
+	}
+}
+
 // A row is skipped when every column the caller reads is empty. Row 11
 // holds a value in Z, which no column in the contract names, so it counts
 // as blank.
@@ -248,6 +330,86 @@ func TestDataRowsSkipsRowsWithNothingMapped(t *testing.T) {
 	}
 	if wb.RowIsBlank(9, fixtureColumns()) {
 		t.Error("row 9 is a data row")
+	}
+}
+
+// A cell of spaces is an empty cell to whoever looks at the sheet, and a
+// non-breaking space is one more of them. A row holding nothing else in
+// the columns the caller reads is blank, though the grid holds it.
+func TestARowOfSpacesIsBlank(t *testing.T) {
+	f, err := excelize.OpenFile(writeFixture(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = f.Close() })
+	for cell, value := range map[string]string{
+		"B14": "   ", "C14": "\u00a0",
+	} {
+		if err := f.SetCellValue(fixtureSheet, cell, value); err != nil {
+			t.Fatal(err)
+		}
+	}
+	buf, err := f.WriteToBuffer()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	wb, err := OpenBytes(buf.Bytes(), fixtureLayout())
+	if err != nil {
+		t.Fatalf("OpenBytes: %v", err)
+	}
+	t.Cleanup(func() { _ = wb.Close() })
+	if wb.RowCount() != 14 || wb.Cell(14, "B") != "   " {
+		t.Fatalf("the grid ends at row %d with %q in B14; the premise "+
+			"of this test is row 14 and three spaces",
+			wb.RowCount(), wb.Cell(14, "B"))
+	}
+	if !wb.RowIsBlank(14, fixtureColumns()) {
+		t.Error("a row of spaces is not blank")
+	}
+	got := wb.DataRows(fixtureColumns())
+	if want := []int{9, 10, 12}; !slices.Equal(got, want) {
+		t.Errorf("DataRows = %v, want %v", got, want)
+	}
+}
+
+// A row can be in a sheet's XML and hold nothing: a height set on it, or
+// a style. One that comes after the data is the last row the XML
+// declares, and the reading reaches it, so the sheet is not cut short.
+// The grid still ends with the last row that holds anything.
+func TestARowHoldingNothingIsNoTruncation(t *testing.T) {
+	f, err := excelize.OpenFile(writeFixture(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = f.Close() })
+	if err := f.SetRowHeight(fixtureSheet, 20, 30); err != nil {
+		t.Fatal(err)
+	}
+	buf, err := f.WriteToBuffer()
+	if err != nil {
+		t.Fatal(err)
+	}
+	book := buf.Bytes()
+
+	// The premise: row 20 is the last row of the XML.
+	arc, err := inspect(bytes.NewReader(book), int64(len(book)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if last, _, err := arc.scan(fixtureSheet); err != nil || last != 20 {
+		t.Fatalf("the sheet's XML ends with row %d (%v), want 20",
+			last, err)
+	}
+
+	wb, err := OpenBytes(book, fixtureLayout())
+	if err != nil {
+		t.Fatalf("OpenBytes: %v", err)
+	}
+	t.Cleanup(func() { _ = wb.Close() })
+	if got := wb.RowCount(); got != 12 {
+		t.Errorf("RowCount = %d, want the 12 rows that hold something",
+			got)
 	}
 }
 
@@ -364,11 +526,15 @@ func TestHyperlinkFormulaTarget(t *testing.T) {
 // however the maintainer felt at the time: a slash with a space after it
 // in one column and without in the next, trailing spaces in a third.
 // Folding is what lets one accepted spelling cover the lot, so it is
-// pinned here. The literals are deliberately multi-byte in one case —
-// folding must not depend on a caption being ASCII.
+// pinned here. The literals are deliberately multi-byte in one case, a
+// non-breaking space and a superscript two — folding must not depend on
+// a caption being ASCII.
 func TestCaptionFolding(t *testing.T) {
 	if got := normaliseCaption("Desa/Kel.   "); got != "desa/kel." {
 		t.Errorf("normaliseCaption = %q, want desa/kel.", got)
+	}
+	if got := normaliseCaption(" LUAS\u00a0(M²)  "); got != "luas (m²)" {
+		t.Errorf("normaliseCaption = %q, want luas (m²)", got)
 	}
 	got := normaliseCaption("  Lokasi   Brankas ")
 	if got != "lokasi brankas" {
@@ -386,9 +552,8 @@ func TestCaptionFolding(t *testing.T) {
 
 // Matches accepts any listed spelling and nothing else, which is what
 // keeps a revision that respells a heading from failing the check. The
-// "(m2)"/"(m²)" pair is the one that matters: the two differ by a
-// multi-byte rune, so a comparison written over bytes rather than runes
-// would still pass every other case here.
+// "(m2)"/"(m²)" pair is the one that matters: no folding makes the two
+// equal, so each is accepted only because it is listed.
 func TestMatchesAcceptsEverySpelling(t *testing.T) {
 	c := Column{
 		Col:      "R",
@@ -406,5 +571,277 @@ func TestMatchesAcceptsEverySpelling(t *testing.T) {
 		if c.Matches(caption) {
 			t.Errorf("Matches(%q) = true, want false", caption)
 		}
+	}
+}
+
+// OpenBytes reads what Open reads. The fixture is opened both ways and
+// every cell of the sheet, every caption and the row selection are held
+// against each other; only the directory differs, the one opened from
+// memory having none.
+func TestOpenBytesReadsWhatOpenReads(t *testing.T) {
+	fromFile := openFixture(t, fixtureLayout())
+	fromMemory, err := OpenBytes(fixtureBytes(t), fixtureLayout())
+	if err != nil {
+		t.Fatalf("OpenBytes: %v", err)
+	}
+	t.Cleanup(func() { _ = fromMemory.Close() })
+
+	if fromMemory.SheetName() != fromFile.SheetName() ||
+		fromMemory.RowCount() != fromFile.RowCount() {
+		t.Fatalf("OpenBytes read sheet %q of %d rows, Open %q of %d",
+			fromMemory.SheetName(), fromMemory.RowCount(),
+			fromFile.SheetName(), fromFile.RowCount())
+	}
+	for row := 1; row <= fromFile.RowCount(); row++ {
+		for _, col := range []string{"A", "B", "C", "D", "E", "Z"} {
+			got, want := fromMemory.Cell(row, col), fromFile.Cell(row, col)
+			if got != want {
+				t.Errorf("%s%d = %q from memory, %q from the file",
+					col, row, got, want)
+			}
+		}
+	}
+	for _, c := range fixtureColumns() {
+		if got, want := fromMemory.Caption(c.Col),
+			fromFile.Caption(c.Col); got != want {
+			t.Errorf("Caption(%q) = %q from memory, %q from the file",
+				c.Col, got, want)
+		}
+	}
+	if err := fromMemory.VerifyHeaders(fixtureColumns()); err != nil {
+		t.Errorf("VerifyHeaders: %v", err)
+	}
+	if got, want := fromMemory.DataRows(fixtureColumns()),
+		fromFile.DataRows(fixtureColumns()); !slices.Equal(got, want) {
+		t.Errorf("DataRows = %v from memory, %v from the file", got, want)
+	}
+	if fromMemory.Dir() != "" {
+		t.Errorf("Dir = %q, want none for a workbook in memory",
+			fromMemory.Dir())
+	}
+}
+
+// A workbook in memory has no directory to resolve a relative link
+// against, so the link stays as the workbook stores it.
+func TestLinkFromMemoryStaysRelative(t *testing.T) {
+	wb, err := OpenBytes(fixtureBytes(t), fixtureLayout())
+	if err != nil {
+		t.Fatalf("OpenBytes: %v", err)
+	}
+	t.Cleanup(func() { _ = wb.Close() })
+
+	lt, err := wb.Link(9, "E")
+	if err != nil {
+		t.Fatalf("Link: %v", err)
+	}
+	if want := filepath.Join("documents", "1.pdf"); lt.Path != want ||
+		lt.Base != "1.pdf" || lt.Foreign {
+		t.Errorf("Link = %+v, want %s relative and not foreign",
+			lt, want)
+	}
+}
+
+// Close lets go of what excelize holds and nothing of the grid, so a
+// caller that only reads cells can close as soon as the workbook is
+// open. Everything that reads the grid answers after Close as before.
+//
+// Link says the File is closed, where ErrNoLink would be an answer about
+// a cell nobody looked at: row 9 carries a link. Hyperlink has no error
+// to say it with, and answers "" without reaching for the workbook.
+func TestTheGridOutlivesClose(t *testing.T) {
+	wb, err := OpenBytes(fixtureBytes(t), fixtureLayout())
+	if err != nil {
+		t.Fatalf("OpenBytes: %v", err)
+	}
+	if err := wb.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	if got := wb.Cell(9, "B"); got != "B-2" {
+		t.Errorf("Cell(9, \"B\") = %q after Close, want B-2", got)
+	}
+	if got := wb.Caption("C"); got != "Cabinet" {
+		t.Errorf("Caption(\"C\") = %q after Close, want Cabinet", got)
+	}
+	if err := wb.VerifyHeaders(fixtureColumns()); err != nil {
+		t.Errorf("VerifyHeaders after Close: %v", err)
+	}
+	got := wb.DataRows(fixtureColumns())
+	if want := []int{9, 10, 12}; !slices.Equal(got, want) {
+		t.Errorf("DataRows = %v after Close, want %v", got, want)
+	}
+
+	if got := wb.Hyperlink(9, "E"); got != "" {
+		t.Errorf("Hyperlink(9, \"E\") = %q after Close, want none", got)
+	}
+	if _, err := wb.Link(9, "E"); !errors.Is(err, ErrClosed) {
+		t.Errorf("Link(9, \"E\") after Close = %v, want ErrClosed", err)
+	}
+	if err := wb.Close(); err != nil {
+		t.Errorf("a second Close: %v", err)
+	}
+}
+
+// Close lets go of the workbook itself, and not only of its temporary
+// file. Excelize keeps every part it unpacked for as long as its File is
+// reachable, closed or not, which can be several times the grid, so a
+// File that held on to it would cost a caller that closes early
+// everything the closing was for.
+func TestCloseLetsGoOfTheWorkbook(t *testing.T) {
+	wb, err := OpenBytes(fixtureBytes(t), fixtureLayout())
+	if err != nil {
+		t.Fatalf("OpenBytes: %v", err)
+	}
+	freed := make(chan struct{})
+	runtime.AddCleanup(wb.file, func(c chan struct{}) { close(c) }, freed)
+	if err := wb.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// A collection frees what nothing reaches, and the cleanup runs
+	// shortly after it. The File itself stays in use below, so the
+	// cleanup runs only if the File has let the workbook go.
+	for range 100 {
+		runtime.GC()
+		select {
+		case <-freed:
+			if got := wb.Cell(9, "B"); got != "B-2" {
+				t.Errorf("Cell(9, \"B\") = %q, want B-2", got)
+			}
+			return
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	t.Error("the workbook excelize unpacked is still held after Close")
+	runtime.KeepAlive(wb)
+}
+
+// HasMacros tells a workbook carrying a VBA project, which is what an
+// .xlsm renamed to .xlsx still is, from one that does not.
+//
+// A project is told by the entry one is kept in by custom, in either
+// letter case, and by the workbook's relationships naming a part under
+// any other name. A file of that name elsewhere in the package, which
+// nothing points at, is not one.
+func TestHasMacros(t *testing.T) {
+	plain := fixtureBytes(t)
+	with := func(name string) []byte {
+		keep := func(_, content string) string { return content }
+		return rebuild(t, plain, keep, name)
+	}
+	renamed := rebuild(t, plain, func(name, content string) string {
+		if name != "xl/_rels/workbook.xml.rels" {
+			return content
+		}
+		const end = "</Relationships>"
+		if strings.Count(content, end) != 1 {
+			t.Fatalf("the relationships do not end in %s:\n%s",
+				end, content)
+		}
+		return strings.Replace(content, end, `<Relationship `+
+			`Id="rId99" Target="macros/project.bin" Type="http://`+
+			`schemas.microsoft.com/office/2006/relationships/`+
+			`vbaProject"/>`+end, 1)
+	}, "xl/macros/project.bin")
+	for name, c := range map[string]struct {
+		book []byte
+		want bool
+	}{
+		"a workbook":                   {plain, false},
+		"a workbook with a project":    {with("xl/vbaProject.bin"), true},
+		"the project in other case":    {with(`xl\VBAProject.bin`), true},
+		"a project somewhere else":     {with("docs/vbaProject.bin"), false},
+		"a project the workbook names": {renamed, true},
+	} {
+		wb, err := OpenBytes(c.book, fixtureLayout())
+		if err != nil {
+			t.Fatalf("%s: OpenBytes: %v", name, err)
+		}
+		if got := wb.HasMacros(); got != c.want {
+			t.Errorf("%s: HasMacros = %t, want %t", name, got, c.want)
+		}
+		_ = wb.Close()
+	}
+}
+
+// ColumnsFromA letters its captions from A, past Z into AA, and gives a
+// column no purpose, so a failed check names it by its letter alone. A
+// column that does state a purpose keeps it in the message.
+func TestColumnsFromA(t *testing.T) {
+	var captions []string
+	for i := range 28 {
+		captions = append(captions, fmt.Sprintf("Kolom %d", i+1))
+	}
+	cols := ColumnsFromA(captions...)
+	if len(cols) != 28 {
+		t.Fatalf("%d columns, want 28", len(cols))
+	}
+	for i, want := range map[int]string{0: "A", 25: "Z", 26: "AA",
+		27: "AB"} {
+		c := cols[i]
+		if c.Col != want || !slices.Equal(c.Captions,
+			[]string{captions[i]}) || c.Purpose != "" {
+			t.Errorf("column %d is %+v, want %s captioned %q",
+				i, c, want, captions[i])
+		}
+	}
+
+	// Row 6 of the fixture is captioned Cabinet, Cabinet, No., Link from
+	// B; column A is empty.
+	wb := openFixture(t, Layout{HeaderRow: 6, GroupRow: -1, FirstRow: 9})
+	var le *LayoutError
+	if !errors.As(wb.VerifyHeaders(ColumnsFromA("Kode", "Cabinet")),
+		&le) {
+		t.Fatal("expected column A to fail the check")
+	}
+	if want := []string{`column A: expected "Kode", found an ` +
+		"empty cell"}; !slices.Equal(le.Problems, want) {
+		t.Errorf("problems %q, want %q", le.Problems, want)
+	}
+
+	err := wb.VerifyHeaders([]Column{{Col: "D", Captions: []string{
+		"Nomor"}, Purpose: "number"}})
+	if !errors.As(err, &le) || !slices.Equal(le.Problems, []string{
+		`column D  (number): expected "Nomor", found "No."`}) {
+		t.Errorf("a column with a purpose reads %v", err)
+	}
+}
+
+// A cell holding what the cell above it holds shares its text, so a
+// report that repeats most of a row from the row above costs the text
+// once. Nothing else would notice the sharing go, which is why it is
+// held here: excelize hands each shared string over as text of its own,
+// so without it the two cells below are equal and apart.
+func TestRepeatedTextIsShared(t *testing.T) {
+	f := excelize.NewFile()
+	t.Cleanup(func() { _ = f.Close() })
+	for _, cell := range []string{"A1", "A2", "A3"} {
+		if err := f.SetCellValue(fixtureSheet, cell,
+			strings.Repeat("Dinas Pendidikan ", 4)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := f.SetCellValue(fixtureSheet, "A4", "lain"); err != nil {
+		t.Fatal(err)
+	}
+	buf, err := f.WriteToBuffer()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	wb, err := OpenBytes(buf.Bytes(), Layout{HeaderRow: 1, FirstRow: 2})
+	if err != nil {
+		t.Fatalf("OpenBytes: %v", err)
+	}
+	t.Cleanup(func() { _ = wb.Close() })
+	first, second, third := wb.Cell(1, "A"), wb.Cell(2, "A"),
+		wb.Cell(3, "A")
+	if first != second || second != third {
+		t.Fatalf("the cells read %q, %q and %q", first, second, third)
+	}
+	if unsafe.StringData(first) != unsafe.StringData(second) ||
+		unsafe.StringData(second) != unsafe.StringData(third) {
+		t.Error("equal cells in one column, one under the other, " +
+			"hold their text apart")
 	}
 }

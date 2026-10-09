@@ -158,11 +158,11 @@ func (s Supplied) Configured(name string) bool {
 // section is then validated and reports the keys it actually wants, which is
 // loud and wrong rather than quiet and wrong. It also routes on underscores,
 // where the file routes on dots — so a fiber key spelled listen_something,
-// or a notification key spelled email_something or whatsapp_something,
-// would be read as the nested section's from the environment and as the
-// parent's from the file. Neither exists; the fix if one is added is to
-// name it so it does not collide, because the environment spelling cannot
-// represent the difference.
+// or a notification key spelled email_something, telegram_something or
+// whatsapp_something, would be read as the nested section's from the
+// environment and as the parent's from the file. Neither exists; the fix
+// if one is added is to name it so it does not collide, because the
+// environment spelling cannot represent the difference.
 //
 // That weakness is worth knowing before this package is lifted into a new
 // deployment. Outside fiber.*, the prefixes app, database and notification
@@ -170,8 +170,9 @@ func (s Supplied) Configured(name string) bool {
 // other stacks export, APP_ENV and DATABASE_URL among them, so a variable
 // meant for something else can switch one of these sections on. The
 // channel sections are nested under notification to stay out of that:
-// their variables are NOTIFICATION_EMAIL_* and NOTIFICATION_WHATSAPP_*,
-// rather than the MAIL_* or SMTP_* that several frameworks export.
+// their variables are NOTIFICATION_EMAIL_*, NOTIFICATION_WHATSAPP_* and
+// NOTIFICATION_TELEGRAM_*, rather than the MAIL_* or SMTP_* that several
+// frameworks export.
 //
 // An empty variable is not a value. AllowEmptyEnv is off, so Viper would not
 // read one either, and treating it as evidence would make an exported-but-

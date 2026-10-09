@@ -32,6 +32,8 @@ func TestNotificationReadsChannels(t *testing.T) {
 		{"a space-separated string", "whatsapp email",
 			[]string{"whatsapp", "email"}},
 		{"one channel", "email", []string{"email"}},
+		{"every channel", "whatsapp, email, TELEGRAM",
+			[]string{"whatsapp", "email", "telegram"}},
 		{"absent", nil, []string{}},
 	} {
 		v := viper.New()
@@ -55,9 +57,10 @@ func TestNotificationValidate(t *testing.T) {
 		{},
 		{ChannelWhatsApp},
 		{ChannelEmail},
-		{ChannelWhatsApp, ChannelEmail},
+		{ChannelTelegram},
+		{ChannelWhatsApp, ChannelEmail, ChannelTelegram},
 		{"email", "email"},
-		{" EMAIL ", "WhatsApp"},
+		{" EMAIL ", "WhatsApp", " Telegram "},
 	} {
 		if err := (&NotificationConfig{Channels: ok}).Validate(); err != nil {
 			t.Errorf("Channels=%q refused: %v", ok, err)
@@ -74,6 +77,7 @@ func TestNotificationValidate(t *testing.T) {
 		`notification.channels[1] is not a channel (got "sms")`,
 		`notification.channels[2] is not a channel (got "emial")`,
 		`notification.channels[3] is not a channel (got "")`,
+		"want whatsapp, email or telegram",
 	} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("err = %v\nwant it to report %s", err, want)
@@ -98,6 +102,7 @@ func TestNotificationEnabled(t *testing.T) {
 		ChannelEmail:    true,
 		" Email ":       true,
 		ChannelWhatsApp: false,
+		ChannelTelegram: false,
 		"":              false,
 	} {
 		if got := c.Enabled(channel); got != want {
@@ -119,6 +124,7 @@ func TestNotificationString(t *testing.T) {
 		want     string
 	}{
 		{[]string{"whatsapp", "email"}, "Channels=whatsapp,email"},
+		{[]string{"telegram"}, "Channels=telegram"},
 		{nil, "Channels=none"},
 		{[]string{}, "Channels=none"},
 	} {
