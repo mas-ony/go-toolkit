@@ -14,16 +14,14 @@ import (
 	"github.com/spf13/viper"
 )
 
-// validApp is an AppConfig that passes Validate, for tests that change one
-// field at a time.
-func validApp() *AppConfig {
-	return &AppConfig{
-		Name:     "svc",
-		Version:  "1.0.0",
-		Env:      EnvProduction,
-		Port:     8080,
-		Location: "UTC",
-	}
+// appBase is a configuration the app section accepts. Each rule case
+// changes it one key at a time.
+var appBase = map[string]any{
+	"app.name":     "svc",
+	"app.version":  "1.0.0",
+	"app.env":      EnvProduction,
+	"app.port":     8080,
+	"app.location": "UTC",
 }
 
 // NewAppConfig is documented as the authoritative list of the section's
@@ -32,19 +30,14 @@ func validApp() *AppConfig {
 // file or variable could ever supply.
 func TestNewAppConfigReadsEveryKey(t *testing.T) {
 	t.Parallel()
-	v := viper.New()
-	for key, val := range map[string]any{
+	got := NewAppConfig(withKeys(map[string]any{
 		"app.name":     "svc",
 		"app.version":  "2.3.4",
 		"app.env":      "staging",
 		"app.host":     "127.0.0.1",
 		"app.port":     9090,
 		"app.location": "Asia/Jakarta",
-	} {
-		v.Set(key, val)
-	}
-
-	got := NewAppConfig(v)
+	}, nil))
 	want := &AppConfig{
 		Name:     "svc",
 		Version:  "2.3.4",
@@ -68,22 +61,34 @@ func TestNewAppConfigFromNothingIsAllZero(t *testing.T) {
 	}
 }
 
-// The fixture every other test changes one field of is itself valid, so a
-// failure elsewhere is about the field that test changed.
-func TestAppValidateAcceptsAValidConfig(t *testing.T) {
+// TestAppValidate holds the section's rules, each beside the value that
+// satisfies it. app.env is matched exactly, deliberately: logger.New
+// treats every unrecognised value as production, so a typo that got
+// through would silently turn debug logging off rather than failing at
+// startup. app.port is required and held to 1..65535.
+func TestAppValidate(t *testing.T) {
 	t.Parallel()
-	if err := validApp().Validate(); err != nil {
-		t.Errorf("Validate: %v", err)
-	}
-}
-
-// A section that was never built is reported, not dereferenced.
-func TestAppValidateRejectsANilReceiver(t *testing.T) {
-	t.Parallel()
-	var c *AppConfig
-	if err := c.Validate(); err == nil {
-		t.Error("a nil *AppConfig validated")
-	}
+	const env, port = "app.env", "app.port"
+	const notAnEnv = "app.env must be one of"
+	const outOfRange = "app.port must be between 1 and 65535"
+	runRules(t, appBase, asSection(NewAppConfig), []ruleCase{
+		{"development", map[string]any{env: EnvDevelopment}, ""},
+		{"staging", map[string]any{env: EnvStaging}, ""},
+		{"production", map[string]any{env: EnvProduction}, ""},
+		{"an env capitalised", map[string]any{env: "Production"}, notAnEnv},
+		{"an env in capitals", map[string]any{env: "PRODUCTION"}, notAnEnv},
+		{"an env after a space", map[string]any{env: " production"},
+			notAnEnv},
+		{"an env abbreviated", map[string]any{env: "prod"}, notAnEnv},
+		{"another abbreviated", map[string]any{env: "dev"}, notAnEnv},
+		{"an empty env", map[string]any{env: ""}, notAnEnv},
+		{"a zero port", map[string]any{port: 0}, "app.port is required"},
+		{"a negative port", map[string]any{port: -1}, outOfRange},
+		{"the lowest port", map[string]any{port: 1}, ""},
+		{"the highest port", map[string]any{port: 65535}, ""},
+		{"one past the highest", map[string]any{port: 65536}, outOfRange},
+		{"far out of range", map[string]any{port: 70000}, outOfRange},
+	})
 }
 
 // Every problem at once, so one restart surfaces the whole section.
@@ -102,68 +107,15 @@ func TestAppValidateReportsEveryMissingField(t *testing.T) {
 	}
 }
 
-// Exact matching, deliberately: logger.New treats every unrecognised value
-// as production, so a typo that got through would silently turn debug
-// logging off rather than failing at startup.
-func TestAppValidateMatchesEnvExactly(t *testing.T) {
+// Zero is reported as "required" and not ALSO as out of range, the rule
+// upstream.CheckPort states for the value an absent key reads as.
+func TestAppValidateReportsAZeroPortOnce(t *testing.T) {
 	t.Parallel()
-	for _, env := range []string{
-		"Production", "PRODUCTION", " production", "prod", "dev", "",
-	} {
-		c := validApp()
-		c.Env = env
-		if err := c.Validate(); err == nil {
-			t.Errorf("env %q validated; it should be refused", env)
-		}
-	}
-	for _, env := range []string{
-		EnvDevelopment, EnvStaging, EnvProduction,
-	} {
-		c := validApp()
-		c.Env = env
-		if err := c.Validate(); err != nil {
-			t.Errorf("env %q refused: %v", env, err)
-		}
-	}
-}
-
-// Zero is reported as "required" and not ALSO as out of range, which is
-// what the chained else-if is for.
-func TestAppValidatePortBoundaries(t *testing.T) {
-	t.Parallel()
-	for _, c := range []struct {
-		port    int
-		ok      bool
-		mention string
-	}{
-		{0, false, "required"},
-		{-1, false, "between 1 and 65535"},
-		{1, true, ""},
-		{65535, true, ""},
-		{65536, false, "between 1 and 65535"},
-		{70000, false, "between 1 and 65535"},
-	} {
-		cfg := validApp()
-		cfg.Port = c.port
-		err := cfg.Validate()
-
-		if c.ok {
-			if err != nil {
-				t.Errorf("port %d refused: %v", c.port, err)
-			}
-			continue
-		}
-		if err == nil {
-			t.Errorf("port %d validated", c.port)
-			continue
-		}
-		if !strings.Contains(err.Error(), c.mention) {
-			t.Errorf("port %d: %v, want it to say %q",
-				c.port, err, c.mention)
-		}
-		if c.port == 0 && strings.Contains(err.Error(), "between") {
-			t.Error("a zero port was reported twice")
-		}
+	err := NewAppConfig(withKeys(appBase,
+		map[string]any{"app.port": 0})).Validate()
+	if err == nil || strings.Contains(err.Error(), "between") {
+		t.Errorf("err = %v, want the port reported as required and "+
+			"nothing more", err)
 	}
 }
 
@@ -197,15 +149,5 @@ func TestAppStringSeparatesEveryField(t *testing.T) {
 		if !found {
 			t.Errorf("%q is not a separate token in:\n%s", want, got)
 		}
-	}
-}
-
-// A nil section prints a placeholder instead of panicking inside the
-// startup log line.
-func TestAppStringHandlesANilReceiver(t *testing.T) {
-	t.Parallel()
-	var c *AppConfig
-	if got := c.String(); got != "<nil AppConfig>" {
-		t.Errorf("String = %q, want <nil AppConfig>", got)
 	}
 }

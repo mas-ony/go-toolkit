@@ -30,11 +30,11 @@ package config
 
 import (
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/mas-ony/go-toolkit/internal/testutil"
 	"github.com/spf13/viper"
 )
 
@@ -50,15 +50,10 @@ app:
 `
 
 // loadFile writes body to a config.yaml in a temporary directory and reads
-// it through NewViper, the way a service would at startup.
-func loadFile(t *testing.T, body string) *viper.Viper {
+// it into v, the way a service would at startup, and returns v.
+func loadFile(t *testing.T, v *viper.Viper, body string) *viper.Viper {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "config.yaml")
-	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	v := NewViper()
-	v.SetConfigFile(path)
+	v.SetConfigFile(testutil.TempFile(t, "config.yaml", []byte(body)))
 	if err := v.ReadInConfig(); err != nil {
 		t.Fatalf("ReadInConfig: %v", err)
 	}
@@ -71,7 +66,7 @@ func TestIntegrationEnvironmentOverridesTheFile(t *testing.T) {
 	t.Setenv("APP_PORT", "9191")
 	t.Setenv("APP_NAME", "from-env")
 
-	app := NewAppConfig(loadFile(t, baseFile))
+	app := NewAppConfig(loadFile(t, NewViper(), baseFile))
 
 	if app.Port != 9191 {
 		t.Errorf("Port = %d, want 9191 from APP_PORT", app.Port)
@@ -95,7 +90,7 @@ func TestIntegrationEnvironmentOverridesTheFile(t *testing.T) {
 func TestIntegrationUnderscoredKeyHasTheDocumentedSpelling(t *testing.T) {
 	t.Setenv("DATABASE_MAX_OPEN_CONNS", "25")
 
-	db := NewDatabaseConfig(loadFile(t, baseFile))
+	db := NewDatabaseConfig(loadFile(t, NewViper(), baseFile))
 	if db.MaxOpenConns != 25 {
 		t.Errorf("MaxOpenConns = %d, want 25 from "+
 			"DATABASE_MAX_OPEN_CONNS", db.MaxOpenConns)
@@ -108,7 +103,7 @@ func TestIntegrationUnderscoredKeyHasTheDocumentedSpelling(t *testing.T) {
 func TestIntegrationEnvironmentSuppliesAKeyTheFileLacks(t *testing.T) {
 	t.Setenv("APP_HOST", "127.0.0.1")
 
-	app := NewAppConfig(loadFile(t, baseFile))
+	app := NewAppConfig(loadFile(t, NewViper(), baseFile))
 	if app.Host != "127.0.0.1" {
 		t.Errorf("Host = %q, want 127.0.0.1 from the environment",
 			app.Host)
@@ -122,7 +117,7 @@ func TestIntegrationEnvironmentSuppliesAKeyTheFileLacks(t *testing.T) {
 func TestIntegrationAnEmptyVariableDoesNotBlankTheFile(t *testing.T) {
 	t.Setenv("APP_NAME", "")
 
-	app := NewAppConfig(loadFile(t, baseFile))
+	app := NewAppConfig(loadFile(t, NewViper(), baseFile))
 	if app.Name != "from-file" {
 		t.Errorf("Name = %q, want the file's value — an empty "+
 			"variable blanked it", app.Name)
@@ -137,24 +132,15 @@ func TestIntegrationAnEmptyVariableDoesNotBlankTheFile(t *testing.T) {
 func TestIntegrationAPlainViperIgnoresTheEnvironment(t *testing.T) {
 	t.Setenv("APP_PORT", "9191")
 
-	path := filepath.Join(t.TempDir(), "config.yaml")
-	if err := os.WriteFile(path, []byte(baseFile), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	plain := viper.New()
-	plain.SetConfigFile(path)
-	if err := plain.ReadInConfig(); err != nil {
-		t.Fatalf("ReadInConfig: %v", err)
-	}
-
+	plain := loadFile(t, viper.New(), baseFile)
 	if got := NewAppConfig(plain).Port; got != 8080 {
 		t.Fatalf("a plain viper read Port = %d; the premise of NewViper "+
 			"no longer holds", got)
 	}
 
 	// And through NewViper the same variable is honoured.
-	if got := NewAppConfig(loadFile(t, baseFile)).Port; got != 9191 {
+	v := loadFile(t, NewViper(), baseFile)
+	if got := NewAppConfig(v).Port; got != 9191 {
 		t.Errorf("through NewViper Port = %d, want 9191", got)
 	}
 }
@@ -165,7 +151,7 @@ func TestIntegrationAPlainViperIgnoresTheEnvironment(t *testing.T) {
 func TestIntegrationSuppliedSectionsSeesTheEnvironment(t *testing.T) {
 	t.Setenv("ZQINTEG_ONLY_IN_ENV", "yes")
 
-	v := loadFile(t, baseFile)
+	v := loadFile(t, NewViper(), baseFile)
 	got := SuppliedSections(v, []Section{
 		{Name: "app", Prefix: "app", Value: AbsentSection{}},
 		{Name: "zqinteg", Prefix: "zqinteg", Value: AbsentSection{}},
@@ -219,7 +205,7 @@ func TestIntegrationANestedSectionClaimsItsOwnVariables(t *testing.T) {
 	t.Setenv("NOTIFICATION_EMAIL_PASSWORD", " spaced secret ")
 	t.Setenv("NOTIFICATION_EMAIL_TIMEOUT", "45s")
 
-	v := loadFile(t, baseFile)
+	v := loadFile(t, NewViper(), baseFile)
 	got := SuppliedSections(v, []Section{
 		{Name: "notification", Prefix: "notification",
 			Value: AbsentSection{}},
@@ -253,5 +239,23 @@ func TestIntegrationANestedSectionClaimsItsOwnVariables(t *testing.T) {
 	if c.Timeout != 45*time.Second {
 		t.Errorf("Timeout = %s, want 45s from NOTIFICATION_EMAIL_TIMEOUT",
 			c.Timeout)
+	}
+}
+
+// EnvName names the variable NewViper reads a key from, so code that has
+// to name one, a test clearing a section's variables say, can ask rather
+// than spell it again. Each key is read back through a Viper holding
+// nothing else, so the variable is the only source it can have.
+func TestIntegrationEnvNameIsTheVariableNewViperReads(t *testing.T) {
+	for key, value := range map[string]string{
+		"app.port":                   "9191",
+		"database.max_open_conns":    "25",
+		"notification.email.timeout": "45s",
+	} {
+		t.Setenv(EnvName(key), value)
+		if got := NewViper().GetString(key); got != value {
+			t.Errorf("%s read %q with %s exported, want %q", key, got,
+				EnvName(key), value)
+		}
 	}
 }

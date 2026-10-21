@@ -244,10 +244,11 @@
 // bind table before choosing what a new branch returns; an unrecognised
 // name degrades to UNKNOWN rather than erroring.
 //
-// ParseDialect reads the SAME configured value to pick a grammar. It
-// accepts one spelling more than buildDSN does — "azuresql", a name New
-// cannot open — so the two agree on every name New serves, and both refuse
-// a name with ErrUnsupportedDriver.
+// ParseDialect reads the SAME configured value to pick a grammar, and both
+// resolve it through one table, internal/dbdriver, which is also the one
+// config validates database.driver against. ParseDialect accepts one
+// spelling more — "azuresql", a name New cannot open — so the two agree on
+// every name New serves, and both refuse a name with ErrUnsupportedDriver.
 //
 // # The property any driver added here must have
 //
@@ -263,9 +264,10 @@
 // Most of db.go is spent making one configuration produce the same
 // BEHAVIOUR on both engines rather than the same parameters:
 //
-//   - TLS. encryptModes translates the four values of database.encrypt into
-//     each driver's own parameter, so the key means something on MySQL
-//     instead of quietly selecting that driver's plaintext default.
+//   - TLS. The four values of database.encrypt are translated into each
+//     driver's own parameter, by the table config validates the key
+//     against, so the key means something on MySQL instead of quietly
+//     selecting that driver's plaintext default.
 //   - Row counts. ClientFoundRows makes MySQL report rows MATCHED, the
 //     convention SQL Server's @@ROWCOUNT already follows, so a repository
 //     reading RowsAffected() == 0 as "no such id" cannot turn an unedited

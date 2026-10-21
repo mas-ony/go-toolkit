@@ -1,6 +1,7 @@
 package whatsapp
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -132,23 +133,25 @@ var ErrNotPaired = errors.New("whatsapp: QR window closed without pairing")
 // say which of the two happened.
 var ErrInvalidPhone = errors.New("whatsapp: phone number is not digits")
 
-// phoneDigits reports whether a normalised number is safe to build a JID
-// from, which for a user JID means digits and nothing else.
+// checkPhone refuses digits, a number as normalisePhone left it, unless it
+// is safe to build a JID from, which for a user JID means digits and
+// nothing else. The error is ErrInvalidPhone quoting phone, the number as
+// the caller gave it, so both send paths refuse in the same words.
 //
 // It is a character check, not a plausibility check: a number with the wrong
 // digit count, or one missing its country code, satisfies it and fails at
 // delivery instead. Validating the shape belongs where the number is entered.
 //
-// The empty string satisfies it vacuously. That case is the callers' silent
-// no-op — an unfilled phone column, not bad data — and is checked before
+// The empty string passes vacuously. That case is a silent no-op — an
+// unfilled phone column, not bad data — and recipient checks it before
 // this.
-func phoneDigits(phone string) bool {
-	for _, r := range phone {
+func checkPhone(digits, phone string) error {
+	for _, r := range digits {
 		if r < '0' || r > '9' {
-			return false
+			return fmt.Errorf("%w: %q", ErrInvalidPhone, phone)
 		}
 	}
-	return true
+	return nil
 }
 
 // qrRule pads label with box-drawing characters out to qrBannerWidth
@@ -183,9 +186,32 @@ func qrRule(label string) string {
 // SendText unvalidated, so a wider filter would silently repair typed junk
 // into a number nobody verified, trading a rejected send for one addressed to
 // a number nobody typed. What survives this is therefore refused by the
-// callers rather than repaired; see phoneDigits and ErrInvalidPhone.
+// callers rather than repaired; see checkPhone and ErrInvalidPhone.
 func normalisePhone(phone string) string {
 	return phoneReplacer.Replace(phone)
+}
+
+// recipient resolves phone to the JID a send addresses: the user JID for
+// the number as normalisePhone leaves it, whose User is the bare digits
+// every error and log line names. It is the one place a JID is built, so
+// every send path addresses a person and none can address a group.
+//
+// ok is false when there is nothing to send: phone is empty once
+// normalised, or the payload is, which empty reports. Both are decided
+// before the number's characters, so a send with nothing in it is a
+// silent no-op whatever the number holds. Normalising comes first,
+// because a number that normalises away to nothing is as empty as one
+// that arrived empty. A number that is present and still holds anything
+// but digits is refused by checkPhone.
+func recipient(phone string, empty bool) (types.JID, bool, error) {
+	digits := normalisePhone(phone)
+	if digits == "" || empty {
+		return types.JID{}, false, nil
+	}
+	if err := checkPhone(digits, phone); err != nil {
+		return types.JID{}, false, err
+	}
+	return types.NewJID(digits, types.DefaultUserServer), true, nil
 }
 
 // storeDSN builds the SQLite URI for a credential store at path, falling
@@ -195,20 +221,8 @@ func normalisePhone(phone string) string {
 // relative to the working directory and "file:/var/lib/app/whatsapp.db" is
 // absolute, so nothing here has to tell them apart.
 func storeDSN(path string) string {
-	return "file:" + sqliteURIEscaper.Replace(storeFile(path)) + "?" +
-		storePragmas
-}
-
-// storeFile is the credential store's path as NewContext opens it: path,
-// or DefaultStorePath when path is empty. The ErrNotPaired message names it,
-// since telling an operator to put a paired store in place is only useful
-// if it says where, and a caller that passed its own path is not reading
-// DefaultStorePath.
-func storeFile(path string) string {
-	if path == "" {
-		return DefaultStorePath
-	}
-	return path
+	return "file:" + sqliteURIEscaper.Replace(cmp.Or(path, DefaultStorePath)) +
+		"?" + storePragmas
 }
 
 // New creates and connects a WhatsApp Service.
@@ -398,11 +412,17 @@ func NewContext(
 	// Disconnect before returning, because Connect above opened a WebSocket
 	// that nothing else holds a reference to once this function returns an
 	// error.
+	//
+	// The message names the store as it was opened, storePath or the
+	// default in its place, since telling an operator to put a paired store
+	// in place is only useful if it says where, and a caller that passed
+	// its own path is not reading DefaultStorePath.
 	if client.Store.ID == nil {
 		client.Disconnect()
 		return nil, fmt.Errorf(
 			"%w; scan the code shown above, or start with a paired "+
-				"store already at %s", ErrNotPaired, storeFile(storePath))
+				"store already at %s", ErrNotPaired,
+			cmp.Or(storePath, DefaultStorePath))
 	}
 
 	log.Info().Msg("whatsapp: client connected")
@@ -474,31 +494,23 @@ func (s *Service) SendTextContext(
 	ctx context.Context,
 	phone, message string,
 ) error {
-	// Normalise to bare digits BEFORE the guard. WhatsApp JIDs require no
-	// punctuation, and a number that normalises away to nothing is as empty
-	// as one that arrived empty.
-	digits := normalisePhone(phone)
-	if digits == "" || message == "" {
-		return nil
+	jid, ok, err := recipient(phone, message == "")
+	if err != nil || !ok {
+		return err
 	}
-	if !phoneDigits(digits) {
-		return fmt.Errorf("%w: %q", ErrInvalidPhone, phone)
-	}
-
-	jid := types.NewJID(digits, types.DefaultUserServer)
 
 	// SendMessage returns (types.SendResponse, error). The SendResponse
 	// contains the server-assigned message ID and timestamp, which are not
 	// needed for fire-and-forget notifications. Assign to _ to make the
 	// discard explicit.
-	_, err := s.client.SendMessage(ctx, jid, &waE2E.Message{
+	_, err = s.client.SendMessage(ctx, jid, &waE2E.Message{
 		Conversation: proto.String(message),
 	})
 	if err != nil {
-		return fmt.Errorf("whatsapp: send to %s: %w", digits, err)
+		return fmt.Errorf("whatsapp: send to %s: %w", jid.User, err)
 	}
 
-	s.log.Info().Str("to", digits).Msg("whatsapp: message sent")
+	s.log.Info().Str("to", jid.User).Msg("whatsapp: message sent")
 	return nil
 }
 
@@ -565,16 +577,10 @@ func (s *Service) SendDocumentContext(
 	data []byte,
 	filename, mimetype, caption string,
 ) error {
-	// Normalise before the guard, for the reason given on SendText.
-	digits := normalisePhone(phone)
-	if digits == "" || len(data) == 0 {
-		return nil
+	jid, ok, err := recipient(phone, len(data) == 0)
+	if err != nil || !ok {
+		return err
 	}
-	if !phoneDigits(digits) {
-		return fmt.Errorf("%w: %q", ErrInvalidPhone, phone)
-	}
-
-	jid := types.NewJID(digits, types.DefaultUserServer)
 
 	// Upload encrypts data and stores it on WhatsApp's media servers,
 	// returning the URL and encryption keys needed to reference it from a
@@ -582,7 +588,7 @@ func (s *Service) SendDocumentContext(
 	uploaded, err := s.client.Upload(ctx, data, whatsmeow.MediaDocument)
 	if err != nil {
 		return fmt.Errorf("whatsapp: upload document for %s: %w",
-			digits, err)
+			jid.User, err)
 	}
 
 	docMsg := &waE2E.DocumentMessage{
@@ -604,11 +610,11 @@ func (s *Service) SendDocumentContext(
 	})
 	if err != nil {
 		return fmt.Errorf("whatsapp: send document to %s: %w",
-			digits, err)
+			jid.User, err)
 	}
 
 	s.log.Info().
-		Str("to", digits).
+		Str("to", jid.User).
 		Str("file", filename).
 		Msg("whatsapp: document sent")
 	return nil

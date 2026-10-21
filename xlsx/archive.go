@@ -12,6 +12,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/mas-ony/go-toolkit/internal/bytesize"
 )
 
 // archive is the ZIP package a workbook is stored as, read beside
@@ -175,6 +177,11 @@ var (
 	ErrTooLarge = errors.New("workbook too large")
 )
 
+// errNoSheet is ErrNotWorkbook for an archive whose workbook lists no
+// sheet. inspect returns it when the archive's own listing is empty and
+// load when excelize's is, so both readings refuse in one wording.
+var errNoSheet = fmt.Errorf("%w: it holds no sheet", ErrNotWorkbook)
+
 // rowNumber matches the r attribute of a row's start tag, which
 // carries the row's number.
 var rowNumber = regexp.MustCompile(`\sr\s*=\s*["']([0-9]+)["']`)
@@ -321,7 +328,9 @@ func lastRowNumber(b []byte) int {
 // whose workbook lists no sheet, and with ErrTooLarge for an archive
 // that would expand past MaxUnzippedBytes. The cap is settled first, on
 // the directory alone, so an archive over it is refused before any of
-// it is unpacked.
+// it is unpacked. The refusal names the cap through bytesize.Label, the
+// rule fileutil names its upload cap by, so a cap no unit divides is
+// given in bytes rather than rounded.
 //
 // A size past what an int64 holds is refused whatever the cap. Excelize
 // adds the sizes up as int64, where such a size is negative: it passes
@@ -342,8 +351,8 @@ func inspect(r io.ReaderAt, size int64) (*archive, error) {
 		// Compared before it is added, so a declared size near the top
 		// of uint64 cannot wrap the sum back under the cap.
 		if f.UncompressedSize64 > limit-unzipped {
-			return nil, fmt.Errorf("%w: it expands to more than %d MiB",
-				ErrTooLarge, limit>>20)
+			return nil, fmt.Errorf("%w: it expands to more than %s",
+				ErrTooLarge, bytesize.Label(int64(limit)))
 		}
 		unzipped += f.UncompressedSize64
 
@@ -356,7 +365,7 @@ func inspect(r io.ReaderAt, size int64) (*archive, error) {
 
 	a.sheets = a.listSheets()
 	if len(a.sheets) == 0 {
-		return nil, fmt.Errorf("%w: it holds no sheet", ErrNotWorkbook)
+		return nil, errNoSheet
 	}
 	return a, nil
 }

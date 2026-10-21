@@ -68,10 +68,12 @@ type Datetime struct {
 //   - "2006-01-02T15:04"    — <input type="datetime-local"> no seconds
 //   - "2006-01-02"          — <input type="date">
 //
-// One further entry, "2006-01-02 15:04:05", is the space-separated SQL
-// text timestamp. It comes from the Scan side rather than from a browser —
-// a driver or a CAST that hands back a stringified datetime — which is why
-// it sits with the HTML formats despite not being one.
+// One further entry, time.DateTime ("2006-01-02 15:04:05"), is the
+// space-separated SQL text timestamp. It comes from the Scan side rather
+// than from a browser — a driver or a CAST that hands back a stringified
+// datetime — which is why it sits with the HTML formats despite not being
+// one. It and time.DateOnly are the standard library's own names for two
+// of these layouts, used rather than spelled out again.
 //
 // Order matters, and the ordering here is correct for a reason worth keeping:
 // time.Parse requires the layout to consume the ENTIRE input, so a shorter
@@ -84,8 +86,8 @@ var parseLayouts = []string{
 	time.RFC3339,
 	"2006-01-02T15:04:05", // datetime-local with seconds, no timezone
 	"2006-01-02T15:04",    // datetime-local without seconds, no timezone
-	"2006-01-02 15:04:05", // SQL text timestamp
-	"2006-01-02",          // <input type="date">, and SQL DATE as text
+	time.DateTime,         // SQL text timestamp
+	time.DateOnly,         // <input type="date">, and SQL DATE as text
 }
 
 // parse is the shared string→time routine behind UnmarshalJSON and Scan.

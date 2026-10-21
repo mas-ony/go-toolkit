@@ -17,15 +17,14 @@ package config
 
 import (
 	"go/ast"
-	"go/parser"
 	"go/token"
 	"os"
-	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
 	"testing"
 
+	"github.com/mas-ony/go-toolkit/internal/testutil"
 	"github.com/spf13/viper"
 )
 
@@ -72,54 +71,35 @@ var (
 // file. TestTheSectionTableMatchesTheSource fails when a constructor has
 // no entry here, so a new section cannot escape the contract suite.
 var sections = []section{
-	{"AppConfig", func(v *viper.Viper) SectionConfig {
-		return NewAppConfig(v)
-	}, (*AppConfig)(nil)},
-	{"DatabaseConfig", func(v *viper.Viper) SectionConfig {
-		return NewDatabaseConfig(v)
-	}, (*DatabaseConfig)(nil)},
-	{"AuthConfig", func(v *viper.Viper) SectionConfig {
-		return NewAuthConfig(v)
-	}, (*AuthConfig)(nil)},
-	{"ClientConfig", func(v *viper.Viper) SectionConfig {
-		return NewClientConfig(v)
-	}, (*ClientConfig)(nil)},
-	{"FiberConfig", func(v *viper.Viper) SectionConfig {
-		return NewFiberConfig(v)
-	}, (*FiberConfig)(nil)},
-	{"JWTConfig", func(v *viper.Viper) SectionConfig {
-		return NewJWTConfig(v)
-	}, (*JWTConfig)(nil)},
-	{"LimiterConfig", func(v *viper.Viper) SectionConfig {
-		return NewLimiterConfig(v)
-	}, (*LimiterConfig)(nil)},
-	{"ListenConfig", func(v *viper.Viper) SectionConfig {
-		return NewListenConfig(v)
-	}, (*ListenConfig)(nil)},
-	{"RecoverConfig", func(v *viper.Viper) SectionConfig {
-		return NewRecoverConfig(v)
-	}, (*RecoverConfig)(nil)},
-	{"RequestIDConfig", func(v *viper.Viper) SectionConfig {
-		return NewRequestIDConfig(v)
-	}, (*RequestIDConfig)(nil)},
-	{"SessionConfig", func(v *viper.Viper) SectionConfig {
-		return NewSessionConfig(v)
-	}, (*SessionConfig)(nil)},
-	{"ZerologConfig", func(v *viper.Viper) SectionConfig {
-		return NewZerologConfig(v)
-	}, (*ZerologConfig)(nil)},
-	{"NotificationConfig", func(v *viper.Viper) SectionConfig {
-		return NewNotificationConfig(v)
-	}, (*NotificationConfig)(nil)},
-	{"EmailConfig", func(v *viper.Viper) SectionConfig {
-		return NewEmailConfig(v)
-	}, (*EmailConfig)(nil)},
-	{"WhatsAppConfig", func(v *viper.Viper) SectionConfig {
-		return NewWhatsAppConfig(v)
-	}, (*WhatsAppConfig)(nil)},
-	{"TelegramConfig", func(v *viper.Viper) SectionConfig {
-		return NewTelegramConfig(v)
-	}, (*TelegramConfig)(nil)},
+	{"AppConfig", asSection(NewAppConfig), (*AppConfig)(nil)},
+	{"DatabaseConfig", asSection(NewDatabaseConfig), (*DatabaseConfig)(nil)},
+	{"AuthConfig", asSection(NewAuthConfig), (*AuthConfig)(nil)},
+	{"ClientConfig", asSection(NewClientConfig), (*ClientConfig)(nil)},
+	{"FiberConfig", asSection(NewFiberConfig), (*FiberConfig)(nil)},
+	{"JWTConfig", asSection(NewJWTConfig), (*JWTConfig)(nil)},
+	{"LimiterConfig", asSection(NewLimiterConfig), (*LimiterConfig)(nil)},
+	{"ListenConfig", asSection(NewListenConfig), (*ListenConfig)(nil)},
+	{"RecoverConfig", asSection(NewRecoverConfig), (*RecoverConfig)(nil)},
+	{"RequestIDConfig", asSection(NewRequestIDConfig),
+		(*RequestIDConfig)(nil)},
+	{"SessionConfig", asSection(NewSessionConfig), (*SessionConfig)(nil)},
+	{"ZerologConfig", asSection(NewZerologConfig), (*ZerologConfig)(nil)},
+	{"NotificationConfig", asSection(NewNotificationConfig),
+		(*NotificationConfig)(nil)},
+	{"EmailConfig", asSection(NewEmailConfig), (*EmailConfig)(nil)},
+	{"WhatsAppConfig", asSection(NewWhatsAppConfig), (*WhatsAppConfig)(nil)},
+	{"TelegramConfig", asSection(NewTelegramConfig), (*TelegramConfig)(nil)},
+}
+
+// asSection adapts a section's constructor to the shape the table above
+// and runRules take. A function returning *AppConfig is not a function
+// returning SectionConfig, since Go converts the result but not the
+// function type, so every constructor goes through this one adapter rather
+// than a wrapper of its own.
+func asSection[T SectionConfig](
+	newSection func(*viper.Viper) T,
+) func(*viper.Viper) SectionConfig {
+	return func(v *viper.Viper) SectionConfig { return newSection(v) }
 }
 
 // numberWords maps each count word a header may open with, "Zero" to
@@ -248,12 +228,7 @@ func runRules(t *testing.T, base map[string]any,
 func TestEverySectionListsExactlyTheKeysItReads(t *testing.T) {
 	t.Parallel()
 
-	// go test runs a package's tests in its own directory, so the pattern
-	// sees exactly this package's section files.
-	files, err := filepath.Glob("*_config.go")
-	if err != nil {
-		t.Fatal(err)
-	}
+	files := testutil.Glob(t, "*_config.go")
 	if len(files) != len(sections) {
 		t.Errorf("%d section files but %d sections in the test table — "+
 			"a new section needs an entry in both", len(files),
@@ -263,13 +238,7 @@ func TestEverySectionListsExactlyTheKeysItReads(t *testing.T) {
 	for _, path := range files {
 		t.Run(path, func(t *testing.T) {
 			t.Parallel()
-			fset := token.NewFileSet()
-			f, err := parser.ParseFile(fset, path, nil,
-				parser.ParseComments)
-			if err != nil {
-				t.Fatal(err)
-			}
-
+			f, fset := testutil.ParseFile(t, path)
 			header := headerOf(f, fset)
 			if header == "" {
 				t.Fatal("no header comment below the package clause, " +
@@ -285,7 +254,7 @@ func TestEverySectionListsExactlyTheKeysItReads(t *testing.T) {
 			for _, row := range tableRow.FindAllStringSubmatch(header, -1) {
 				key, env := row[1], row[2]
 				listed[key] = true
-				want := strings.ToUpper(strings.ReplaceAll(key, ".", "_"))
+				want := EnvName(key)
 				if env != want {
 					t.Errorf("%s is listed as %s, but NewViper derives %s",
 						key, env, want)
@@ -346,6 +315,44 @@ func TestEverySectionConstructsFromNothing(t *testing.T) {
 	}
 }
 
+// Configured is the question a package asks before it refuses a section
+// as absent, and every section that has it answers by one rule: a nil
+// section and one no key reached report false, and a single setting is
+// enough to report true. A section that gains the method fails here until
+// present holds a case for it, so none of them answers untested.
+func TestEveryConfiguredTellsAbsentFromPresent(t *testing.T) {
+	t.Parallel()
+	type configurable interface{ Configured() bool }
+	present := map[string]configurable{
+		"DatabaseConfig": &DatabaseConfig{Host: "db.internal"},
+		"EmailConfig":    &EmailConfig{Async: true},
+		"TelegramConfig": &TelegramConfig{Async: true},
+	}
+	for _, s := range sections {
+		absent, ok := s.nilValue.(configurable)
+		if !ok {
+			continue
+		}
+		t.Run(s.name, func(t *testing.T) {
+			t.Parallel()
+			if absent.Configured() {
+				t.Error("a nil section reports itself configured")
+			}
+			if s.build(viper.New()).(configurable).Configured() {
+				t.Error("a section no key reached reports itself " +
+					"configured")
+			}
+			one, ok := present[s.name]
+			if !ok {
+				t.Fatal("no one-setting case for this section")
+			}
+			if !one.Configured() {
+				t.Error("a section with one setting reports itself absent")
+			}
+		})
+	}
+}
+
 // A nil *T has to validate to an error rather than panic, and log as
 // "<nil T>" rather than panic. A service building its validation list
 // from sections it has not finished wiring reaches exactly this.
@@ -376,21 +383,11 @@ func TestStringNeverPrintsASecret(t *testing.T) {
 		key   string
 		build func(v *viper.Viper) SectionConfig
 	}{
-		{"database.password", func(v *viper.Viper) SectionConfig {
-			return NewDatabaseConfig(v)
-		}},
-		{"fiber.client.token", func(v *viper.Viper) SectionConfig {
-			return NewClientConfig(v)
-		}},
-		{"fiber.jwt.secret", func(v *viper.Viper) SectionConfig {
-			return NewJWTConfig(v)
-		}},
-		{"notification.email.password", func(v *viper.Viper) SectionConfig {
-			return NewEmailConfig(v)
-		}},
-		{"notification.telegram.token", func(v *viper.Viper) SectionConfig {
-			return NewTelegramConfig(v)
-		}},
+		{"database.password", asSection(NewDatabaseConfig)},
+		{"fiber.client.token", asSection(NewClientConfig)},
+		{"fiber.jwt.secret", asSection(NewJWTConfig)},
+		{"notification.email.password", asSection(NewEmailConfig)},
+		{"notification.telegram.token", asSection(NewTelegramConfig)},
 	} {
 		t.Run(c.key, func(t *testing.T) {
 			t.Parallel()
@@ -411,23 +408,12 @@ func TestStringNeverPrintsASecret(t *testing.T) {
 // The test table has to stay in step with the files, or a new section
 // silently escapes every test above. This is checked by NAME, so an entry
 // for a section that was renamed fails too.
-//
-// Each file is parsed on its own, as the other contract tests do. That
-// also keeps this test off parser.ParseDir, which is deprecated because it
-// ignores build tags.
 func TestTheSectionTableMatchesTheSource(t *testing.T) {
 	t.Parallel()
 
-	files, err := filepath.Glob("*_config.go")
-	if err != nil {
-		t.Fatal(err)
-	}
 	var inSource []string
-	for _, path := range files {
-		f, err := parser.ParseFile(token.NewFileSet(), path, nil, 0)
-		if err != nil {
-			t.Fatal(err)
-		}
+	for _, path := range testutil.Glob(t, "*_config.go") {
+		f, _ := testutil.ParseFile(t, path)
 		for _, d := range f.Decls {
 			fn, ok := d.(*ast.FuncDecl)
 			if !ok || fn.Recv != nil ||
@@ -458,11 +444,7 @@ func TestTheSectionTableMatchesTheSource(t *testing.T) {
 // its tests. A section added without one fails here.
 func TestEverySectionFileHasItsOwnTestFile(t *testing.T) {
 	t.Parallel()
-	files, err := filepath.Glob("*_config.go")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, f := range files {
+	for _, f := range testutil.Glob(t, "*_config.go") {
 		test := strings.TrimSuffix(f, ".go") + "_test.go"
 		if _, err := os.Stat(test); err != nil {
 			t.Errorf("%s has no %s", f, test)
@@ -477,19 +459,11 @@ func TestEverySectionFileHasItsOwnTestFile(t *testing.T) {
 // table above already names every one.
 func TestEverySectionFileIsNamedForItsPrefix(t *testing.T) {
 	t.Parallel()
-	files, err := filepath.Glob("*_config.go")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, path := range files {
-		fset := token.NewFileSet()
-		f, err := parser.ParseFile(fset, path, nil, parser.ParseComments)
-		if err != nil {
-			t.Fatal(err)
-		}
+	for _, path := range testutil.Glob(t, "*_config.go") {
 		// A header that names no section is reported by
 		// TestEverySectionListsExactlyTheKeysItReads.
-		m := sectionLine.FindStringSubmatch(headerOf(f, fset))
+		m := sectionLine.FindStringSubmatch(
+			headerOf(testutil.ParseFile(t, path)))
 		if m == nil {
 			continue
 		}
@@ -509,11 +483,7 @@ func TestEverySectionFileIsNamedForItsPrefix(t *testing.T) {
 // source file.
 func TestEveryIntegrationFileNamesASourceFile(t *testing.T) {
 	t.Parallel()
-	files, err := filepath.Glob("*_integration_test.go")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, f := range files {
+	for _, f := range testutil.Glob(t, "*_integration_test.go") {
 		src := strings.TrimSuffix(f, "_integration_test.go") + ".go"
 		if _, err := os.Stat(src); err != nil {
 			t.Errorf("%s names no source file: there is no %s", f, src)

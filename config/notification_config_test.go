@@ -114,9 +114,9 @@ func TestNotificationEnabled(t *testing.T) {
 	}
 }
 
-// No channels is logged as "none" in words, whether the list is nil or
+// No channels is logged as "(none)" in words, whether the list is nil or
 // empty, so the startup line cannot be read as a list that failed to
-// print.
+// print, nor as a channel called none.
 func TestNotificationString(t *testing.T) {
 	t.Parallel()
 	for _, c := range []struct {
@@ -125,8 +125,8 @@ func TestNotificationString(t *testing.T) {
 	}{
 		{[]string{"whatsapp", "email"}, "Channels=whatsapp,email"},
 		{[]string{"telegram"}, "Channels=telegram"},
-		{nil, "Channels=none"},
-		{[]string{}, "Channels=none"},
+		{nil, "Channels=(none)"},
+		{[]string{}, "Channels=(none)"},
 	} {
 		got := (&NotificationConfig{Channels: c.channels}).String()
 		if got != c.want {

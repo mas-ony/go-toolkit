@@ -10,29 +10,28 @@ package importer
 
 import (
 	"bytes"
-	"context"
 	"encoding/csv"
-	"flag"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 
-	"github.com/mas-ony/go-toolkit/xlsx"
 	"github.com/rs/zerolog"
 )
 
-// reportDataset supplies only the two methods the report renderers use.
-type reportDataset struct {
-	info  Info
-	shape ReportShape
-}
-
-// summaryRun builds the Run a summary is rendered from.
-func summaryRun(opt Options, c *Counters) *Run {
+// quietRun builds a Run that logs nothing, from opt and the counters c: the
+// Run a summary is rendered from, and the one Execute is given.
+func quietRun(opt Options, c *Counters) *Run {
 	return &Run{Log: zerolog.Nop(), Opt: opt, Count: c}
 }
+
+// caveated is a dataset whose Info carries a caveat, the warning the
+// summary's mode line repeats.
+var caveated = fakeDataset{info: Info{
+	Name:   "things",
+	Caveat: "a re-run duplicates every row",
+}}
 
 // readCSV parses a written report back.
 func readCSV(t *testing.T, path string) [][]string {
@@ -50,47 +49,6 @@ func readCSV(t *testing.T, path string) [][]string {
 	return records
 }
 
-// Info returns the info the test set.
-func (d reportDataset) Info() Info { return d.info }
-
-// Len is not reached by the renderers; see reportDataset.
-func (reportDataset) Len() int { panic("not used here") }
-
-// Flags is not reached by the renderers; see reportDataset.
-func (reportDataset) Flags(*flag.FlagSet) { panic("not used here") }
-
-// Validate is not reached by the renderers; see reportDataset.
-func (reportDataset) Validate() error { panic("not used here") }
-
-// Layout is not reached by the renderers; see reportDataset.
-func (reportDataset) Layout() xlsx.Layout { panic("not used here") }
-
-// Columns is not reached by the renderers; see reportDataset.
-func (reportDataset) Columns() []xlsx.Column { panic("not used here") }
-
-// HeaderAdvice is not reached by the renderers; see reportDataset.
-func (reportDataset) HeaderAdvice(error) error { panic("not used here") }
-
-// Connect is not reached by the renderers; see reportDataset.
-func (reportDataset) Connect(context.Context, Transport, *Run) error {
-	panic("not used here")
-}
-
-// Prepare is not reached by the renderers; see reportDataset.
-func (reportDataset) Prepare(
-	context.Context, *xlsx.File, *Run,
-) ([]Outcome, error) {
-	panic("not used here")
-}
-
-// Import is not reached by the renderers; see reportDataset.
-func (reportDataset) Import(context.Context, int, *Run) Outcome {
-	panic("not used here")
-}
-
-// Report returns the shape the test set.
-func (d reportDataset) Report() ReportShape { return d.shape }
-
 // Created, updated and skipped are suppressed at zero because most
 // datasets produce only one of the three, and a column of zeroes for
 // outcomes this workbook cannot have is noise in the block an operator
@@ -101,8 +59,8 @@ func TestPrintSummarySuppressesZeroOutcomeCounters(t *testing.T) {
 	var buf bytes.Buffer
 
 	PrintSummary(&buf, "/tmp/book.xlsx",
-		reportDataset{info: Info{Name: "things"}},
-		summaryRun(Options{}, c), nil)
+		named("things"),
+		quietRun(Options{}, c), nil)
 
 	out := buf.String()
 	for _, want := range []string{"rows parsed", "created", "failed"} {
@@ -129,8 +87,8 @@ func TestPrintSummaryDryRunOmitsTheWriteCounters(t *testing.T) {
 	var buf bytes.Buffer
 
 	PrintSummary(&buf, "book.xlsx",
-		reportDataset{info: Info{Name: "things"}},
-		summaryRun(Options{DryRun: true}, c), nil)
+		named("things"),
+		quietRun(Options{DryRun: true}, c), nil)
 
 	out := buf.String()
 	if !strings.Contains(out, "dry run — nothing was written") {
@@ -152,11 +110,8 @@ func TestPrintSummaryDryRunOmitsTheWriteCounters(t *testing.T) {
 func TestPrintSummaryShowsTheCaveat(t *testing.T) {
 	var buf bytes.Buffer
 	PrintSummary(&buf, "book.xlsx",
-		reportDataset{info: Info{
-			Name:   "things",
-			Caveat: "a re-run duplicates every row",
-		}},
-		summaryRun(Options{}, &Counters{}), nil)
+		caveated,
+		quietRun(Options{}, &Counters{}), nil)
 
 	if !strings.Contains(buf.String(), "a re-run duplicates every row") {
 		t.Errorf("the caveat is missing:\n%s", buf.String())
@@ -169,11 +124,8 @@ func TestPrintSummaryShowsTheCaveat(t *testing.T) {
 func TestPrintSummaryDryRunReplacesTheCaveat(t *testing.T) {
 	var buf bytes.Buffer
 	PrintSummary(&buf, "book.xlsx",
-		reportDataset{info: Info{
-			Name:   "things",
-			Caveat: "a re-run duplicates every row",
-		}},
-		summaryRun(Options{DryRun: true}, &Counters{}), nil)
+		caveated,
+		quietRun(Options{DryRun: true}, &Counters{}), nil)
 
 	if strings.Contains(buf.String(), "duplicates") {
 		t.Errorf("a dry run warns about duplicating:\n%s", buf.String())
@@ -189,8 +141,8 @@ func TestPrintSummaryHonoursDeclaredCounters(t *testing.T) {
 
 	var buf bytes.Buffer
 	PrintSummary(&buf, "book.xlsx",
-		reportDataset{info: Info{Name: "things"}},
-		summaryRun(Options{}, c), nil)
+		named("things"),
+		quietRun(Options{}, c), nil)
 
 	out := buf.String()
 	if !strings.Contains(out, "files uploaded") {
@@ -215,8 +167,8 @@ func TestPrintSummaryListsRowsWithNotesAndFailures(t *testing.T) {
 
 	var buf bytes.Buffer
 	PrintSummary(&buf, "book.xlsx",
-		reportDataset{info: Info{Name: "things"}},
-		summaryRun(Options{}, &Counters{Parsed: 3}), outcomes)
+		named("things"),
+		quietRun(Options{}, &Counters{Parsed: 3}), outcomes)
 
 	out := buf.String()
 	if !strings.Contains(out, "Rows needing attention") {
@@ -237,8 +189,8 @@ func TestPrintSummaryListsRowsWithNotesAndFailures(t *testing.T) {
 func TestPrintSummarySaysSoWhenThereAreNoProblems(t *testing.T) {
 	var buf bytes.Buffer
 	PrintSummary(&buf, "book.xlsx",
-		reportDataset{info: Info{Name: "things"}},
-		summaryRun(Options{}, &Counters{Parsed: 2}),
+		named("things"),
+		quietRun(Options{}, &Counters{Parsed: 2}),
 		[]Outcome{{ExcelRow: 5, Status: StatusCreated}})
 
 	if !strings.Contains(buf.String(), "No problems.") {
@@ -251,7 +203,7 @@ func TestPrintSummarySaysSoWhenThereAreNoProblems(t *testing.T) {
 // declared them, and the notes last because that field is long.
 func TestWriteReportColumnOrder(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "report.csv")
-	ds := reportDataset{shape: ReportShape{
+	ds := fakeDataset{shape: ReportShape{
 		Label:  "reference",
 		ID:     "record_id",
 		Fields: []string{"unit", "area"},
@@ -292,7 +244,7 @@ func TestWriteReportColumnOrder(t *testing.T) {
 func TestWriteReportFallsBackToDefaultColumnNames(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "report.csv")
 
-	if err := WriteReport(path, reportDataset{}, nil); err != nil {
+	if err := WriteReport(path, fakeDataset{}, nil); err != nil {
 		t.Fatalf("WriteReport: %v", err)
 	}
 
@@ -312,7 +264,7 @@ func TestWriteReportFallsBackToDefaultColumnNames(t *testing.T) {
 // previous row's values through the reused record buffer.
 func TestWriteReportKeepsEveryRowTheSameShape(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "report.csv")
-	ds := reportDataset{shape: ReportShape{
+	ds := fakeDataset{shape: ReportShape{
 		Fields: []string{"unit", "area"},
 	}}
 
@@ -349,7 +301,7 @@ func TestWriteReportQuotesAwkwardValues(t *testing.T) {
 		Status:   StatusFailed,
 		Notes:    []string{"line one\nline two"},
 	}}
-	if err := WriteReport(path, reportDataset{}, outcomes); err != nil {
+	if err := WriteReport(path, fakeDataset{}, outcomes); err != nil {
 		t.Fatalf("WriteReport: %v", err)
 	}
 
@@ -366,7 +318,7 @@ func TestWriteReportQuotesAwkwardValues(t *testing.T) {
 func TestWriteReportReportsAnUnwritablePath(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "no-such-dir", "report.csv")
 
-	err := WriteReport(path, reportDataset{}, nil)
+	err := WriteReport(path, fakeDataset{}, nil)
 	if err == nil {
 		t.Fatal("WriteReport succeeded into a missing directory")
 	}

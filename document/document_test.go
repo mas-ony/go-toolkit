@@ -6,18 +6,22 @@ package document
 // dot-directory and extension skips, recursion, the size cap read from the
 // stat, and the name cap measured in bytes. What depends on the filesystem,
 // the platform or the process is in document_integration_test.go.
+//
+// The size-cap tests lower fileutil.MaxFileBytes, a global, with
+// testutil.Set. None of the tests here run in parallel, which is what makes
+// borrowing it safe.
 
 import (
 	"bytes"
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 
 	"github.com/mas-ony/go-toolkit/fileutil"
+	"github.com/mas-ony/go-toolkit/internal/testutil"
 )
 
 // indexOf builds an Index over dir, failing the test on error.
@@ -30,47 +34,13 @@ func indexOf(t *testing.T, dir string, recursive bool) *Index {
 	return idx
 }
 
-// withMaxFileBytes sets the package-wide cap for one test and restores it
-// afterwards.
-//
-// It is a global in fileutil, so a test that changed it and left it changed
-// would silently rewrite what every later test in this file expects. None
-// of these run in parallel, which is what makes borrowing it safe.
-func withMaxFileBytes(t *testing.T, n int) {
-	t.Helper()
-	old := fileutil.MaxFileBytes
-	fileutil.MaxFileBytes = n
-	t.Cleanup(func() { fileutil.MaxFileBytes = old })
-}
-
 // write creates a file under dir with one byte of content, making the parent
 // directories as needed. Content is deliberately non-empty: Load and ReadFile
 // both refuse a zero-byte file, so a helper that wrote nothing would make
 // every other test in this file fail for the wrong reason.
 func write(t *testing.T, dir, rel string) string {
 	t.Helper()
-	path := filepath.Join(dir, rel)
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		t.Fatalf("mkdir for %s: %v", rel, err)
-	}
-	if err := os.WriteFile(path, []byte("x"), 0o644); err != nil {
-		t.Fatalf("write %s: %v", rel, err)
-	}
-	return path
-}
-
-// writeBytes is write with the content supplied, for the tests where the
-// SIZE of the file is the thing under test rather than its name.
-func writeBytes(t *testing.T, dir, rel string, content []byte) string {
-	t.Helper()
-	path := filepath.Join(dir, rel)
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		t.Fatalf("mkdir for %s: %v", rel, err)
-	}
-	if err := os.WriteFile(path, content, 0o644); err != nil {
-		t.Fatalf("write %s: %v", rel, err)
-	}
-	return path
+	return testutil.WriteFile(t, filepath.Join(dir, rel), []byte("x"))
 }
 
 // Count reports files, not distinct stems. The two differ exactly when one
@@ -337,10 +307,7 @@ func TestLoadReturnsBasenameNotReference(t *testing.T) {
 // A zero-byte file is refused rather than returned as a document.
 func TestLoadRejectsEmptyFile(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "1.pdf")
-	if err := os.WriteFile(path, nil, 0o644); err != nil {
-		t.Fatalf("write: %v", err)
-	}
+	testutil.WriteFile(t, filepath.Join(dir, "1.pdf"), nil)
 
 	if _, _, err := indexOf(t, dir, false).Load("1"); err == nil {
 		t.Error("expected a zero-byte file to be refused")
@@ -445,11 +412,13 @@ func TestReadFileAcceptsAllowedType(t *testing.T) {
 // file AT the limit would be just as wrong as one that admitted the file
 // over it, and only one of the two shows up as an outage.
 func TestLoadRefusesAFileOverTheSizeCap(t *testing.T) {
-	withMaxFileBytes(t, 64)
+	testutil.Set(t, &fileutil.MaxFileBytes, 64)
 
 	dir := t.TempDir()
-	writeBytes(t, dir, "at-limit.pdf", bytes.Repeat([]byte("x"), 64))
-	writeBytes(t, dir, "over.pdf", bytes.Repeat([]byte("x"), 65))
+	testutil.WriteFile(t, filepath.Join(dir, "at-limit.pdf"),
+		bytes.Repeat([]byte("x"), 64))
+	testutil.WriteFile(t, filepath.Join(dir, "over.pdf"),
+		bytes.Repeat([]byte("x"), 65))
 
 	idx := indexOf(t, dir, false)
 
@@ -475,10 +444,11 @@ func TestLoadRefusesAFileOverTheSizeCap(t *testing.T) {
 // -supplied path rather than one the index resolved — so it needs its own
 // assertion rather than inheriting Load's.
 func TestReadFileRefusesAFileOverTheSizeCap(t *testing.T) {
-	withMaxFileBytes(t, 32)
+	testutil.Set(t, &fileutil.MaxFileBytes, 32)
 
 	dir := t.TempDir()
-	path := writeBytes(t, dir, "big.pdf", bytes.Repeat([]byte("x"), 33))
+	path := testutil.WriteFile(t, filepath.Join(dir, "big.pdf"),
+		bytes.Repeat([]byte("x"), 33))
 
 	if _, _, err := ReadFile(path); err == nil {
 		t.Error("expected an over-sized file to be refused")
@@ -496,10 +466,10 @@ func TestReadFileRefusesAFileOverTheSizeCap(t *testing.T) {
 func TestADisabledSizeCapAdmitsEverything(t *testing.T) {
 	for _, limit := range []int{0, -1} {
 		t.Run(fmt.Sprintf("cap=%d", limit), func(t *testing.T) {
-			withMaxFileBytes(t, limit)
+			testutil.Set(t, &fileutil.MaxFileBytes, limit)
 
 			dir := t.TempDir()
-			writeBytes(t, dir, "big.pdf",
+			testutil.WriteFile(t, filepath.Join(dir, "big.pdf"),
 				bytes.Repeat([]byte("x"), 4096))
 
 			_, data, err := indexOf(t, dir, false).Load("big")

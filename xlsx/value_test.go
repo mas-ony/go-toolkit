@@ -13,6 +13,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/mas-ony/go-toolkit/internal/testutil"
 )
 
 // The separator rules in Decimal are the subtlest logic here and the easiest
@@ -446,9 +448,7 @@ func TestTheEpochsAreAFixedDistanceApart(t *testing.T) {
 // this package's tests runs in parallel. Both parse paths are checked, since
 // each reaches Day from a UTC value of its own.
 func TestDateKeepsItsDayThroughValueWestOfGreenwich(t *testing.T) {
-	old := time.Local
-	time.Local = time.FixedZone("UTC-5", -5*60*60)
-	t.Cleanup(func() { time.Local = old })
+	testutil.Set(t, &time.Local, time.FixedZone("UTC-5", -5*60*60))
 
 	for _, in := range []string{"36573", "17/02/2000"} {
 		got, err := Date(in, false)

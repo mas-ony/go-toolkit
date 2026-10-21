@@ -24,6 +24,7 @@ import (
 	"testing"
 
 	"github.com/jmoiron/sqlx"
+	"github.com/mas-ony/go-toolkit/internal/testutil"
 )
 
 // txFixture creates a one-column table for the tests below to write to.
@@ -97,19 +98,17 @@ func TestIntegrationWithTxRollsBackOnPanic(t *testing.T) {
 		table := txFixture(t, db)
 		ctx := context.Background()
 
-		func() {
-			defer func() {
-				if p := recover(); p == nil {
-					t.Error("the panic was swallowed")
-				}
-			}()
+		p := testutil.CapturePanic(func() {
 			_ = WithTx(db, func(tx *sqlx.Tx) error {
 				if err := insertID(ctx, tx, table, 1); err != nil {
 					t.Fatalf("insert: %v", err)
 				}
 				panic("from fn")
 			})
-		}()
+		})
+		if p == nil {
+			t.Error("the panic was swallowed")
+		}
 
 		if got := rowCount(t, db, table); got != 0 {
 			t.Errorf("after a panic: %d rows, want 0", got)

@@ -14,11 +14,9 @@ import (
 	"testing"
 
 	"github.com/gofiber/fiber/v3"
+	"github.com/mas-ony/go-toolkit/internal/testutil"
 	"github.com/spf13/viper"
 )
-
-// buildFiber adapts NewFiberConfig to the constructor shape runRules takes.
-func buildFiber(v *viper.Viper) SectionConfig { return NewFiberConfig(v) }
 
 // manyMethods builds a comma-separated list of n distinct method names,
 // the form an environment variable would carry.
@@ -35,7 +33,7 @@ func manyMethods(n int) string {
 // the keys its rule is about.
 func TestFiberValidate(t *testing.T) {
 	t.Parallel()
-	runRules(t, map[string]any{}, buildFiber, []ruleCase{
+	runRules(t, map[string]any{}, asSection(NewFiberConfig), []ruleCase{
 		// fasthttp enforces this before the router, so every POST, PUT
 		// and DELETE would answer 405 with no handler ever running.
 		{"get_only", map[string]any{"fiber.get_only": true},
@@ -124,14 +122,12 @@ func TestFiberPanicsOnARouteOutsideRequestMethods(t *testing.T) {
 	t.Parallel()
 	for _, methods := range [][]string{{"GET,POST"}, {"get", "post"}} {
 		app := fiber.New(fiber.Config{RequestMethods: methods})
-		func() {
-			defer func() {
-				if recover() == nil {
-					t.Errorf("RequestMethods=%q: registering a GET route "+
-						"did not panic", methods)
-				}
-			}()
+		p := testutil.CapturePanic(func() {
 			app.Get("/", func(fiber.Ctx) error { return nil })
-		}()
+		})
+		if p == nil {
+			t.Errorf("RequestMethods=%q: registering a GET route "+
+				"did not panic", methods)
+		}
 	}
 }

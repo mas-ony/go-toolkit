@@ -189,7 +189,7 @@ func (c *AuthConfig) String() string {
 	}
 	mode := c.Mode
 	if mode == "" {
-		mode = "(none)"
+		mode = noneLabel
 	}
 
 	return fmt.Sprintf(

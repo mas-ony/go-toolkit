@@ -31,11 +31,11 @@ package config
 import (
 	"errors"
 	"fmt"
-	"net/url"
 	"regexp"
 	"strings"
 	"time"
 
+	"github.com/mas-ony/go-toolkit/internal/upstream"
 	"github.com/spf13/viper"
 )
 
@@ -44,8 +44,8 @@ import (
 //
 // NewTelegramConfig leaves the field empty and the telegram package applies
 // this, so a TelegramConfig that nothing supplied stays equal to the zero
-// value, which is how telegram.New tells "not configured" from "configured
-// halfway".
+// value, which is how Configured, and through it telegram.New, tells "not
+// configured" from "configured halfway".
 const DefaultTelegramAPIURL = "https://api.telegram.org"
 
 // telegramToken is the shape BotFather issues: the bot's numeric id, a
@@ -140,6 +140,16 @@ func NewTelegramConfig(v *viper.Viper) *TelegramConfig {
 	}
 }
 
+// Configured reports whether any notification.telegram.* setting reached
+// this section. A nil receiver reports false.
+//
+// It is the question telegram.New asks first, and the rule is the one
+// DatabaseConfig.Configured applies: a section nothing supplied holds no
+// bot to send as, and is refused as not configured rather than with an
+// error for every key it lacks. It asks whether ANY field is set, not
+// whether the section is usable; that is Validate's question.
+func (c *TelegramConfig) Configured() bool { return configured(c) }
+
 // Validate returns a joined error for every invalid or missing
 // TelegramConfig field.
 //
@@ -185,40 +195,23 @@ func (c *TelegramConfig) Validate() error {
 	}
 
 	// A STATED API URL is checked, an absent one is not: empty is the
-	// hosted API. The rules are fiber.client.base_url's, plus two that come
-	// from the token living in the path.
+	// hosted API. upstream.ParseBaseURL holds it to the rules
+	// fiber.client.base_url is held to, and two more come from the token
+	// living in the path. Trimming never adds or removes a "?" or "#", so
+	// the value as written answers whether it carries one.
 	if c.APIURL != "" {
-		raw := strings.TrimRight(strings.TrimSpace(c.APIURL), "/")
-		shown := redactUserinfo(c.APIURL)
-		u, err := url.Parse(raw)
+		u, err := upstream.ParseBaseURL("notification.telegram.api_url",
+			c.APIURL, loggedCredential)
 		switch {
 		case err != nil:
-			errs = append(errs, fmt.Errorf("notification.telegram.api_url "+
-				"is not a valid URL (got %q): %w",
-				shown,
-				urlParseCause(err)))
-		case u.Scheme != "http" && u.Scheme != "https":
-			errs = append(errs, fmt.Errorf("notification.telegram.api_url "+
-				"must start with http:// or https:// (got %q)",
-				shown))
-		case u.Host == "":
-			errs = append(errs, fmt.Errorf("notification.telegram.api_url "+
-				"names no host (got %q): every request would be built "+
-				"against an address with nothing to dial",
-				shown))
-		case u.User != nil:
-			errs = append(errs, fmt.Errorf("notification.telegram.api_url "+
-				"must not carry userinfo (got %q): the configuration is "+
-				"logged on every start, so a credential here reaches the "+
-				"log",
-				shown))
-		case strings.ContainsAny(raw, "?#"):
+			errs = append(errs, err)
+		case strings.ContainsAny(c.APIURL, "?#"):
 			errs = append(errs, fmt.Errorf("notification.telegram.api_url "+
 				"must not carry a query or fragment (got %q): the method "+
 				"and the token are appended to its path, and either would "+
 				"swallow them",
-				shown))
-		case u.Scheme == "http" && !onLoopback(u.Hostname()):
+				upstream.RedactUserinfo(c.APIURL)))
+		case u.Scheme == "http" && !upstream.IsLoopback(u.Hostname()):
 			errs = append(errs, fmt.Errorf("notification.telegram.api_url "+
 				"is http://, so the token, which is part of every request "+
 				"path, would cross to %s in clear text: use https, or a "+
@@ -227,27 +220,13 @@ func (c *TelegramConfig) Validate() error {
 		}
 	}
 
-	if c.Timeout == 0 {
-		errs = append(errs, errors.New("notification.telegram.timeout is "+
-			"required: it is the only bound a send has once it runs "+
-			"detached from a request, and without one an API that stops "+
-			"answering holds that send open indefinitely"))
-	} else if c.Timeout < time.Second {
-		errs = append(errs, fmt.Errorf("notification.telegram.timeout must "+
-			"be at least 1s (got %s): no request to the API completes in "+
-			"less, and if this was meant as seconds, write the unit; a "+
-			"bare number is nanoseconds",
-			c.Timeout))
+	err := checkSendTimeout("notification.telegram.timeout", c.Timeout,
+		"an API", "request to the API")
+	if err != nil {
+		errs = append(errs, err)
 	}
 
 	return errors.Join(errs...)
-}
-
-// onLoopback reports whether host is one of the three spellings a
-// credential may cross to in clear text; see loopbackHosts.
-func onLoopback(host string) bool {
-	_, ok := loopbackHosts[host]
-	return ok
 }
 
 // String returns a loggable representation of TelegramConfig.
@@ -270,11 +249,8 @@ func (c *TelegramConfig) String() string {
 		return "<nil TelegramConfig>"
 	}
 
-	token := "(none)"
-	if c.Token != "" {
-		token = "(set)"
-	}
-	api := redactUserinfo(c.APIURL)
+	token := setOrNone(c.Token != "")
+	api := upstream.RedactUserinfo(c.APIURL)
 	if api == "" {
 		api = DefaultTelegramAPIURL + " (default)"
 	}

@@ -97,22 +97,44 @@ func trust(t *testing.T, s *Service) {
 	s.tlsConf.RootCAs = pool
 }
 
+// tlsRelay starts a relay speaking mode, starttls or implicit, with the
+// test certificate and a PLAIN login for notif that it offers only once
+// the connection is encrypted, as a submission server does.
+func tlsRelay(t *testing.T, mode string) *relay {
+	t.Helper()
+	return (&relay{
+		tlsConf:      serverTLS(t),
+		implicit:     mode == config.EmailTLSImplicit,
+		mechs:        []string{"PLAIN"},
+		users:        map[string]string{"notif": "rahasia"},
+		authAfterTLS: true,
+	}).start(t)
+}
+
+// overTLS returns a config change that selects mode and logs in as notif,
+// the client half of tlsRelay, with change applied after it when there is
+// one.
+func overTLS(
+	mode string,
+	change func(*config.EmailConfig),
+) func(*config.EmailConfig) {
+	return func(c *config.EmailConfig) {
+		c.TLS = mode
+		login("notif", "rahasia")(c)
+		if change != nil {
+			change(c)
+		}
+	}
+}
+
 // The relay offers AUTH only once the connection is encrypted, as a
 // submission server does, and records whether each step arrived over
 // TLS. A client that logged in before upgrading would find nothing to log
 // in with; one that upgraded late would be recorded doing it.
 func TestIntegrationStartTLSComesBeforeTheLogin(t *testing.T) {
 	t.Parallel()
-	r := (&relay{
-		tlsConf:      serverTLS(t),
-		mechs:        []string{"PLAIN"},
-		users:        map[string]string{"notif": "rahasia"},
-		authAfterTLS: true,
-	}).start(t)
-	s := service(t, r, func(c *config.EmailConfig) {
-		c.TLS = config.EmailTLSStartTLS
-		login("notif", "rahasia")(c)
-	})
+	r := tlsRelay(t, config.EmailTLSStartTLS)
+	s := service(t, r, overTLS(config.EmailTLSStartTLS, nil))
 	trust(t, s)
 
 	if err := s.SendText(t.Context(), "budi@example.go.id", "s",
@@ -131,16 +153,8 @@ func TestIntegrationStartTLSComesBeforeTheLogin(t *testing.T) {
 // both travel over TLS.
 func TestIntegrationImplicitTLS(t *testing.T) {
 	t.Parallel()
-	r := (&relay{
-		tlsConf:  serverTLS(t),
-		implicit: true,
-		mechs:    []string{"PLAIN"},
-		users:    map[string]string{"notif": "rahasia"},
-	}).start(t)
-	s := service(t, r, func(c *config.EmailConfig) {
-		c.TLS = config.EmailTLSImplicit
-		login("notif", "rahasia")(c)
-	})
+	r := tlsRelay(t, config.EmailTLSImplicit)
+	s := service(t, r, overTLS(config.EmailTLSImplicit, nil))
 	trust(t, s)
 
 	if err := s.SendText(t.Context(), "budi@example.go.id", "s",
@@ -162,29 +176,10 @@ func TestIntegrationTheCertificateIsVerified(t *testing.T) {
 	for _, mode := range []string{
 		config.EmailTLSStartTLS, config.EmailTLSImplicit,
 	} {
-		relayFor := func(t *testing.T) *relay {
-			return (&relay{
-				tlsConf:  serverTLS(t),
-				implicit: mode == config.EmailTLSImplicit,
-				mechs:    []string{"PLAIN"},
-				users:    map[string]string{"notif": "rahasia"},
-			}).start(t)
-		}
-		configure := func(change func(*config.EmailConfig)) func(
-			*config.EmailConfig) {
-			return func(c *config.EmailConfig) {
-				c.TLS = mode
-				login("notif", "rahasia")(c)
-				if change != nil {
-					change(c)
-				}
-			}
-		}
-
 		t.Run(mode+"/untrusted", func(t *testing.T) {
 			t.Parallel()
-			r := relayFor(t)
-			s := service(t, r, configure(nil))
+			r := tlsRelay(t, mode)
+			s := service(t, r, overTLS(mode, nil))
 
 			err := s.SendText(t.Context(), "budi@example.go.id", "s", "b")
 			var verr *tls.CertificateVerificationError
@@ -202,8 +197,8 @@ func TestIntegrationTheCertificateIsVerified(t *testing.T) {
 
 		t.Run(mode+"/insecure", func(t *testing.T) {
 			t.Parallel()
-			r := relayFor(t)
-			s := service(t, r, configure(func(c *config.EmailConfig) {
+			r := tlsRelay(t, mode)
+			s := service(t, r, overTLS(mode, func(c *config.EmailConfig) {
 				c.Insecure = true
 			}))
 
@@ -218,8 +213,8 @@ func TestIntegrationTheCertificateIsVerified(t *testing.T) {
 
 		t.Run(mode+"/another name", func(t *testing.T) {
 			t.Parallel()
-			r := relayFor(t)
-			s := service(t, r, configure(func(c *config.EmailConfig) {
+			r := tlsRelay(t, mode)
+			s := service(t, r, overTLS(mode, func(c *config.EmailConfig) {
 				c.Host = "localhost"
 			}))
 			trust(t, s)

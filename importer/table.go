@@ -67,18 +67,26 @@ type Table[T any] []Field[T]
 // columns — is the dataset's own work, done after Apply returns. Custom
 // is for the cases in between: one column, one rule, too specific to
 // name.
+//
+// A field built by hand rather than through a constructor names its
+// column as the contract entry it is:
+//
+//	importer.Field[Row]{
+//		Column: xlsx.Column{
+//			Col: "E", Captions: []string{"Kode"}, Purpose: "code",
+//		},
+//		Key: "code",
+//		Set: setCode,
+//	}
 type Field[T any] struct {
-	// Col is the column letter: "C", or "AB".
-	Col string
-
-	// Captions are the spellings this column accepts, passed through to
-	// xlsx.Column. List every spelling seen in the wild rather than
-	// one canonical string; see that type for why.
-	Captions []string
-
-	// Purpose is a short phrase naming what the column is read for. It
-	// appears in header-check failures and in warnings.
-	Purpose string
+	// Column is the field's entry in the layout contract: the column
+	// letter, the captions it accepts and the purpose it is read for.
+	// It is embedded, so f.Col, f.Captions and f.Purpose read it, and
+	// Columns hands it to VerifyHeaders and DataRows as it stands. List
+	// every caption seen in the wild rather than one canonical string;
+	// see xlsx.Column for why. Purpose also names the column in the
+	// warnings and errors Apply reports.
+	xlsx.Column
 
 	// Required makes a coercion failure fatal to the row rather than a
 	// warning. Set it through Must.
@@ -111,18 +119,26 @@ type Field[T any] struct {
 	Set func(dst *T, c Cell) error
 }
 
-// isColumnLetter reports whether s is a spreadsheet column name: one to
-// three ASCII letters and nothing else.
-func isColumnLetter(s string) bool {
-	if s == "" || len(s) > 3 {
-		return false
-	}
-	for _, r := range s {
-		if r < 'A' || r > 'Z' {
-			return false
+// coerce builds the field behind each built-in mapping, Text, Int,
+// Decimal, Date, Raw and Link: the cell is read by conv into the value dst
+// points at and stored there. An error from conv leaves the field as it
+// was and is reported the way Apply reports any setter's. The six differ
+// only in their conv, which for Raw and Link cannot fail, and in Link's
+// asking for the hyperlink as well.
+func coerce[T, V any](
+	col, purpose string,
+	dst func(*T) *V,
+	conv func(Cell) (V, error),
+	captions []string,
+) Field[T] {
+	return Custom(col, purpose, func(t *T, c Cell) error {
+		v, err := conv(c)
+		if err != nil {
+			return err
 		}
-	}
-	return true
+		*dst(t) = v
+		return nil
+	}, captions...)
 }
 
 // Date1904 always reports true.
@@ -142,16 +158,6 @@ func NewSource(wb *xlsx.File, force bool) Source {
 	return wb
 }
 
-// Column renders the field as its entry in the layout contract: the
-// xlsx.Column that VerifyHeaders and DataRows read.
-func (f Field[T]) Column() xlsx.Column {
-	return xlsx.Column{
-		Col:      f.Col,
-		Captions: f.Captions,
-		Purpose:  f.Purpose,
-	}
-}
-
 // Columns renders the whole table as the layout contract, for
 // xlsx.VerifyHeaders and xlsx.DataRows.
 //
@@ -161,7 +167,7 @@ func (f Field[T]) Column() xlsx.Column {
 func (t Table[T]) Columns() []xlsx.Column {
 	out := make([]xlsx.Column, 0, len(t))
 	for _, f := range t {
-		out = append(out, f.Column())
+		out = append(out, f.Column)
 	}
 	return out
 }
@@ -229,6 +235,10 @@ func (t Table[T]) Apply(
 // column twice in a header failure while the second setter quietly
 // overwrites the first, and a duplicate key loses a whole column's worth
 // of data with nothing to show for it.
+//
+// A letter is held to xlsx.ColumnIndex, the reading the workbook's own
+// lookups give it, so the letters refused here are exactly the ones that
+// would read as empty: anything but letters, and a column past XFD.
 func (t Table[T]) Validate() error {
 	var problems []string
 
@@ -253,8 +263,9 @@ func (t Table[T]) Validate() error {
 			}
 		}
 
+		_, isColumn := xlsx.ColumnIndex(col)
 		switch {
-		case !isColumnLetter(col):
+		case !isColumn:
 			problems = append(problems, fmt.Sprintf(
 				"%q (%s) is not a column letter", f.Col, f.Purpose))
 		case seen[col]:
@@ -301,11 +312,11 @@ func Must[T any](f Field[T]) Field[T] {
 // keep matching, and the groups an importer ignores tend to be the ones
 // whose captions move most.
 func Expect[T any](col, purpose string, captions ...string) Field[T] {
-	return Field[T]{
+	return Field[T]{Column: xlsx.Column{
 		Col:      col,
 		Captions: captions,
 		Purpose:  purpose,
-	}
+	}}
 }
 
 // WithLink asks for the cell's hyperlink to be resolved and handed to the
@@ -328,19 +339,9 @@ func Text[T any](
 	col, purpose string, limit int,
 	dst func(*T) **string, captions ...string,
 ) Field[T] {
-	return Field[T]{
-		Col:      col,
-		Captions: captions,
-		Purpose:  purpose,
-		Set: func(t *T, c Cell) error {
-			v, err := xlsx.StrMax(c.Text, limit, "the value")
-			if err != nil {
-				return err
-			}
-			*dst(t) = v
-			return nil
-		},
-	}
+	return coerce(col, purpose, dst, func(c Cell) (*string, error) {
+		return xlsx.StrMax(c.Text, limit, "the value")
+	}, captions)
 }
 
 // Int maps a cell to a nullable integer column.
@@ -348,19 +349,9 @@ func Int[T any](
 	col, purpose string,
 	dst func(*T) **int, captions ...string,
 ) Field[T] {
-	return Field[T]{
-		Col:      col,
-		Captions: captions,
-		Purpose:  purpose,
-		Set: func(t *T, c Cell) error {
-			v, err := xlsx.Int(c.Text)
-			if err != nil {
-				return err
-			}
-			*dst(t) = v
-			return nil
-		},
-	}
+	return coerce(col, purpose, dst, func(c Cell) (*int, error) {
+		return xlsx.Int(c.Text)
+	}, captions)
 }
 
 // Decimal maps a cell to a nullable fixed-point column, accepting the
@@ -369,19 +360,9 @@ func Decimal[T any](
 	col, purpose string,
 	dst func(*T) **decimal.Decimal, captions ...string,
 ) Field[T] {
-	return Field[T]{
-		Col:      col,
-		Captions: captions,
-		Purpose:  purpose,
-		Set: func(t *T, c Cell) error {
-			v, err := xlsx.Decimal(c.Text)
-			if err != nil {
-				return err
-			}
-			*dst(t) = v
-			return nil
-		},
-	}
+	return coerce(col, purpose, dst, func(c Cell) (*decimal.Decimal, error) {
+		return xlsx.Decimal(c.Text)
+	}, captions)
 }
 
 // Date maps a cell to a nullable date column, reading either an Excel
@@ -390,19 +371,10 @@ func Date[T any](
 	col, purpose string,
 	dst func(*T) **datetime.Datetime, captions ...string,
 ) Field[T] {
-	return Field[T]{
-		Col:      col,
-		Captions: captions,
-		Purpose:  purpose,
-		Set: func(t *T, c Cell) error {
-			v, err := xlsx.Date(c.Text, c.Date1904)
-			if err != nil {
-				return err
-			}
-			*dst(t) = v
-			return nil
-		},
-	}
+	return coerce(col, purpose, dst,
+		func(c Cell) (*datetime.Datetime, error) {
+			return xlsx.Date(c.Text, c.Date1904)
+		}, captions)
 }
 
 // Raw maps a cell to a plain string field, trimmed, empty when the cell
@@ -417,15 +389,9 @@ func Raw[T any](
 	col, purpose string,
 	dst func(*T) *string, captions ...string,
 ) Field[T] {
-	return Field[T]{
-		Col:      col,
-		Captions: captions,
-		Purpose:  purpose,
-		Set: func(t *T, c Cell) error {
-			*dst(t) = xlsx.Trim(c.Text)
-			return nil
-		},
-	}
+	return coerce(col, purpose, dst, func(c Cell) (string, error) {
+		return xlsx.Trim(c.Text), nil
+	}, captions)
 }
 
 // Link maps the hyperlink target behind a cell, ignoring the cell's own
@@ -440,16 +406,8 @@ func Link[T any](
 	col, purpose string,
 	dst func(*T) *string, captions ...string,
 ) Field[T] {
-	return Field[T]{
-		Col:      col,
-		Captions: captions,
-		Purpose:  purpose,
-		WantLink: true,
-		Set: func(t *T, c Cell) error {
-			*dst(t) = c.Link
-			return nil
-		},
-	}
+	return WithLink(coerce(col, purpose, dst,
+		func(c Cell) (string, error) { return c.Link, nil }, captions))
 }
 
 // Custom maps a cell by a rule of the caller's own: two fields from one
@@ -463,10 +421,7 @@ func Custom[T any](
 	col, purpose string,
 	set func(dst *T, c Cell) error, captions ...string,
 ) Field[T] {
-	return Field[T]{
-		Col:      col,
-		Captions: captions,
-		Purpose:  purpose,
-		Set:      set,
-	}
+	f := Expect[T](col, purpose, captions...)
+	f.Set = set
+	return f
 }

@@ -34,8 +34,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gofiber/fiber/v3"
 	"github.com/gofiber/fiber/v3/extractors"
 	"github.com/gofiber/fiber/v3/middleware/session"
+	"github.com/mas-ony/go-toolkit/internal/strlist"
 	"github.com/spf13/viper"
 )
 
@@ -68,49 +70,39 @@ type SessionConfig struct {
 	*session.Config
 }
 
-// sessionCookieName is the name the session cookie is served under when
-// nothing overrides it, and it is NOT one of the eight keys above.
-//
-// The name lives on session.Config.Extractor, whose default is
-// extractors.FromCookie("session_id"), and that field is a struct carrying
-// a func — nothing YAML can express, so NewSessionConfig leaves it zero
-// and the middleware's configDefault substitutes the default. Every cookie
-// ATTRIBUTE is configurable here; the cookie NAME is not.
-//
-// String does not print it unconditionally: it derives the name from the
-// Extractor, and reaches for this constant only when that field is zero,
-// which is exactly when the middleware substitutes its own default. See
-// the derivation note on String.
-//
-// The middleware spells that default separately, in session.ConfigDefault,
-// and nothing in the compiler ties the two spellings together, so
-// TestSessionStringNamesTheCookie holds them equal. A Fiber release that
-// renamed the cookie would fail that test instead of leaving the startup
-// line naming a cookie nobody sets.
-const sessionCookieName = "session_id"
-
 // validSameSite is the allowlist checked by SessionConfig.Validate, in the
-// canonical spelling its error message lists.
+// canonical spelling its error message lists. It is spelled with Fiber's
+// own SameSite constants, the ones the middleware's setCookieAttributes
+// compares against, so the allowlist and the comparison cannot name the
+// modes two ways, and a rename upstream is a compile error here.
 //
-// Matched case-INSENSITIVELY, mirroring the utils.EqualFold comparison in
-// the middleware's setCookieAttributes: rejecting "strict" here would
-// reject a value the middleware honours exactly as written.
-var validSameSite = []string{"Strict", "Lax", "None"}
-
-// containsFold reports whether s equals any element of list under Unicode
-// case folding.
-//
-// Local to this file because validSameSite is its only caller: the one
-// allowlist in this package whose canonical spellings are mixed-case, and
-// so the one compared with EqualFold. The others normalise the value's
+// Matched case-INSENSITIVELY, through strlist.ContainsFold, mirroring the
+// utils.EqualFold comparison in the middleware's setCookieAttributes:
+// rejecting "strict" here would reject a value the middleware honours
+// exactly as written. It is the one allowlist in this package whose
+// canonical spellings are mixed-case; the others normalise the value's
 // case and look it up in a map, or match it exactly.
-func containsFold(list []string, s string) bool {
-	for _, v := range list {
-		if strings.EqualFold(v, s) {
-			return true
-		}
+var validSameSite = []string{
+	fiber.CookieSameSiteStrictMode,
+	fiber.CookieSameSiteLaxMode,
+	fiber.CookieSameSiteNoneMode,
+}
+
+// checkSessionTimeout reports a session timeout that is unset, negative or
+// under a second. It is checkDuration with a case of its own for a
+// negative value, which the middleware reads as something other than a
+// short timeout. unset and negative say what the middleware does with
+// each value, since it refuses neither.
+func checkSessionTimeout(
+	key string,
+	d time.Duration,
+	unset, negative string,
+) error {
+	if d < 0 {
+		return fmt.Errorf("%s must be positive (got %s): %s",
+			key, d, negative)
 	}
-	return false
+	return checkDuration(key, d, ": "+unset, "")
 }
 
 // NewSessionConfig reads session fields from the provided Viper instance.
@@ -138,8 +130,9 @@ func containsFold(list []string, s string) bool {
 //   - A nil Storage means session.NewStore substitutes memory.New() — the
 //     per-process store described on the struct above.
 //   - A zero Extractor means configDefault substitutes
-//     extractors.FromCookie("session_id"), which is where the cookie NAME
-//     comes from. See sessionCookieName.
+//     session.ConfigDefault.Extractor, extractors.FromCookie("session_id"),
+//     which is where the cookie NAME comes from. Every cookie ATTRIBUTE is
+//     configurable here; the cookie NAME is not. See String.
 //
 // The other four are unremarkable: session.New builds a missing Store
 // with NewStore, a nil Next is never consulted so the middleware never
@@ -300,40 +293,24 @@ func (c *SessionConfig) Validate() error {
 	// value and reported as required, a negative value is reported with
 	// what the middleware would make of it, and a positive one under a
 	// second as a probable missing unit.
-	switch {
-	case c.AbsoluteTimeout == 0:
-		errs = append(errs, errors.New("fiber.session.absolute_timeout is "+
-			"required: zero is legal to the middleware and means the "+
-			"session expires on idle alone, so a continuously active "+
-			"client holds one credential forever"))
-	case c.AbsoluteTimeout < 0:
-		errs = append(errs, fmt.Errorf("fiber.session.absolute_timeout "+
-			"must be positive (got %s): the middleware treats a negative "+
-			"value like zero, as no ceiling at all",
-			c.AbsoluteTimeout))
-	case c.AbsoluteTimeout < time.Second:
-		errs = append(errs, fmt.Errorf("fiber.session.absolute_timeout "+
-			"must be at least 1s (got %s): if this was meant as seconds, "+
-			"write the unit — a bare number is nanoseconds",
-			c.AbsoluteTimeout))
+	err := checkSessionTimeout("fiber.session.absolute_timeout",
+		c.AbsoluteTimeout,
+		"zero is legal to the middleware and means the session expires on "+
+			"idle alone, so a continuously active client holds one "+
+			"credential forever",
+		"the middleware treats a negative value like zero, as no ceiling "+
+			"at all")
+	if err != nil {
+		errs = append(errs, err)
 	}
-	switch {
-	case c.IdleTimeout == 0:
-		errs = append(errs, errors.New("fiber.session.idle_timeout is "+
-			"required: zero is replaced by the middleware's own 30m "+
-			"default, which appears in neither config.yaml nor this "+
-			"config's log line"))
-	case c.IdleTimeout < 0:
-		errs = append(errs, fmt.Errorf("fiber.session.idle_timeout must "+
-			"be positive (got %s): the middleware replaces a negative "+
-			"value with its own 30m default, which panics at startup "+
-			"against any shorter absolute_timeout",
-			c.IdleTimeout))
-	case c.IdleTimeout < time.Second:
-		errs = append(errs, fmt.Errorf("fiber.session.idle_timeout must "+
-			"be at least 1s (got %s): if this was meant as seconds, write "+
-			"the unit — a bare number is nanoseconds",
-			c.IdleTimeout))
+	err = checkSessionTimeout("fiber.session.idle_timeout", c.IdleTimeout,
+		"zero is replaced by the middleware's own 30m default, which "+
+			"appears in neither config.yaml nor this config's log line",
+		"the middleware replaces a negative value with its own 30m "+
+			"default, which panics at startup against any shorter "+
+			"absolute_timeout")
+	if err != nil {
+		errs = append(errs, err)
 	}
 
 	// Checked here rather than left to the middleware because the
@@ -377,14 +354,15 @@ func (c *SessionConfig) Validate() error {
 			"required: an empty value is served as Lax by the middleware's "+
 			"own fallback, where neither config.yaml nor a startup log "+
 			"line will show it"))
-	case !containsFold(validSameSite, c.CookieSameSite):
+	case !strlist.ContainsFold(validSameSite, c.CookieSameSite):
 		errs = append(errs, fmt.Errorf("fiber.session.cookie_same_site "+
-			"must be one of Strict, Lax, or None, case-insensitive (got "+
-			"%q): the middleware matches only Strict and None and sends "+
-			"everything else as Lax, so this value is a silent downgrade "+
-			"rather than an error",
+			"must be one of %s, case-insensitive (got %q): the middleware "+
+			"matches only Strict and None and sends everything else as "+
+			"Lax, so this value is a silent downgrade rather than an error",
+			alternatives(validSameSite),
 			c.CookieSameSite))
-	case strings.EqualFold(c.CookieSameSite, "None") && !c.CookieSecure:
+	case strings.EqualFold(c.CookieSameSite, fiber.CookieSameSiteNoneMode) &&
+		!c.CookieSecure:
 		// setCookieAttributes forces Secure for SameSite=None before
 		// consulting CookieSecure at all, so this pairing does not break
 		// the cookie — it makes config.yaml and String report a false
@@ -416,12 +394,13 @@ func (c *SessionConfig) Validate() error {
 //
 // # CookieName is DERIVED, not asserted
 //
-// It is not read from config — see sessionCookieName — and a session
-// cookie whose name appears nowhere in the startup log is the first thing
-// someone debugging a login loop goes looking for, so it is reported. But
-// it is reported from the Extractor field rather than as a bare literal,
-// on the same grounds RequestIDConfig.String derives its Generator line —
-// that method's comment carries the argument in full.
+// It is not read from config, since the name lives on session.Config's
+// Extractor, a struct carrying a func that no key can express. But a
+// session cookie whose name appears nowhere in the startup log is the
+// first thing someone debugging a login loop goes looking for, so it is
+// reported. It is reported from the Extractor field rather than as a bare
+// literal, on the same grounds RequestIDConfig.String derives its
+// Generator line — that method's comment carries the argument in full.
 //
 // The exposure here is identical: the application hands
 // *cfg.Session.Config to session.New by value, so an Extractor assigned
@@ -442,6 +421,11 @@ func (c *SessionConfig) Validate() error {
 // link, so one that opens with a cookie is named by that cookie's Key and
 // any other is reported as custom rather than guessed at.
 //
+// The name a zero Extractor prints is read from
+// session.ConfigDefault.Extractor.Key, the default configDefault installs,
+// rather than spelled out again here, so the line names the middleware's
+// cookie whatever a Fiber release calls it.
+//
 // Detecting the zero value on Extract mirrors session.configDefault's own
 // `cfg.Extractor.Extract == nil`, so the two agree on what "unset" means.
 func (c *SessionConfig) String() string {
@@ -452,7 +436,8 @@ func (c *SessionConfig) String() string {
 		return "<uninitialised SessionConfig>"
 	}
 
-	cookieName := sessionCookieName + " (middleware default)"
+	cookieName := session.ConfigDefault.Extractor.Key + " " +
+		middlewareDefaultLabel
 	if c.Extractor.Extract != nil {
 		cookieName = "custom extractor"
 		if c.Extractor.Source == extractors.SourceCookie &&

@@ -15,7 +15,7 @@ go get github.com/mas-ony/go-toolkit
 
 ## Requirements
 
-- Go 1.27.1 or newer.
+- Go 1.27.3 or newer.
 - MySQL / MariaDB, or SQL Server / Azure SQL, for `database`.
 - No cgo. The SQLite store behind `whatsapp` is pure Go, built from
   Wasm, so there is no gcc at build time.
@@ -42,6 +42,23 @@ go get github.com/mas-ony/go-toolkit
 Each package is one directory, and each carries a `doc.go` holding the
 contract and the reasoning behind it. This file is the map; `doc.go` is
 the detail.
+
+A rule more than one package applies is written once, under `internal/`:
+`internal/upstream` for checking, trimming and quoting the address of a
+server the toolkit talks to, the mark a masked credential leaves, the
+form an HTTP method is compared in, the statuses its answers succeed
+with and how much of one is kept, the range a port falls in, and how a
+section left out is told from one filled in wrong;
+`internal/strlist` for comma-separated lists and the form a configured
+word is read in; `internal/dbdriver` for the driver names and encrypt
+modes `config` validates and `database` connects with;
+`internal/basename` for the path elements that name no file, which
+`fileutil` folds onto its fallback name and `xlsx` refuses as a link
+target; and `internal/bytesize` for how a limit counted in bytes is named
+in a message, which `fileutil` names its upload cap by and `xlsx` its
+unzip cap. A service cannot import any of them; they are how the packages
+above agree with each other. Test helpers that the suites of more than
+one package use live the same way, under `internal/testutil`.
 
 ## Config
 
@@ -111,7 +128,8 @@ underscores: `fiber.limiter.max` is `FIBER_LIMITER_MAX`, and the variable
 overrides the file. `NewViper` wires that — the key replacer and
 `AutomaticEnv` — and is the reason the package builds the instance: one
 made with `viper.New()` ignores every variable, with no error to say so.
-The constructor functions in this package are the authoritative list of
+`EnvName` returns a key's variable, for code that has to name one. The
+constructor functions in this package are the authoritative list of
 which keys exist at all.
 
 ### Only what a deployment supplies
@@ -466,6 +484,11 @@ safe to show a user; internal error text is logged, not returned.
 slice assigned to `Data any` is a non-nil interface, so it would render
 as `null` instead of `[]`.
 
+`Response` is defined from `Envelope[any]`, the generic envelope declared
+once for both directions: a handler encodes a `Response`, and a client
+decodes into `Envelope[T]` for the type it expects, which is what
+`httpclient.Envelope` names.
+
 ### httpclient
 
 A JSON client bound to one upstream service, built on the Fiber client
@@ -664,7 +687,9 @@ var table = importer.Table[Row]{
 `Table.Validate` is worth calling once at startup: every problem it
 reports is a typo in a table nobody reads end to end, and each fails in a
 way that looks like a problem with the workbook rather than with the
-code.
+code. A column letter is held to `xlsx.ColumnIndex`, the reading every
+`xlsx` lookup gives one, so a letter it refuses is one that would read as
+empty on every row.
 
 `Register` is meant to be called from a dataset's own `init`, so adding
 one is a new file and no edit to `main`. The registry is package state
@@ -755,6 +780,9 @@ Development gets a colourised console writer at debug level; staging and
 production get JSON at info. Both write to **stdout**, because container
 runtimes capture it by default and splitting the stream across two
 descriptors makes access logs and application logs hard to correlate.
+`logger.Level(env)` reports that threshold, for a check that has to agree
+with it, such as the example service refusing a request-log level its
+logger would drop.
 
 ### datetime
 

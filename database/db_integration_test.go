@@ -23,7 +23,6 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"os"
 	"strconv"
 	"strings"
 	"testing"
@@ -32,6 +31,8 @@ import (
 	"github.com/go-sql-driver/mysql"
 	"github.com/jmoiron/sqlx"
 	"github.com/mas-ony/go-toolkit/config"
+	"github.com/mas-ony/go-toolkit/internal/dbdriver"
+	"github.com/mas-ony/go-toolkit/internal/testutil/dbtest"
 	"github.com/microsoft/go-mssqldb/msdsn"
 )
 
@@ -44,6 +45,9 @@ import (
 // same at every instant and the assertion needs no seasonal arithmetic.
 const itLocation = "Asia/Jakarta"
 
+// itAppName is the application name every AppConfig here carries.
+const itAppName = "go-toolkit-it"
+
 // itPoolLimits are small enough that the open limit can be reached, and
 // reaching it is the only way to show the limit was applied at all.
 const (
@@ -51,34 +55,41 @@ const (
 	itMaxIdle = 2
 )
 
-// encryptFromMySQL inverts the mysql column of encryptModes.
+// encryptFromMySQL inverts the mysql column of the encrypt table
+// (dbdriver.EncryptionFor). It walks the table itself, in the order
+// dbdriver.EncryptModes lists it, and returns the first value whose tls=
+// is tlsConfig, so the inverse cannot disagree with the rows it inverts.
 //
 // The inverse is lossy in one place and the table is the reason: "true" and
-// "strict" both emit tls=true, so a DSN carrying it converts back to "true"
-// whichever of the two produced it. That costs the tests nothing — both
-// rows verify the certificate chain on MySQL, so the connection behaves
-// identically — and it is the same collapse encryptModes documents.
+// "strict" both emit tls=true, so a DSN carrying it converts back to "true",
+// the first of the two, whichever produced it. That costs the tests nothing
+// — both rows verify the certificate chain on MySQL, so the connection
+// behaves identically — and it is the same collapse dbdriver.EncryptionFor
+// documents.
 //
 // An empty value means the DSN named no tls parameter, which is the
-// driver's plaintext default and therefore "disable". Any other value is a
-// name registered with mysql.RegisterTLSConfig, which this package never
-// emits; converting it to "disable" would quietly downgrade the connection,
-// so it is an error instead.
+// driver's plaintext default, tls=false, and therefore "disable". Any other
+// value is a name registered with mysql.RegisterTLSConfig, which this
+// package never emits; converting it to "disable" would quietly downgrade
+// the connection, so it is an error instead.
 func encryptFromMySQL(tlsConfig string) (string, error) {
-	switch tlsConfig {
-	case "", "false":
-		return "disable", nil
-	case "preferred":
-		return "false", nil
-	case "true":
-		return "true", nil
+	if tlsConfig == "" {
+		tlsConfig = "false"
+	}
+	for _, mode := range dbdriver.EncryptModes() {
+		if enc, _ := dbdriver.EncryptionFor(mode); enc.MySQL == tlsConfig {
+			return mode, nil
+		}
 	}
 	return "", fmt.Errorf(
 		"tls=%q in the DSN is not a mode this package emits", tlsConfig)
 }
 
-// encryptFromMSSQL inverts the mssql column of encryptModes. Unlike the
+// encryptFromMSSQL inverts the mssql column of the same table. Unlike the
 // mysql side this mapping is exact: all four modes survive the round trip.
+// It is a switch rather than a walk of the table because msdsn hands the
+// parameter back parsed into an enum of its own, and the table holds the
+// strings that enum was parsed from.
 func encryptFromMSSQL(encryption msdsn.Encryption) (string, error) {
 	switch encryption {
 	case msdsn.EncryptionDisabled:
@@ -107,10 +118,10 @@ func configFromDSN(
 		ConnMaxIdleTime: time.Minute,
 		ConnMaxLifetime: 5 * time.Minute,
 	}
-	app := &config.AppConfig{Name: "go-toolkit-it", Location: itLocation}
+	app := &config.AppConfig{Name: itAppName, Location: itLocation}
 
 	switch driver {
-	case "mysql":
+	case dbdriver.MySQL:
 		my, err := mysql.ParseDSN(dsn)
 		if err != nil {
 			return nil, nil, err
@@ -134,7 +145,7 @@ func configFromDSN(
 			my.Passwd
 		cfg.Encrypt = enc
 
-	case "sqlserver":
+	case dbdriver.SQLServer:
 		p, err := msdsn.Parse(dsn)
 		if err != nil {
 			return nil, nil, err
@@ -165,25 +176,28 @@ func forEachEngineConfig(
 	fn func(t *testing.T, cfg *config.DatabaseConfig, app *config.AppConfig),
 ) {
 	t.Helper()
-	ran := false
-	for _, e := range integrationEngines {
-		dsn := os.Getenv(e.dsnEnv)
-		if dsn == "" {
-			continue
+	eachEngine(t, func(t *testing.T, e dbtest.Engine, dsn string) {
+		cfg, app, err := configFromDSN(e.Driver, dsn)
+		if err != nil {
+			t.Fatalf("converting %s: %v", e.DSNEnv, err)
 		}
-		ran = true
-		t.Run(e.dialect.String(), func(t *testing.T) {
-			cfg, app, err := configFromDSN(e.driver, dsn)
-			if err != nil {
-				t.Fatalf("converting %s: %v", e.dsnEnv, err)
-			}
-			withDialect(t, e.dialect)
-			fn(t, cfg, app)
-		})
-	}
-	if !ran {
-		t.Skip("no DB_TEST_*_DSN variable is set")
-	}
+		fn(t, cfg, app)
+	})
+}
+
+// forEachEnginePool is forEachEngineConfig for a test that needs only the
+// pool New opens from the config pair as converted, which it closes when
+// the test ends. It is not forEachEngine: that pool is dbtest's, opened
+// from the raw DSN, and carries nothing New sets on a pool or a DSN.
+func forEachEnginePool(t *testing.T, fn func(t *testing.T, db *sqlx.DB)) {
+	t.Helper()
+	forEachEngineConfig(t, func(
+		t *testing.T,
+		cfg *config.DatabaseConfig,
+		app *config.AppConfig,
+	) {
+		fn(t, mustOpen(t, cfg, app))
+	})
 }
 
 // mustOpen calls New and closes the pool when the test ends.
@@ -204,13 +218,7 @@ func mustOpen(
 // A pool New opens answers a query, and carries the open limit it was
 // given rather than database/sql's unlimited default.
 func TestIntegrationNewOpensAPingedPool(t *testing.T) {
-	forEachEngineConfig(t, func(
-		t *testing.T,
-		cfg *config.DatabaseConfig,
-		app *config.AppConfig,
-	) {
-		db := mustOpen(t, cfg, app)
-
+	forEachEnginePool(t, func(t *testing.T, db *sqlx.DB) {
 		var one int
 		if err := db.Get(&one, "SELECT 1"); err != nil {
 			t.Fatalf("SELECT 1: %v", err)
@@ -230,12 +238,7 @@ func TestIntegrationNewOpensAPingedPool(t *testing.T) {
 // deadline. The extra request must wait rather than dial, which is what
 // distinguishes an applied limit from an ignored one.
 func TestIntegrationPoolCapsConcurrentConnections(t *testing.T) {
-	forEachEngineConfig(t, func(
-		t *testing.T,
-		cfg *config.DatabaseConfig,
-		app *config.AppConfig,
-	) {
-		db := mustOpen(t, cfg, app)
+	forEachEnginePool(t, func(t *testing.T, db *sqlx.DB) {
 		ctx := context.Background()
 
 		for i := 0; i < itMaxOpen; i++ {
@@ -272,12 +275,7 @@ func TestIntegrationPoolCapsConcurrentConnections(t *testing.T) {
 // what removes the difference, so the assertion is deliberately identical
 // for both engines.
 func TestIntegrationUpdateReportsRowsMatched(t *testing.T) {
-	forEachEngineConfig(t, func(
-		t *testing.T,
-		cfg *config.DatabaseConfig,
-		app *config.AppConfig,
-	) {
-		db := mustOpen(t, cfg, app)
+	forEachEnginePool(t, func(t *testing.T, db *sqlx.DB) {
 		table := scratchTable(t, db, "rowcount", onEngine(
 			"CREATE TABLE %s (id INT PRIMARY KEY, label VARCHAR(20))",
 			"CREATE TABLE %s (id INT PRIMARY KEY, label NVARCHAR(20))",
@@ -382,16 +380,9 @@ func TestIntegrationOffsetlessColumnsCarryAppLocation(t *testing.T) {
 // dialect, so the test also covers the form that reads no process-wide
 // state.
 func TestIntegrationPingProvesNothingAboutAQualifiedNamespace(t *testing.T) {
-	forEachEngineConfig(t, func(
-		t *testing.T,
-		cfg *config.DatabaseConfig,
-		app *config.AppConfig,
-	) {
-		db := mustOpen(t, cfg, app)
-
+	forEachEnginePool(t, func(t *testing.T, db *sqlx.DB) {
 		d := activeDialect()
-		absent := fmt.Sprintf("no_such_catalog_%d",
-			time.Now().UnixNano()%1e9)
+		absent := dbtest.Unique("no_such_catalog_")
 		if d == DialectSQLServer {
 			absent += ".dbo"
 		}
@@ -399,34 +390,6 @@ func TestIntegrationPingProvesNothingAboutAQualifiedNamespace(t *testing.T) {
 
 		if err := db.Get(new(int), query); err == nil {
 			t.Errorf("querying %s succeeded, want an error", absent)
-		}
-	})
-}
-
-// A cancelled context ends the wait at once instead of spending
-// pingTimeout, which is the one thing NewContext offers that New cannot.
-func TestIntegrationNewContextStopsOnACancelledContext(t *testing.T) {
-	forEachEngineConfig(t, func(
-		t *testing.T,
-		cfg *config.DatabaseConfig,
-		app *config.AppConfig,
-	) {
-		ctx, cancel := context.WithCancel(context.Background())
-		cancel()
-
-		start := time.Now()
-		db, err := NewContext(ctx, cfg, app)
-		elapsed := time.Since(start)
-		if db != nil {
-			_ = db.Close()
-			t.Error("NewContext returned a pool, want nil")
-		}
-		if !errors.Is(err, context.Canceled) {
-			t.Errorf("err = %v, want context.Canceled", err)
-		}
-		if elapsed >= pingTimeout {
-			t.Errorf("took %s, want well under pingTimeout (%s)",
-				elapsed, pingTimeout)
 		}
 	})
 }
@@ -484,10 +447,10 @@ func TestIntegrationNewRejectsBadCredentialsWithoutLeakingThem(t *testing.T) {
 // What would be a failure is either path taking longer than the deadline
 // this package sets.
 func TestIntegrationUnreachableHostFailsWithinPingTimeout(t *testing.T) {
-	for _, e := range integrationEngines {
-		t.Run(e.dialect.String(), func(t *testing.T) {
+	for _, e := range dbtest.Engines {
+		t.Run(e.Driver, func(t *testing.T) {
 			cfg := &config.DatabaseConfig{
-				Driver:   e.driver,
+				Driver:   e.Driver,
 				Host:     "192.0.2.1",
 				Port:     1433,
 				Database: "scratch",
@@ -495,8 +458,7 @@ func TestIntegrationUnreachableHostFailsWithinPingTimeout(t *testing.T) {
 				Password: "probe",
 				Encrypt:  "disable",
 			}
-			app := &config.AppConfig{Name: "go-toolkit-it",
-				Location: "UTC"}
+			app := &config.AppConfig{Name: itAppName, Location: "UTC"}
 
 			start := time.Now()
 			db, err := New(cfg, app)

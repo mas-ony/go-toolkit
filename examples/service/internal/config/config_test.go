@@ -11,6 +11,11 @@ package config
 // Nothing here calls t.Parallel: t.Setenv panics in a parallel test,
 // because the environment belongs to the whole process, and so does
 // fileutil.MaxFileBytes, which some cases set.
+//
+// Nothing here imports the toolkit's internal packages either, since a
+// service that copies this example cannot import them. So the three
+// helpers internal/testutil would otherwise supply are written out below:
+// testBotToken, writeConfig and setMaxFileBytes.
 
 import (
 	"bytes"
@@ -21,6 +26,8 @@ import (
 	"strings"
 	"testing"
 
+	// As in config.go, config.X here always means the toolkit's X.
+	"github.com/mas-ony/go-toolkit/config"
 	"github.com/mas-ony/go-toolkit/fileutil"
 	"github.com/rs/zerolog"
 )
@@ -155,7 +162,8 @@ var telegramOn = env{
 // so a shell that exports DATABASE_PASSWORD or APP_ENV to run the
 // service cannot change what a test sees. It matches names the way
 // config.SuppliedSections routes them: a section's prefix in its
-// environment spelling, alone or followed by "_".
+// environment spelling, as config.EnvName gives it, alone or followed by
+// "_".
 //
 // Blanking stands in for unsetting because t.Setenv restores each
 // variable when the test ends and has no unsetting counterpart. An
@@ -168,8 +176,7 @@ func isolate(t *testing.T) {
 	var c Config
 	var prefixes []string
 	for _, s := range c.sectionList() {
-		p := strings.ReplaceAll(s.Prefix, ".", "_")
-		prefixes = append(prefixes, strings.ToUpper(p))
+		prefixes = append(prefixes, config.EnvName(s.Prefix))
 	}
 	for _, kv := range os.Environ() {
 		name, _, _ := strings.Cut(kv, "=")
@@ -182,15 +189,24 @@ func isolate(t *testing.T) {
 	}
 }
 
-// writeConfig writes body to config.yaml in a fresh temporary
+// writeConfig writes body to a file called name in a fresh temporary
 // directory, removed when the test ends, and returns its path.
-func writeConfig(t *testing.T, body string) string {
+func writeConfig(t *testing.T, name, body string) string {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "config.yaml")
+	path := filepath.Join(t.TempDir(), name)
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	return path
+}
+
+// credentials isolates the environment and supplies the database
+// credentials through it, as config.yaml expects a deployment to.
+func credentials(t *testing.T) {
+	t.Helper()
+	isolate(t)
+	t.Setenv("DATABASE_USERNAME", testUser)
+	t.Setenv("DATABASE_PASSWORD", testPassword)
 }
 
 // load isolates the environment, supplies the credentials, applies set
@@ -198,13 +214,11 @@ func writeConfig(t *testing.T, body string) string {
 // override the credentials too.
 func load(t *testing.T, body string, set env) (*Config, error) {
 	t.Helper()
-	isolate(t)
-	t.Setenv("DATABASE_USERNAME", testUser)
-	t.Setenv("DATABASE_PASSWORD", testPassword)
+	credentials(t)
 	for name, value := range set {
 		t.Setenv(name, value)
 	}
-	return New(writeConfig(t, body))
+	return New(writeConfig(t, "config.yaml", body))
 }
 
 // mustLoad is load for a case that has to succeed: it fails the test
@@ -282,6 +296,18 @@ func logSections(t *testing.T, c *Config) (map[string]string, string) {
 	return got, buf.String()
 }
 
+// wantSections fails the test for each section in want whose line in got,
+// as logSections returns it, does not read as want says.
+func wantSections(t *testing.T, got, want map[string]string) {
+	t.Helper()
+	for name, line := range want {
+		if got[name] != line {
+			t.Errorf("section %s logged %q, want %q",
+				name, got[name], line)
+		}
+	}
+}
+
 // logSource runs Log on c and returns the file field of the
 // "configuration source" line, the first one written.
 func logSource(t *testing.T, c *Config) string {
@@ -307,9 +333,7 @@ func logSource(t *testing.T, c *Config) string {
 // A main that assigns another cap has to assign it here too, or this
 // test checks the committed body_limit against the wrong floor.
 func TestCommittedConfigLoads(t *testing.T) {
-	isolate(t)
-	t.Setenv("DATABASE_USERNAME", testUser)
-	t.Setenv("DATABASE_PASSWORD", testPassword)
+	credentials(t)
 	t.Setenv("FIBER_JWT_SECRET", jwtMode["FIBER_JWT_SECRET"])
 	if _, err := New(committedConfig); err != nil {
 		t.Fatalf("%s does not load:\n%v", committedConfig, err)
@@ -322,9 +346,7 @@ func TestCommittedConfigLoads(t *testing.T) {
 // they are used, and not only while their channels are off, and the
 // values it gives telegram are the ones the section reads.
 func TestCommittedConfigLoadsWithEveryChannel(t *testing.T) {
-	isolate(t)
-	t.Setenv("DATABASE_USERNAME", testUser)
-	t.Setenv("DATABASE_PASSWORD", testPassword)
+	credentials(t)
 	t.Setenv("FIBER_JWT_SECRET", jwtMode["FIBER_JWT_SECRET"])
 	t.Setenv("NOTIFICATION_CHANNELS", "whatsapp,email,telegram")
 	t.Setenv("NOTIFICATION_TELEGRAM_TOKEN", testBotToken)
@@ -355,7 +377,7 @@ func TestCommittedConfigLoadsWithEveryChannel(t *testing.T) {
 // than start a service whose first login cannot succeed.
 func TestCredentialsAreRequired(t *testing.T) {
 	isolate(t)
-	_, err := New(writeConfig(t, base))
+	_, err := New(writeConfig(t, "config.yaml", base))
 	wantErr(t, err, "database.username is required",
 		"database.password is required")
 }
@@ -423,7 +445,7 @@ func TestEnvironmentAloneLoads(t *testing.T) {
 // by the environment.
 func TestUnparseableFileIsRefused(t *testing.T) {
 	isolate(t)
-	_, err := New(writeConfig(t, "app: [\n"))
+	_, err := New(writeConfig(t, "config.yaml", "app: [\n"))
 	wantErr(t, err, "reading ")
 	if strings.Contains(err.Error(), "not found") {
 		t.Errorf("a parse error reads as a missing file:\n%v", err)
@@ -435,13 +457,8 @@ func TestUnparseableFileIsRefused(t *testing.T) {
 // Viper left to itself would go by the extension and refuse the file,
 // and the startup log's source line has to name the file as given.
 func TestFileIsYAMLWhateverItsName(t *testing.T) {
-	isolate(t)
-	t.Setenv("DATABASE_USERNAME", testUser)
-	t.Setenv("DATABASE_PASSWORD", testPassword)
-	path := filepath.Join(t.TempDir(), "service.conf")
-	if err := os.WriteFile(path, []byte(base), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	credentials(t)
+	path := writeConfig(t, "service.conf", base)
 	cfg, err := New(path)
 	if err != nil {
 		t.Fatalf("%s does not load:\n%v", path, err)
@@ -645,7 +662,7 @@ func TestLogShowsWhatIsInUse(t *testing.T) {
 		"NOTIFICATION_WHATSAPP_ASYNC": "true",
 	})
 	got, raw := logSections(t, c)
-	for name, want := range map[string]string{
+	wantSections(t, got, map[string]string{
 		"notification": "<not configured>",
 		"telegram":     "<not configured>",
 		"whatsapp": "<inactive: whatsapp is not in " +
@@ -654,12 +671,7 @@ func TestLogShowsWhatIsInUse(t *testing.T) {
 			"notification.channels>",
 		"jwt":    "<inactive: fiber.auth.mode is session>",
 		"client": "<not configured>",
-	} {
-		if got[name] != want {
-			t.Errorf("section %s logged %q, want %q",
-				name, got[name], want)
-		}
-	}
+	})
 	for _, name := range []string{
 		"app", "database", "fiber", "auth", "session", "limiter",
 		"listen", "recover", "requestid", "zerolog",
@@ -707,16 +719,11 @@ func TestLogMarksASuppliedTelegramSectionInactive(t *testing.T) {
 	c := mustLoad(t, base, env{"NOTIFICATION_TELEGRAM_TOKEN": testBotToken})
 	got, raw := logSections(t, c)
 
-	for name, want := range map[string]string{
+	wantSections(t, got, map[string]string{
 		"telegram": "<inactive: telegram is not in " +
 			"notification.channels>",
 		"notification": "<not configured>",
-	} {
-		if got[name] != want {
-			t.Errorf("section %s logged %q, want %q",
-				name, got[name], want)
-		}
-	}
+	})
 	if strings.Contains(raw, testBotToken) {
 		t.Errorf("the startup log carries the bot token:\n%s", raw)
 	}
@@ -744,16 +751,11 @@ func TestAuthIsOptional(t *testing.T) {
 		got, _ := logSections(t, mustLoad(t, noAuth, env{
 			"FIBER_JWT_SECRET": jwtMode["FIBER_JWT_SECRET"],
 		}))
-		for name, want := range map[string]string{
+		wantSections(t, got, map[string]string{
 			"auth":    "<not configured>",
 			"session": "<inactive: fiber.auth.mode is not set>",
 			"jwt":     "<inactive: fiber.auth.mode is not set>",
-		} {
-			if got[name] != want {
-				t.Errorf("section %s logged %q, want %q",
-					name, got[name], want)
-			}
-		}
+		})
 	})
 }
 

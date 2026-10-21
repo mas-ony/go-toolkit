@@ -33,80 +33,59 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/mas-ony/go-toolkit/internal/testutil"
+	"github.com/mas-ony/go-toolkit/internal/testutil/xlsxtest"
 	"github.com/xuri/excelize/v2"
 )
-
-// itSheet is the sheet every fixture writes, excelize's default.
-const itSheet = "Sheet1"
-
-// openWorkbook opens path with layout and closes it when the test ends.
-func openWorkbook(t *testing.T, path string, layout Layout) *File {
-	t.Helper()
-	w, err := Open(path, layout)
-	if err != nil {
-		t.Fatalf("Open %s: %v", path, err)
-	}
-	t.Cleanup(func() { _ = w.Close() })
-	return w
-}
-
-// writeWorkbook builds a workbook with fill applied to it and saves it,
-// returning the path.
-func writeWorkbook(t *testing.T, name string,
-	fill func(t *testing.T, f *excelize.File)) string {
-	t.Helper()
-
-	f := excelize.NewFile()
-	t.Cleanup(func() { _ = f.Close() })
-	fill(t, f)
-
-	path := filepath.Join(t.TempDir(), name)
-	if err := f.SaveAs(path); err != nil {
-		t.Fatalf("SaveAs %s: %v", name, err)
-	}
-	return path
-}
 
 // linkedWorkbook writes a workbook into dir whose column A holds one link
 // per target, alternating between the two storage forms Hyperlink reads —
 // a real hyperlink in the sheet's relationships, and a HYPERLINK() formula
 // with a literal path — so every test here covers both.
+//
+// The workbook is saved into dir itself, because every relative target
+// resolves against the workbook's own directory, which is why it goes
+// through xlsxtest.SaveWorkbook rather than xlsxtest.WriteWorkbook.
 func linkedWorkbook(t *testing.T, dir string, targets ...string) string {
 	t.Helper()
-	f := excelize.NewFile()
-	t.Cleanup(func() { _ = f.Close() })
-
-	for i, target := range targets {
-		cell := fmt.Sprintf("A%d", i+1)
-		var err error
-		if i%2 == 0 {
-			if err = f.SetCellValue(itSheet, cell, "open"); err == nil {
-				err = f.SetCellHyperLink(itSheet, cell, target,
+	fill := func(t *testing.T, f *excelize.File) {
+		for i, target := range targets {
+			cell := fmt.Sprintf("A%d", i+1)
+			var err error
+			if i%2 == 0 {
+				xlsxtest.SetCell(t, f, cell, "open")
+				err = f.SetCellHyperLink(xlsxtest.Sheet, cell, target,
 					"External")
+			} else {
+				err = f.SetCellFormula(xlsxtest.Sheet, cell,
+					fmt.Sprintf(`HYPERLINK(%q,"open")`, target))
 			}
-		} else {
-			err = f.SetCellFormula(itSheet, cell,
-				fmt.Sprintf(`HYPERLINK(%q,"open")`, target))
-		}
-		if err != nil {
-			t.Fatalf("writing the link in %s: %v", cell, err)
+			if err != nil {
+				t.Fatalf("writing the link in %s: %v", cell, err)
+			}
 		}
 	}
-	path := filepath.Join(dir, "book.xlsx")
-	if err := f.SaveAs(path); err != nil {
-		t.Fatalf("SaveAs: %v", err)
-	}
-	return path
+	return xlsxtest.SaveWorkbook(t, filepath.Join(dir, "book.xlsx"), fill)
 }
 
-// writeTarget creates a file a link can point at.
-func writeTarget(t *testing.T, path, content string) {
+// serial is the date serial the epoch and number-format tests write.
+const serial = 35000
+
+// bareLayout reads Sheet from its first row, with no header above the
+// data, which is how most of the workbooks here are laid out.
+func bareLayout() Layout {
+	return Layout{Sheet: xlsxtest.Sheet, HeaderRow: 1, FirstRow: 1}
+}
+
+// fillProduct writes 2 into A1, 3 into B1, and A1*B1 into C1 as a formula
+// excelize stores without calculating, which is what a workbook built by
+// a script looks like.
+func fillProduct(t *testing.T, f *excelize.File) {
 	t.Helper()
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
-		t.Fatal(err)
+	xlsxtest.SetCell(t, f, "A1", 2)
+	xlsxtest.SetCell(t, f, "B1", 3)
+	if err := f.SetCellFormula(xlsxtest.Sheet, "C1", "A1*B1"); err != nil {
+		t.Fatalf("SetCellFormula: %v", err)
 	}
 }
 
@@ -125,8 +104,6 @@ func writeTarget(t *testing.T, path, content string) {
 // Taking them from the code under test would make this test agree with
 // whatever that code did.
 func TestIntegrationDate1904IsReadFromTheWorkbook(t *testing.T) {
-	const serial = "35000"
-
 	for _, c := range []struct {
 		name  string
 		epoch bool
@@ -137,7 +114,7 @@ func TestIntegrationDate1904IsReadFromTheWorkbook(t *testing.T) {
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			epoch := c.epoch
-			path := writeWorkbook(t, "epoch.xlsx",
+			path := xlsxtest.WriteWorkbook(t, "epoch.xlsx",
 				func(t *testing.T, f *excelize.File) {
 					if err := f.SetWorkbookProps(
 						&excelize.WorkbookPropsOptions{
@@ -145,14 +122,10 @@ func TestIntegrationDate1904IsReadFromTheWorkbook(t *testing.T) {
 						}); err != nil {
 						t.Fatalf("SetWorkbookProps: %v", err)
 					}
-					if err := f.SetCellValue(
-						itSheet, "A1", serial); err != nil {
-						t.Fatalf("SetCellValue: %v", err)
-					}
+					xlsxtest.SetCell(t, f, "A1", serial)
 				})
 
-			w := openWorkbook(t, path, Layout{
-				Sheet: itSheet, HeaderRow: 1, FirstRow: 1})
+			w := openWorkbook(t, path, bareLayout())
 
 			if w.Date1904() != c.epoch {
 				t.Fatalf("Date1904() = %v, want %v — the property was "+
@@ -167,7 +140,7 @@ func TestIntegrationDate1904IsReadFromTheWorkbook(t *testing.T) {
 				t.Fatal("Date returned nil for a populated cell")
 			}
 			if have := got.Time.Format("2006-01-02"); have != c.want {
-				t.Errorf("serial %s read as %s, want %s",
+				t.Errorf("serial %d read as %s, want %s",
 					serial, have, c.want)
 			}
 		})
@@ -188,27 +161,21 @@ func TestIntegrationDate1904IsReadFromTheWorkbook(t *testing.T) {
 // same string there, which is why every other test in the package passes
 // either way.
 func TestIntegrationRawCellValueBypassesTheNumberFormat(t *testing.T) {
-	const serial = 35000
-
-	path := writeWorkbook(t, "formatted.xlsx",
+	path := xlsxtest.WriteWorkbook(t, "formatted.xlsx",
 		func(t *testing.T, f *excelize.File) {
 			// 14 is Excel's built-in short date format.
 			style, err := f.NewStyle(&excelize.Style{NumFmt: 14})
 			if err != nil {
 				t.Fatalf("NewStyle: %v", err)
 			}
-			if err := f.SetCellValue(
-				itSheet, "A1", serial); err != nil {
-				t.Fatalf("SetCellValue: %v", err)
-			}
+			xlsxtest.SetCell(t, f, "A1", serial)
 			if err := f.SetCellStyle(
-				itSheet, "A1", "A1", style); err != nil {
+				xlsxtest.Sheet, "A1", "A1", style); err != nil {
 				t.Fatalf("SetCellStyle: %v", err)
 			}
 		})
 
-	w := openWorkbook(t, path, Layout{
-		Sheet: itSheet, HeaderRow: 1, FirstRow: 1})
+	w := openWorkbook(t, path, bareLayout())
 
 	got := w.Cell(1, "A")
 	if got != "35000" {
@@ -236,23 +203,9 @@ func TestIntegrationRawCellValueBypassesTheNumberFormat(t *testing.T) {
 // reproducible in three lines: excelize writes the formula and calculates
 // nothing, which is exactly what a script-built workbook looks like.
 func TestIntegrationUncachedFormulaCellsReadAsEmpty(t *testing.T) {
-	path := writeWorkbook(t, "formulas.xlsx",
-		func(t *testing.T, f *excelize.File) {
-			for cell, v := range map[string]any{
-				"A1": 2, "B1": 3,
-			} {
-				if err := f.SetCellValue(itSheet, cell, v); err != nil {
-					t.Fatalf("SetCellValue %s: %v", cell, err)
-				}
-			}
-			if err := f.SetCellFormula(
-				itSheet, "C1", "A1*B1"); err != nil {
-				t.Fatalf("SetCellFormula: %v", err)
-			}
-		})
+	path := xlsxtest.WriteWorkbook(t, "formulas.xlsx", fillProduct)
 
-	w := openWorkbook(t, path, Layout{
-		Sheet: itSheet, HeaderRow: 1, FirstRow: 1})
+	w := openWorkbook(t, path, bareLayout())
 
 	// The literal cells are fine, which is what makes the empty one so
 	// easy to misread as missing source data.
@@ -288,32 +241,20 @@ func TestIntegrationUncachedFormulaCellsReadAsEmpty(t *testing.T) {
 // result rather than the formula text. Without this the test above could
 // pass against a reader that never returned anything at all.
 func TestIntegrationCachedFormulaResultsAreRead(t *testing.T) {
-	path := writeWorkbook(t, "cached.xlsx",
+	path := xlsxtest.WriteWorkbook(t, "cached.xlsx",
 		func(t *testing.T, f *excelize.File) {
-			if err := f.SetCellValue(itSheet, "A1", 2); err != nil {
-				t.Fatal(err)
-			}
-			if err := f.SetCellValue(itSheet, "B1", 3); err != nil {
-				t.Fatal(err)
-			}
-			if err := f.SetCellFormula(
-				itSheet, "C1", "A1*B1"); err != nil {
-				t.Fatal(err)
-			}
+			fillProduct(t, f)
 			// What Excel does on save, and what a script usually does
 			// not: compute the value and store it beside the formula.
-			v, err := f.CalcCellValue(itSheet, "C1")
+			v, err := f.CalcCellValue(xlsxtest.Sheet, "C1")
 			if err != nil {
 				t.Skipf("this excelize cannot calculate the cell: %v",
 					err)
 			}
-			if err := f.SetCellValue(itSheet, "D1", v); err != nil {
-				t.Fatal(err)
-			}
+			xlsxtest.SetCell(t, f, "D1", v)
 		})
 
-	w := openWorkbook(t, path, Layout{
-		Sheet: itSheet, HeaderRow: 1, FirstRow: 1})
+	w := openWorkbook(t, path, bareLayout())
 
 	if got := w.Cell(1, "D"); got != "6" {
 		t.Errorf("D1 = %q, want 6 — a stored result must be read", got)
@@ -335,32 +276,20 @@ func TestIntegrationCachedFormulaResultsAreRead(t *testing.T) {
 // every reader saw the right value under contention, which is the weaker
 // half.
 func TestIntegrationGridReadsAreSafeForConcurrentUse(t *testing.T) {
-	path := writeWorkbook(t, "grid.xlsx",
+	path := xlsxtest.WriteWorkbook(t, "grid.xlsx",
 		func(t *testing.T, f *excelize.File) {
-			if err := f.SetCellValue(
-				itSheet, "A1", "code"); err != nil {
-				t.Fatal(err)
-			}
-			if err := f.SetCellValue(
-				itSheet, "B1", "name"); err != nil {
-				t.Fatal(err)
-			}
+			xlsxtest.SetCell(t, f, "A1", "code")
+			xlsxtest.SetCell(t, f, "B1", "name")
 			for row := 2; row <= 200; row++ {
-				if err := f.SetCellValue(itSheet,
-					fmt.Sprintf("A%d", row),
-					fmt.Sprintf("C-%04d", row)); err != nil {
-					t.Fatal(err)
-				}
-				if err := f.SetCellValue(itSheet,
-					fmt.Sprintf("B%d", row),
-					fmt.Sprintf("N-%04d", row)); err != nil {
-					t.Fatal(err)
-				}
+				xlsxtest.SetCell(t, f, fmt.Sprintf("A%d", row),
+					fmt.Sprintf("C-%04d", row))
+				xlsxtest.SetCell(t, f, fmt.Sprintf("B%d", row),
+					fmt.Sprintf("N-%04d", row))
 			}
 		})
 
 	w := openWorkbook(t, path, Layout{
-		Sheet: itSheet, HeaderRow: 1, FirstRow: 2})
+		Sheet: xlsxtest.Sheet, HeaderRow: 1, FirstRow: 2})
 
 	cols := []Column{
 		{Col: "A", Captions: []string{"code"}, Purpose: "code"},
@@ -431,8 +360,10 @@ func TestIntegrationLinksResolveAgainstTheWorkbookNotTheProcess(t *testing.T) {
 	root := t.TempDir()
 	books := filepath.Join(root, "books")
 	elsewhere := filepath.Join(root, "elsewhere")
-	writeTarget(t, filepath.Join(books, "scans", "1.pdf"), "first")
-	writeTarget(t, filepath.Join(books, "scans", "2.pdf"), "second")
+	testutil.WriteFile(t, filepath.Join(books, "scans", "1.pdf"),
+		[]byte("first"))
+	testutil.WriteFile(t, filepath.Join(books, "scans", "2.pdf"),
+		[]byte("second"))
 	if err := os.MkdirAll(elsewhere, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -440,8 +371,7 @@ func TestIntegrationLinksResolveAgainstTheWorkbookNotTheProcess(t *testing.T) {
 
 	// Open by a RELATIVE path, then move away before resolving anything.
 	t.Chdir(books)
-	w := openWorkbook(t, "book.xlsx",
-		Layout{Sheet: itSheet, HeaderRow: 1, FirstRow: 1})
+	w := openWorkbook(t, "book.xlsx", bareLayout())
 	t.Chdir(elsewhere)
 
 	// The premise: resolved against the process, the target is not there.
@@ -480,14 +410,13 @@ func TestIntegrationARelativeLinkCanLeaveTheWorkbookDirectory(t *testing.T) {
 	root := t.TempDir()
 	books := filepath.Join(root, "books")
 	outside := filepath.Join(root, "outside.pdf")
-	writeTarget(t, outside, "outside")
+	testutil.WriteFile(t, outside, []byte("outside"))
 	if err := os.MkdirAll(books, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	path := linkedWorkbook(t, books, "../outside.pdf")
 
-	w := openWorkbook(t, path,
-		Layout{Sheet: itSheet, HeaderRow: 1, FirstRow: 1})
+	w := openWorkbook(t, path, bareLayout())
 	lt, err := w.Link(1, "A")
 	if err != nil {
 		t.Fatalf("Link: %v", err)

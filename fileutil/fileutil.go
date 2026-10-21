@@ -13,6 +13,10 @@ import (
 	"strings"
 	"sync"
 	"unicode/utf8"
+
+	"github.com/mas-ony/go-toolkit/internal/basename"
+	"github.com/mas-ony/go-toolkit/internal/bytesize"
+	"github.com/mas-ony/go-toolkit/internal/strlist"
 )
 
 // plainText is what Go's sniffer reports for any file it recognises as text
@@ -264,23 +268,6 @@ func deriveAllowed(types map[string]string) map[string]struct{} {
 	return m
 }
 
-// humanBytes renders a byte count in binary units, choosing the largest unit
-// that divides it exactly so the label stays truthful. A cap of 20 MiB prints
-// "20 MiB"; a cap of 512 KiB prints "512 KiB"; an odd number prints as bytes
-// rather than rounding into a figure the check does not enforce.
-func humanBytes(n int) string {
-	switch {
-	case n >= 1<<30 && n%(1<<30) == 0:
-		return fmt.Sprintf("%d GiB", n>>30)
-	case n >= 1<<20 && n%(1<<20) == 0:
-		return fmt.Sprintf("%d MiB", n>>20)
-	case n >= 1<<10 && n%(1<<10) == 0:
-		return fmt.Sprintf("%d KiB", n>>10)
-	default:
-		return fmt.Sprintf("%d bytes", n)
-	}
-}
-
 // stripDataURLPrefix removes a leading data-URL header, and only a data-URL
 // header. Anything else is returned untouched so a malformed payload fails at
 // the decoder with its own error rather than being quietly cut in half.
@@ -289,7 +276,7 @@ func stripDataURLPrefix(payload string) string {
 	if comma == -1 {
 		return payload
 	}
-	head := strings.ToLower(strings.TrimSpace(payload[:comma]))
+	head := strlist.Normalise(payload[:comma])
 	if strings.HasPrefix(head, "data:") ||
 		strings.HasSuffix(head, ";base64") ||
 		head == "base64" {
@@ -464,6 +451,35 @@ func mkdirAll(dir string, perm os.FileMode) error {
 	return nil
 }
 
+// recordDir creates the directory holding one record's files when it is
+// missing, and returns it. Write and CopyUnique both store into it.
+//
+// The directory is chmod'ed even when mkdirAll found it already present.
+// mkdirAll leaves existing directories alone because most of them are the
+// operator's, but this one is ours, created by an earlier Write under
+// whatever umask that process happened to carry, so widening it here is
+// what keeps one narrow run from making the record permanently unreadable.
+//
+// Best-effort, like the chmods inside mkdirAll: the directory may exist
+// under different ownership, where chmod fails with EPERM but the write
+// itself can still succeed.
+func recordDir(uploadDir string, id int) (string, error) {
+	dir := Dir(uploadDir, id)
+	if err := mkdirAll(dir, dirPerm); err != nil {
+		return "", fmt.Errorf("creating upload directory %q: %w", dir, err)
+	}
+	_ = os.Chmod(dir, dirPerm)
+	return dir, nil
+}
+
+// extKey is the key extTypes holds name's extension under: lowercased and
+// with its dot, as RegisterExts stores one. HasAllowedExt and
+// DetectContentType both look a name up by it, so the gate and the type
+// cannot read the extension of one name two ways.
+func extKey(name string) string {
+	return strings.ToLower(filepath.Ext(name))
+}
+
 // HasAllowedExt reports whether name carries one of the accepted extensions.
 //
 // This is an extension check only, a deliberate first gate rather than the
@@ -474,7 +490,7 @@ func mkdirAll(dir string, perm os.FileMode) error {
 func HasAllowedExt(name string) bool {
 	extMu.RLock()
 	defer extMu.RUnlock()
-	_, ok := extTypes[strings.ToLower(filepath.Ext(name))]
+	_, ok := extTypes[extKey(name)]
 	return ok
 }
 
@@ -507,13 +523,18 @@ func TooLarge(n int) bool {
 // It is a function rather than a package-level string because MaxFileBytes is
 // configurable: a string computed at init would describe the default forever.
 //
+// The unit is the largest that divides the cap exactly, by bytesize.Label,
+// the rule xlsx names its own cap by, so "20 MiB" reads as 20 MiB and an
+// odd cap is printed in bytes rather than rounded into a number the check
+// does not enforce.
+//
 // A DISABLED cap renders as "0 bytes", or as the negative value it was set
 // to, and that reads as "nothing is allowed" while meaning the opposite.
 // Nothing here prints it in that state, because the label only appears inside
 // a TooLarge branch a disabled cap never enters. A caller publishing the
 // limit on its own has to special-case it.
 func MaxFileLabel() string {
-	return humanBytes(MaxFileBytes)
+	return bytesize.Label(int64(MaxFileBytes))
 }
 
 // MaxNameLabel renders MaxNameLen for an error message, for the same reason
@@ -551,10 +572,11 @@ func Path(uploadDir string, id int, name string) string {
 //	"scan.pdf"         → "scan.pdf" (normal case, unchanged)
 //
 // Base never returns an empty string, but it does pass through three values
-// that must not be used as filenames, and all three fold onto FallbackName:
+// that must not be used as filenames, and all three fold onto FallbackName,
+// as does the "" the trim below can leave. basename.NamesNoFile is that
+// list, the one xlsx also refuses a hyperlink target by:
 //
-//   - "."  — returned for empty input. The switch also carries "" itself, as
-//     a zero-cost guard for a case Base makes unreachable.
+//   - "."  — returned for empty input.
 //   - ".." — returned unchanged. filepath.Join would then clean "<dir>/.."
 //     down to the parent, and a write against a directory fails with EISDIR.
 //     Not a traversal risk (Base reduces "../../x" to "x", and a lone ".."
@@ -625,8 +647,7 @@ func SafeName(name string) string {
 	}, name)
 
 	name = strings.TrimSpace(filepath.Base(name))
-	switch name {
-	case "", ".", "..", string(filepath.Separator):
+	if basename.NamesNoFile(name) {
 		return FallbackName
 	}
 	return name
@@ -849,7 +870,7 @@ func DetectContentType(name string, data []byte) string {
 		return sniffed
 	}
 
-	ct, named := extTypes[strings.ToLower(filepath.Ext(name))]
+	ct, named := extTypes[extKey(name)]
 
 	if sniffed != generic {
 		// Recognised, and not an accepted type. The one exception is a
@@ -917,7 +938,7 @@ func RegisterExts(types map[string]string) {
 	extMu.Lock()
 	defer extMu.Unlock()
 	for ext, ct := range types {
-		ext = strings.ToLower(strings.TrimSpace(ext))
+		ext = strlist.Normalise(ext)
 		ct = strings.TrimSpace(ct)
 		if ext == "" || ct == "" {
 			continue
@@ -997,21 +1018,10 @@ func Write(
 	data []byte,
 ) (string, error) {
 	safe := SafeName(name)
-	dir := Dir(uploadDir, id)
-	if err := mkdirAll(dir, dirPerm); err != nil {
-		return "", fmt.Errorf("creating upload directory %q: %w", dir, err)
+	dir, err := recordDir(uploadDir, id)
+	if err != nil {
+		return "", err
 	}
-	// Chmod the record directory even when mkdirAll found it already
-	// present. mkdirAll leaves existing directories alone because most of
-	// them are the operator's, but this one is ours, created by an earlier
-	// Write under whatever umask that process happened to carry, so widening
-	// it here is what keeps one narrow run from making the record
-	// permanently unreadable.
-	//
-	// Best-effort, like the chmods inside mkdirAll: the directory may exist
-	// under different ownership, where chmod fails with EPERM but the write
-	// itself can still succeed.
-	_ = os.Chmod(dir, dirPerm)
 
 	tmp, err := os.CreateTemp(dir, ".tmp-*")
 	if err != nil {
@@ -1152,15 +1162,12 @@ func CopyUnique(
 		return "", 0, fmt.Errorf("reading source file %q: %w", src, err)
 	}
 
-	dir := Dir(uploadDir, id)
-	if err := mkdirAll(dir, dirPerm); err != nil {
-		return "", 0, fmt.Errorf("creating upload directory %q: %w", dir, err)
+	// The record directory is prepared here as well as by the Write below,
+	// because reserveUnique creates the reservation in it first.
+	dir, err := recordDir(uploadDir, id)
+	if err != nil {
+		return "", 0, err
 	}
-	// Widen a record directory an earlier Write left under a narrower umask,
-	// best-effort, for the reasons given at the same call in Write. It is
-	// repeated here rather than left to the Write below because reserveUnique
-	// creates the reservation in this directory first.
-	_ = os.Chmod(dir, dirPerm)
 
 	name, err := reserveUnique(dir, desiredName)
 	if err != nil {
@@ -1174,7 +1181,7 @@ func CopyUnique(
 	// on instead of a property two functions have to keep in step.
 	stored, err := Write(uploadDir, id, name, data)
 	if err != nil {
-		_ = os.Remove(filepath.Join(dir, name))
+		_ = os.Remove(Path(uploadDir, id, name))
 		return "", 0, err
 	}
 	return stored, len(data), nil
@@ -1212,12 +1219,14 @@ func CopyUnique(
 // The condition is deliberately "SafeName SUBSTITUTED the fallback" rather
 // than "the name is blank", so a caller that genuinely stored a file under
 // FallbackName can still remove it.
+//
+// The removal itself is RemoveFiles', for one name. The guard is checked
+// here first as well, so a refused name leaves even an empty directory as
+// it was.
 func Remove(uploadDir string, id int, name string) {
-	if !removable(name) {
-		return
+	if removable(name) {
+		RemoveFiles(uploadDir, id, []*string{&name})
 	}
-	_ = os.Remove(Path(uploadDir, id, name))
-	_ = os.Remove(Dir(uploadDir, id))
 }
 
 // RemoveFiles deletes several stored files belonging to one record, then
@@ -1233,15 +1242,14 @@ func Remove(uploadDir string, id int, name string) {
 // the end rather than after every file: the result is identical (it only
 // succeeds when the directory is empty) and it is one syscall instead of n.
 func RemoveFiles(uploadDir string, id int, names []*string) {
-	dir := Dir(uploadDir, id)
 	for _, name := range names {
 		if name == nil || !removable(*name) {
 			continue
 		}
-		_ = os.Remove(filepath.Join(dir, SafeName(*name)))
+		_ = os.Remove(Path(uploadDir, id, *name))
 	}
 	// Best-effort removal of the now-possibly-empty directory.
-	_ = os.Remove(dir)
+	_ = os.Remove(Dir(uploadDir, id))
 }
 
 // RemoveDir deletes a record's whole directory and everything in it. Used

@@ -92,10 +92,10 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
-	"strings"
 
 	"github.com/bytedance/sonic"
 	"github.com/gofiber/fiber/v3"
+	"github.com/mas-ony/go-toolkit/internal/upstream"
 	"github.com/spf13/viper"
 )
 
@@ -736,8 +736,10 @@ func (c *FiberConfig) Validate() error {
 	// A token that is not upper-case fails the same way by another route.
 	// Fiber upper-cases the method of every route before looking it up in
 	// this list, so "get" is never found, and registering a GET route panics
-	// exactly as if the entry were missing.
+	// exactly as if the entry were missing. upstream.NormaliseMethod is that
+	// form, the one fiber.client.no_retry_methods is compared in as well.
 	for i, m := range c.RequestMethods {
+		want := upstream.NormaliseMethod(m)
 		switch {
 		case !isHTTPFieldName(m):
 			errs = append(errs, fmt.Errorf("fiber.request_methods[%d] is not "+
@@ -748,7 +750,7 @@ func (c *FiberConfig) Validate() error {
 				i,
 				m,
 				tokenSpecials))
-		case m != strings.ToUpper(m):
+		case m != want:
 			errs = append(errs, fmt.Errorf("fiber.request_methods[%d] must "+
 				"be upper-case (got %q): Fiber upper-cases the method of "+
 				"every route it registers before looking it up here, so "+
@@ -756,7 +758,7 @@ func (c *FiberConfig) Validate() error {
 				"for %s panics at startup",
 				i,
 				m,
-				strings.ToUpper(m)))
+				want))
 		}
 	}
 

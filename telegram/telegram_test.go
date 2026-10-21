@@ -26,11 +26,10 @@ import (
 	"time"
 
 	"github.com/mas-ony/go-toolkit/config"
+	"github.com/mas-ony/go-toolkit/internal/testutil"
+	"github.com/mas-ony/go-toolkit/internal/upstream"
 	"github.com/rs/zerolog"
 )
-
-// testToken has the shape BotFather issues and is worth nothing.
-const testToken = "123456789:AAFakeTokenForTests_0123456789abcdefg"
 
 // upload is the file part of a document request.
 type upload struct {
@@ -144,11 +143,7 @@ func (b *bot) seen() []hit {
 // only returns the one request the API is expected to have seen.
 func (b *bot) only(t *testing.T) hit {
 	t.Helper()
-	got := b.seen()
-	if len(got) != 1 {
-		t.Fatalf("the API saw %d requests, want 1", len(got))
-	}
-	return got[0]
+	return testutil.Only(t, "requests at the API", b.seen())
 }
 
 // respond returns a reply that answers every request with status and body.
@@ -172,7 +167,7 @@ func service(
 ) *Service {
 	t.Helper()
 	cfg := &config.TelegramConfig{
-		Token:   testToken,
+		Token:   testutil.BotToken,
 		APIURL:  b.srv.URL,
 		Timeout: 10 * time.Second,
 	}
@@ -204,7 +199,7 @@ func TestSendTextPostsOneMessage(t *testing.T) {
 	if h.method != http.MethodPost {
 		t.Errorf("method = %s, want POST", h.method)
 	}
-	if want := "/bot" + testToken + "/sendMessage"; h.path != want {
+	if want := "/bot" + testutil.BotToken + "/sendMessage"; h.path != want {
 		t.Errorf("path = %q, want %q", h.path, want)
 	}
 	if h.contentType != formType {
@@ -231,7 +226,7 @@ func TestSendTextPostsOneMessage(t *testing.T) {
 			t.Errorf("log lacks %s:\n%s", want, log)
 		}
 	}
-	if strings.Contains(log, testToken) {
+	if strings.Contains(log, testutil.BotToken) {
 		t.Errorf("the log carries the token:\n%s", log)
 	}
 }
@@ -327,6 +322,52 @@ func TestNothingToSendNeverCallsTheAPI(t *testing.T) {
 	}
 }
 
+// checkSend is the one place SendText and SendDocument decide a send, and
+// it decides nothing to send before anything else: an empty chat or
+// payload is a silent nil whatever the chat or the caption holds. A send
+// that is not empty gets its chat back trimmed, or ErrInvalidChatID, or
+// ErrTooLong.
+func TestNothingToSendIsDecidedFirst(t *testing.T) {
+	t.Parallel()
+	over := strings.Repeat("x", MaxCaptionRunes+1)
+
+	tests := []struct {
+		name   string
+		chatID string
+		empty  bool
+		value  string
+		chat   string
+		ok     bool
+		err    error
+	}{
+		{"a chat to trim", " 555\n", false, "x", "555", true, nil},
+		{"no chat", "", false, "x", "", false, nil},
+		{"a blank chat", " \n", false, "x", "", false, nil},
+		{"nothing to send", "555", true, "", "", false, nil},
+		{"nothing to send to a malformed chat", "budi", true, "", "",
+			false, nil},
+		{"nothing to send under a caption over the limit", "555", true,
+			over, "", false, nil},
+		{"a malformed chat", "budi", false, "x", "", false,
+			ErrInvalidChatID},
+		{"a caption over the limit", "555", false, over, "", false,
+			ErrTooLong},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			chat, ok, err := checkSend(tc.chatID, tc.empty, "caption",
+				tc.value, MaxCaptionRunes)
+			if chat != tc.chat || ok != tc.ok || !errors.Is(err, tc.err) {
+				t.Errorf("checkSend(%q, %t) = %q, %t, %v, want %q, %t, %v",
+					tc.chatID, tc.empty, chat, ok, err, tc.chat, tc.ok,
+					tc.err)
+			}
+		})
+	}
+}
+
 // The limit is counted in characters and not bytes, so a text in a script
 // that takes two bytes a letter is not turned away at half the length. One
 // over is ErrTooLong, reported with both counts, and never sent.
@@ -372,7 +413,7 @@ func TestSendDocumentUploadsOneFile(t *testing.T) {
 	}
 
 	h := b.only(t)
-	if want := "/bot" + testToken + "/sendDocument"; h.path != want {
+	if want := "/bot" + testutil.BotToken + "/sendDocument"; h.path != want {
 		t.Errorf("path = %q, want %q", h.path, want)
 	}
 	if !strings.HasPrefix(h.contentType, "multipart/form-data") {
@@ -609,7 +650,7 @@ func TestARedirectIsNotFollowed(t *testing.T) {
 	if n := len(elsewhere.seen()); n != 0 {
 		t.Errorf("the redirect target saw %d requests, want none", n)
 	}
-	for _, leak := range []string{testToken, elsewhere.srv.URL} {
+	for _, leak := range []string{testutil.BotToken, elsewhere.srv.URL} {
 		if strings.Contains(err.Error(), leak) {
 			t.Errorf("err = %v, want it without %q", err, leak)
 		}
@@ -635,7 +676,7 @@ func TestTheTokenNeverReachesAnError(t *testing.T) {
 		t.Errorf("the chain holds a *url.Error, which carries the URL:\n%v",
 			ue)
 	}
-	for _, leak := range []string{testToken, "/bot", "AAFake"} {
+	for _, leak := range []string{testutil.BotToken, "/bot", "AAFake"} {
 		if strings.Contains(err.Error(), leak) {
 			t.Errorf("a refused connection: err = %v, want it without %q",
 				err, leak)
@@ -650,8 +691,8 @@ func TestTheTokenNeverReachesAnError(t *testing.T) {
 	if err == nil {
 		t.Fatal("a refused send succeeded")
 	}
-	if strings.Contains(err.Error(), testToken) ||
-		!strings.Contains(err.Error(), "***") {
+	if strings.Contains(err.Error(), testutil.BotToken) ||
+		!strings.Contains(err.Error(), upstream.Masked) {
 		t.Errorf("an echoing API: err = %v, want the token masked", err)
 	}
 }
@@ -672,7 +713,7 @@ func TestSendUnderACancelledContext(t *testing.T) {
 	if n := len(b.seen()); n != 0 {
 		t.Errorf("the API saw %d requests, want none", n)
 	}
-	if strings.Contains(err.Error(), testToken) {
+	if strings.Contains(err.Error(), testutil.BotToken) {
 		t.Errorf("err = %v, want it without the token", err)
 	}
 }
@@ -708,13 +749,14 @@ func TestNewTellsAbsentFromBroken(t *testing.T) {
 		}
 	}
 
-	_, err := New(&config.TelegramConfig{Token: testToken}, zerolog.Nop())
+	_, err := New(&config.TelegramConfig{Token: testutil.BotToken},
+		zerolog.Nop())
 	if err == nil || errors.Is(err, ErrNotConfigured) ||
 		!strings.Contains(err.Error(), "notification.telegram.timeout") {
 		t.Errorf("a half-filled section: err = %v, want Validate's error "+
 			"naming the missing keys", err)
 	}
-	if err != nil && strings.Contains(err.Error(), testToken) {
+	if err != nil && strings.Contains(err.Error(), testutil.BotToken) {
 		t.Errorf("err = %v, want it without the token", err)
 	}
 
@@ -732,7 +774,7 @@ func TestNewTellsAbsentFromBroken(t *testing.T) {
 func TestTheAPIURLForms(t *testing.T) {
 	t.Parallel()
 	s, err := New(&config.TelegramConfig{
-		Token: testToken, Timeout: time.Minute,
+		Token: testutil.BotToken, Timeout: time.Minute,
 	}, zerolog.Nop())
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -748,9 +790,9 @@ func TestTheAPIURLForms(t *testing.T) {
 	if err := s.SendText(t.Context(), "1", "x"); err != nil {
 		t.Fatalf("SendText: %v", err)
 	}
-	if want := "/tg/bot" + testToken + "/sendMessage"; b.only(t).path !=
-		want {
-		t.Errorf("path = %q, want %q", b.only(t).path, want)
+	want := "/tg/bot" + testutil.BotToken + "/sendMessage"
+	if got := b.only(t).path; got != want {
+		t.Errorf("path = %q, want %q", got, want)
 	}
 }
 

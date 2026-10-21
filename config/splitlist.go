@@ -7,6 +7,7 @@ package config
 import (
 	"strings"
 
+	"github.com/mas-ony/go-toolkit/internal/strlist"
 	"github.com/spf13/viper"
 )
 
@@ -49,23 +50,17 @@ import (
 // through to GetStringSlice untouched. A whitespace-separated environment
 // value has no comma either and is handled by the same fallback.
 //
-// The comma path drops empty elements, and the whitespace fallback never
-// produces one, so neither string spelling can smuggle in a "". A YAML
-// sequence is passed through as written, though: an empty string written
-// there as an element survives, and it is the section's Validate that has
-// to judge it. An absent key yields no elements at all.
+// The comma path is strlist.Split, the rule request applies to a list in a
+// query parameter, so a list reads the same wherever it is written. It
+// drops empty elements, and the whitespace fallback never produces one, so
+// neither string spelling can smuggle in a "". A YAML sequence is passed
+// through as written, though: an empty string written there as an element
+// survives, and it is the section's Validate that has to judge it. An
+// absent key yields no elements at all.
 func splitList(v *viper.Viper, key string) []string {
 	raw := v.GetString(key)
 	if !strings.Contains(raw, ",") {
 		return v.GetStringSlice(key)
 	}
-
-	parts := strings.Split(raw, ",")
-	out := make([]string, 0, len(parts))
-	for _, p := range parts {
-		if p = strings.TrimSpace(p); p != "" {
-			out = append(out, p)
-		}
-	}
-	return out
+	return strlist.Split(raw)
 }

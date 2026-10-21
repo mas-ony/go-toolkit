@@ -15,65 +15,74 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/mas-ony/go-toolkit/internal/testutil"
 	"github.com/mas-ony/go-toolkit/xlsx"
 )
 
-// stubDataset is the smallest thing satisfying Dataset. Only Info is read
-// by the tests in this file; the rest exist to satisfy the interface, and
-// panic rather than returning zero values so a test that reaches one by
-// accident says so instead of quietly passing.
-type stubDataset struct{ name string }
+// fakeDataset is the smallest thing satisfying Dataset, shared by the tests
+// for importer.go and report.go. Info and Report answer with what the test
+// set, which is all the registry and the two renderers read; the rest exist
+// to satisfy the interface, and panic rather than returning zero values so
+// a test that reaches one by accident says so instead of quietly passing.
+type fakeDataset struct {
+	info  Info
+	shape ReportShape
+}
 
 // withCleanRegistry empties the registry for one test and puts the
 // original back afterwards.
 func withCleanRegistry(t *testing.T) {
 	t.Helper()
-	oldRegistry, oldOrder := registry, order
-	registry = map[string]func() Dataset{}
-	order = nil
-	t.Cleanup(func() { registry, order = oldRegistry, oldOrder })
+	testutil.Set(t, &registry, map[string]func() Dataset{})
+	testutil.Set(t, &order, nil)
 }
 
-// Info names the stub, which is all these tests read.
-func (d stubDataset) Info() Info { return Info{Name: d.name} }
+// named is a fakeDataset that answers Info with name and nothing else, the
+// shape the registry tests register and the summary tests render.
+func named(name string) fakeDataset {
+	return fakeDataset{info: Info{Name: name}}
+}
 
-// Len is not reached by these tests; see stubDataset.
-func (stubDataset) Len() int { panic("not used here") }
+// Info returns the info the test set.
+func (d fakeDataset) Info() Info { return d.info }
 
-// Flags is not reached by these tests; see stubDataset.
-func (stubDataset) Flags(*flag.FlagSet) { panic("not used here") }
+// Report returns the shape the test set.
+func (d fakeDataset) Report() ReportShape { return d.shape }
 
-// Validate is not reached by these tests; see stubDataset.
-func (stubDataset) Validate() error { panic("not used here") }
+// Len is not reached by these tests; see fakeDataset.
+func (fakeDataset) Len() int { panic("not used here") }
 
-// Layout is not reached by these tests; see stubDataset.
-func (stubDataset) Layout() xlsx.Layout { panic("not used here") }
+// Flags is not reached by these tests; see fakeDataset.
+func (fakeDataset) Flags(*flag.FlagSet) { panic("not used here") }
 
-// Columns is not reached by these tests; see stubDataset.
-func (stubDataset) Columns() []xlsx.Column { panic("not used here") }
+// Validate is not reached by these tests; see fakeDataset.
+func (fakeDataset) Validate() error { panic("not used here") }
 
-// HeaderAdvice is not reached by these tests; see stubDataset.
-func (stubDataset) HeaderAdvice(error) error { panic("not used here") }
+// Layout is not reached by these tests; see fakeDataset.
+func (fakeDataset) Layout() xlsx.Layout { panic("not used here") }
 
-// Connect is not reached by these tests; see stubDataset.
-func (stubDataset) Connect(context.Context, Transport, *Run) error {
+// Columns is not reached by these tests; see fakeDataset.
+func (fakeDataset) Columns() []xlsx.Column { panic("not used here") }
+
+// HeaderAdvice is not reached by these tests; see fakeDataset.
+func (fakeDataset) HeaderAdvice(error) error { panic("not used here") }
+
+// Connect is not reached by these tests; see fakeDataset.
+func (fakeDataset) Connect(context.Context, Transport, *Run) error {
 	panic("not used here")
 }
 
-// Prepare is not reached by these tests; see stubDataset.
-func (stubDataset) Prepare(
+// Prepare is not reached by these tests; see fakeDataset.
+func (fakeDataset) Prepare(
 	context.Context, *xlsx.File, *Run,
 ) ([]Outcome, error) {
 	panic("not used here")
 }
 
-// Import is not reached by these tests; see stubDataset.
-func (stubDataset) Import(context.Context, int, *Run) Outcome {
+// Import is not reached by these tests; see fakeDataset.
+func (fakeDataset) Import(context.Context, int, *Run) Outcome {
 	panic("not used here")
 }
-
-// Report is not reached by these tests; see stubDataset.
-func (stubDataset) Report() ReportShape { panic("not used here") }
 
 // The zero value has to work: Run holds a *Counters a caller builds with
 // &Counters{}, and the maps behind the named tallies are created lazily.
@@ -258,8 +267,8 @@ func TestSortOutcomesHandlesEdgeCases(t *testing.T) {
 func TestRegisterLookupAndNames(t *testing.T) {
 	withCleanRegistry(t)
 
-	Register("beta", func() Dataset { return stubDataset{name: "beta"} })
-	Register("alpha", func() Dataset { return stubDataset{name: "alpha"} })
+	Register("beta", func() Dataset { return named("beta") })
+	Register("alpha", func() Dataset { return named("alpha") })
 
 	// Registration order, not alphabetical: the list output reads better
 	// grouped by when things were added.
@@ -286,8 +295,8 @@ func TestRegisterLookupAndNames(t *testing.T) {
 // disagree with the one before it.
 func TestNamesReturnsACopy(t *testing.T) {
 	withCleanRegistry(t)
-	Register("one", func() Dataset { return stubDataset{name: "one"} })
-	Register("two", func() Dataset { return stubDataset{name: "two"} })
+	Register("one", func() Dataset { return named("one") })
+	Register("two", func() Dataset { return named("two") })
 
 	got := Names()
 	got[0] = "clobbered"
@@ -306,7 +315,7 @@ func TestLookupConstructsAFreshDataset(t *testing.T) {
 	calls := 0
 	Register("counting", func() Dataset {
 		calls++
-		return stubDataset{name: "counting"}
+		return named("counting")
 	})
 
 	if calls != 0 {
@@ -324,18 +333,17 @@ func TestLookupConstructsAFreshDataset(t *testing.T) {
 // is one of the two datasets silently never being reachable.
 func TestRegisterPanicsOnADuplicateName(t *testing.T) {
 	withCleanRegistry(t)
-	Register("same", func() Dataset { return stubDataset{name: "same"} })
+	Register("same", func() Dataset { return named("same") })
 
-	defer func() {
-		p := recover()
-		if p == nil {
-			t.Fatal("a duplicate registration did not panic")
-		}
-		if msg, _ := p.(string); !strings.Contains(msg, "same") {
-			t.Errorf("panic %v does not name the dataset", p)
-		}
-	}()
-	Register("same", func() Dataset { return stubDataset{name: "same"} })
+	p := testutil.CapturePanic(func() {
+		Register("same", func() Dataset { return named("same") })
+	})
+	if p == nil {
+		t.Fatal("a duplicate registration did not panic")
+	}
+	if msg, _ := p.(string); !strings.Contains(msg, "same") {
+		t.Errorf("panic %v does not name the dataset", p)
+	}
 }
 
 // Only is what lets a command with a single dataset accept no -dataset at
@@ -347,13 +355,13 @@ func TestOnly(t *testing.T) {
 		t.Error("Only = true with nothing registered")
 	}
 
-	Register("solo", func() Dataset { return stubDataset{name: "solo"} })
+	Register("solo", func() Dataset { return named("solo") })
 	name, ok := Only()
 	if !ok || name != "solo" {
 		t.Errorf("Only = (%q, %v), want (solo, true)", name, ok)
 	}
 
-	Register("second", func() Dataset { return stubDataset{name: "x"} })
+	Register("second", func() Dataset { return named("x") })
 	if _, ok := Only(); ok {
 		t.Error("Only = true with two datasets registered")
 	}

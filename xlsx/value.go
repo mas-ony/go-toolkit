@@ -67,8 +67,8 @@ const maxSerial = 2958466
 // names in the table, and a check that none of them names a different
 // month in a language already there.
 var dateLayouts = []string{
-	"2006-01-02",
-	"2006-01-02 15:04:05",
+	time.DateOnly,
+	time.DateTime,
 	"2006-01-02T15:04:05",
 	time.RFC3339,
 	"02/01/2006", // dd/mm/yyyy — day-first

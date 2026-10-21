@@ -26,7 +26,6 @@ package config
 import (
 	"errors"
 	"fmt"
-	"time"
 
 	"github.com/gofiber/fiber/v3/middleware/limiter"
 	"github.com/spf13/viper"
@@ -235,6 +234,19 @@ const (
 	StrategySliding = "sliding"
 )
 
+// strategies pairs each fiber.limiter.strategy value with the Handler that
+// implements it. limiterMiddlewareFor reads it in one direction and
+// strategyName in the other, so the two cannot disagree about a pairing.
+//
+// Both handlers are zero-size structs, which is the whole reason this field
+// could become a key at all: there is nothing to dial, nothing to
+// authenticate, and nothing to close. It is also why strategyName can find
+// a handler by equality: every value of the type is the same value.
+var strategies = map[string]limiter.Handler{
+	StrategyFixed:   limiter.FixedWindow{},
+	StrategySliding: limiter.SlidingWindow{},
+}
+
 // limiterMiddlewareFor maps a fiber.limiter.strategy value to the Handler that
 // implements it.
 //
@@ -244,19 +256,8 @@ const (
 // every caller is paired with Validate's strategy check, which is the only
 // thing standing between a misspelled key and a limiter counting by a strategy
 // nobody chose.
-//
-// Both returned values are zero-size structs, which is the whole reason this
-// field could become a key at all: there is nothing to dial, nothing to
-// authenticate, and nothing to close.
 func limiterMiddlewareFor(strategy string) limiter.Handler {
-	switch strategy {
-	case StrategyFixed:
-		return limiter.FixedWindow{}
-	case StrategySliding:
-		return limiter.SlidingWindow{}
-	default:
-		return nil
-	}
+	return strategies[strategy]
 }
 
 // strategyName is limiterMiddlewareFor in reverse: the fiber.limiter.strategy
@@ -265,16 +266,15 @@ func limiterMiddlewareFor(strategy string) limiter.Handler {
 //
 // It exists so Validate can compare what the key says against what is actually
 // installed, rather than trusting that the constructor set both from the same
-// string.
+// string. Comparing a handler of any other type is safe: interface values of
+// different dynamic types are unequal without being compared further.
 func strategyName(h limiter.Handler) string {
-	switch h.(type) {
-	case limiter.FixedWindow:
-		return StrategyFixed
-	case limiter.SlidingWindow:
-		return StrategySliding
-	default:
-		return ""
+	for name, handler := range strategies {
+		if h == handler {
+			return name
+		}
 	}
+	return ""
 }
 
 // NewLimiterConfig reads LimiterConfig fields from the provided Viper
@@ -522,22 +522,18 @@ func (c *LimiterConfig) Validate() error {
 	if c == nil || c.Config == nil {
 		return errors.New("fiber.limiter config was not initialised")
 	}
-	if c.Expiration == 0 {
-		errs = append(errs, errors.New("fiber.limiter.expiration is "+
-			"required: it names the window every quota is counted against, "+
-			"and leaving it empty enforces the middleware's own 1m anyway — "+
-			"a number neither config.yaml nor a startup log line will show"))
-	} else if c.Expiration < time.Second {
-		// Below a second the middleware does not round down, it throws the
-		// value away: configDefault tests int(Expiration.Seconds()) <= 0 and
-		// substitutes 1 minute. This is also where a bare number lands, since
-		// an unsuffixed 60 is 60ns.
-		errs = append(errs, fmt.Errorf("fiber.limiter.expiration must be at "+
-			"least 1s (got %s): the middleware truncates the window to whole "+
-			"seconds and replaces anything that truncates to zero with its "+
-			"own 1m — if this was meant as seconds, write the unit, because "+
-			"a bare number is nanoseconds",
-			c.Expiration))
+	// Below a second the middleware does not round down, it throws the
+	// value away: configDefault tests int(Expiration.Seconds()) <= 0 and
+	// substitutes 1 minute. This is also where a bare number lands, since an
+	// unsuffixed 60 is 60ns.
+	err := checkDuration("fiber.limiter.expiration", c.Expiration,
+		": it names the window every quota is counted against, and leaving "+
+			"it empty enforces the middleware's own 1m anyway — a number "+
+			"neither config.yaml nor a startup log line will show",
+		"the middleware truncates the window to whole seconds and replaces "+
+			"anything that truncates to zero with its own 1m")
+	if err != nil {
+		errs = append(errs, err)
 	}
 	if c.Max <= 0 {
 		// One branch for both signs on purpose, because the middleware has one

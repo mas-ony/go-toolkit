@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/mas-ony/go-toolkit/config"
+	"github.com/mas-ony/go-toolkit/internal/testutil"
 	"github.com/rs/zerolog"
 )
 
@@ -111,11 +112,7 @@ func (r *relay) seen() []session {
 // only returns the one session the test expects.
 func (r *relay) only(t *testing.T) session {
 	t.Helper()
-	s := r.seen()
-	if len(s) != 1 {
-		t.Fatalf("the relay saw %d connections, want 1", len(s))
-	}
-	return s[0]
+	return testutil.Only(t, "connections at the relay", r.seen())
 }
 
 // login returns a config change that sets the relay credentials.
@@ -719,9 +716,11 @@ func TestNewTellsAbsentFromBroken(t *testing.T) {
 }
 
 // Validate refuses credentials in clear text to a relay that is not on
-// loopback, and the send path refuses them too. The two keep separate
-// lists, so this holds them to the same answer for every spelling that
-// could divide them.
+// loopback, and the send path refuses them too. Both ask
+// upstream.IsLoopback, and this holds the two call sites to the same
+// answer for every spelling that could divide them, so neither can start
+// deciding by a rule of its own without failing here. The list itself is
+// pinned beside upstream.IsLoopback.
 func TestClearTextCredentialsAgreeWithValidate(t *testing.T) {
 	t.Parallel()
 	for _, host := range []string{
@@ -744,10 +743,6 @@ func TestClearTextCredentialsAgreeWithValidate(t *testing.T) {
 			t.Errorf("%s: Validate passes = %t, send path logs in = %t",
 				host, validates, sends)
 		}
-	}
-
-	if !loopbackHosts["localhost"] || loopbackHosts["smtp.example.go.id"] {
-		t.Error("the loopback list itself is wrong")
 	}
 }
 

@@ -15,9 +15,11 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-sql-driver/mysql"
 	"github.com/mas-ony/go-toolkit/config"
+	"github.com/mas-ony/go-toolkit/internal/upstream"
 	"github.com/microsoft/go-mssqldb/msdsn"
 )
 
@@ -88,19 +90,16 @@ var hostileCredentials = []struct {
 //
 // — hands over the whole username and the start of the password. Every
 // value this file builds escapes or forbids a literal "@" inside a
-// credential, so the last one is the separator on both forms.
+// credential, so the last one is the separator on both forms, and the cut
+// is upstream.RedactUserinfo's, which keeps the scheme in front of it so a
+// failure still says which DSN shape it was looking at. A DSN with no
+// separator is hidden whole, as upstream.Masked, rather than printed: with
+// nothing to cut at, there is no part of it known to be safe.
 func redact(dsn string) string {
-	at := strings.LastIndex(dsn, "@")
-	if at < 0 {
-		return "[redacted]"
+	if !strings.Contains(dsn, "@") {
+		return upstream.Masked
 	}
-	// Keep the scheme when there is one, so a failure still says which DSN
-	// shape it was looking at.
-	scheme := ""
-	if i := strings.Index(dsn, "://"); i >= 0 && i < at {
-		scheme = dsn[:i+3]
-	}
-	return scheme + "[redacted]" + dsn[at:]
+	return upstream.RedactUserinfo(dsn)
 }
 
 // testConfigsWith is the two-field form, needed because MySQL treats the
@@ -604,7 +603,8 @@ func TestBuildDSNReturnsTheRegisteredDriverName(t *testing.T) {
 	}
 }
 
-// TestEncryptModeReachesEachDriver walks the encryptModes table end to end.
+// TestEncryptModeReachesEachDriver walks the encrypt table end to end, from
+// the configured value to the parameter each DSN carries.
 //
 // The table is the whole reason database.encrypt is required for every
 // driver rather than only the one whose vocabulary it borrows, and the
@@ -916,7 +916,8 @@ func TestBuildDSNBracketsIPv6Hosts(t *testing.T) {
 }
 
 // NewContext must honour a context that is already done BEFORE it reaches
-// the network, which is the one thing it offers that New cannot.
+// the network, ending the wait at once instead of spending pingTimeout,
+// which is the one thing it offers that New cannot.
 //
 // No server and no reachable host are involved: sqlx.Open does not dial, and
 // database/sql checks ctx.Err() at the top of its connection request, so a
@@ -935,13 +936,19 @@ func TestNewContextStopsBeforeDialingOnACancelledContext(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			cancel()
 
+			start := time.Now()
 			db, err := NewContext(ctx, cfg, app)
+			elapsed := time.Since(start)
 			if db != nil {
 				_ = db.Close()
 				t.Error("NewContext returned a pool, want nil")
 			}
 			if !errors.Is(err, context.Canceled) {
 				t.Errorf("err = %v, want context.Canceled", err)
+			}
+			if elapsed >= pingTimeout {
+				t.Errorf("took %s, want well under pingTimeout (%s)",
+					elapsed, pingTimeout)
 			}
 		})
 	}

@@ -55,8 +55,9 @@
 // The backoff doubles from 500ms and stops at 8s, with no jitter, so
 // callers that fail together retry together. No Retry-After header is
 // read. A method listed in the config's NoRetryMethods gets exactly one
-// attempt whatever the failure, and POST is that list's default, because a
-// POST that timed out may have been applied.
+// attempt whatever the failure, and POST, config.DefaultNoRetryMethod, is
+// that list's default, because a POST that timed out may have been
+// applied.
 //
 // Do's contract on the way out is that a status this client will not retry
 // gives an *Error directly, and an exhausted budget gives an error
@@ -93,9 +94,9 @@
 //     maxBackoff, which is the difference between a retry policy and a
 //     hot loop.
 //   - The caps on an error message, against bodies built to defeat them:
-//     one far larger than maxErrorBody, one that is multi-byte UTF-8
-//     across the rune boundary the cut lands on, and one that is not text
-//     at all.
+//     one far larger than upstream.MaxAnswerBytes, one that is multi-byte
+//     UTF-8 across the rune boundary the cut lands on, and one that is
+//     not text at all.
 //   - Concurrency, under the race detector, against the claim above that
 //     one client is meant to be shared.
 //

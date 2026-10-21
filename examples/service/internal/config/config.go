@@ -59,6 +59,7 @@ import (
 	// always means the toolkit's X.
 	"github.com/mas-ony/go-toolkit/config"
 	"github.com/mas-ony/go-toolkit/fileutil"
+	"github.com/mas-ony/go-toolkit/logger"
 )
 
 // inactive stands in for a section that was supplied but is switched
@@ -187,10 +188,11 @@ var optional = map[string]bool{
 // log prints them.
 //
 // Both strings carry weight. The name is what optional and inUse key
-// on. The prefix is how config.SuppliedSections routes a key from the
-// file, or an environment variable, back to its section, so a prefix
-// that does not match the section's keys makes a supplied section look
-// absent.
+// on, and a notification section's name is its channel's constant,
+// because inUse asks notification.channels about that name. The prefix
+// is how config.SuppliedSections routes a key from the file, or an
+// environment variable, back to its section, so a prefix that does not
+// match the section's keys makes a supplied section look absent.
 //
 // A section of the application's own belongs here too: anything with
 // Validate and String is validated and logged with the rest.
@@ -200,10 +202,11 @@ func (c *Config) sectionList() []config.Section {
 		{Name: "database", Prefix: "database", Value: c.Database},
 		{Name: "notification", Prefix: "notification",
 			Value: c.Notification},
-		{Name: "whatsapp", Prefix: "notification.whatsapp",
+		{Name: config.ChannelWhatsApp, Prefix: "notification.whatsapp",
 			Value: c.WhatsApp},
-		{Name: "email", Prefix: "notification.email", Value: c.Email},
-		{Name: "telegram", Prefix: "notification.telegram",
+		{Name: config.ChannelEmail, Prefix: "notification.email",
+			Value: c.Email},
+		{Name: config.ChannelTelegram, Prefix: "notification.telegram",
 			Value: c.Telegram},
 		{Name: "fiber", Prefix: "fiber", Value: c.Fiber},
 		{Name: "auth", Prefix: "fiber.auth", Value: c.Auth},
@@ -228,6 +231,10 @@ func (c *Config) sectionList() []config.Section {
 // IsSession and IsJWT). An absent mode selects neither, and so does an
 // unrecognised one: the auth section reports that itself, and its error
 // is the one to fix before either mechanism can be judged.
+//
+// Each notification section is named by its channel's constant in
+// sectionList, so the name is the channel notification.channels is asked
+// about.
 func (c *Config) inUse(name string) (bool, string) {
 	mode := "fiber.auth.mode is " + c.Auth.Mode
 	if c.Auth.Mode == "" {
@@ -238,15 +245,11 @@ func (c *Config) inUse(name string) (bool, string) {
 		return c.Auth.IsJWT(), mode
 	case "session":
 		return c.Auth.IsSession(), mode
-	case "whatsapp":
-		return c.Notification.Enabled(config.ChannelWhatsApp),
-			"whatsapp is not in notification.channels"
-	case "email":
-		return c.Notification.Enabled(config.ChannelEmail),
-			"email is not in notification.channels"
-	case "telegram":
-		return c.Notification.Enabled(config.ChannelTelegram),
-			"telegram is not in notification.channels"
+	case config.ChannelWhatsApp,
+		config.ChannelEmail,
+		config.ChannelTelegram:
+		return c.Notification.Enabled(name),
+			name + " is not in notification.channels"
 	}
 	return true, ""
 }
@@ -402,13 +405,10 @@ func (c *Config) validateCrossSection() []error {
 	// middleware with ZerologConfig.WithLogger. That logger drops
 	// everything below debug in development and below info elsewhere,
 	// so a response class logged under that floor is never written.
-	// The floor mirrors logger.New and has to move with it. Absent
-	// levels mean the middleware's own error, warn and info, which
-	// always pass.
-	minLevel := zerolog.InfoLevel
-	if c.App.Env == config.EnvDevelopment {
-		minLevel = zerolog.DebugLevel
-	}
+	// logger.Level is that floor, read from the logger package rather
+	// than restated here, so the two cannot drift apart. Absent levels
+	// mean the middleware's own error, warn and info, which always pass.
+	minLevel := logger.Level(c.App.Env)
 	for _, level := range c.Zerolog.Levels {
 		if level >= minLevel {
 			continue

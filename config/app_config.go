@@ -24,7 +24,9 @@ package config
 import (
 	"errors"
 	"fmt"
+	"slices"
 
+	"github.com/mas-ony/go-toolkit/internal/upstream"
 	"github.com/spf13/viper"
 )
 
@@ -126,19 +128,15 @@ const (
 	EnvProduction = "production"
 )
 
-// validEnvs is the allowlist checked by AppConfig.Validate.
+// validEnvs is the allowlist checked by AppConfig.Validate, in the order
+// its error names them.
 //
-// The empty-struct value is the idiomatic set: it occupies no memory, and the
-// two-value map read in Validate reports membership without a sentinel value.
-// Values are matched exactly — no trimming, no case folding — so "Production"
-// is rejected. That strictness is deliberate: logger.New treats every
-// unrecognised value as production, so a typo that slipped through would
-// silently disable debug logging instead of failing at startup.
-var validEnvs = map[string]struct{}{
-	EnvDevelopment: {},
-	EnvStaging:     {},
-	EnvProduction:  {},
-}
+// Values are matched exactly — no trimming, no case folding — so
+// "Production" is rejected. That strictness is deliberate: logger.New
+// treats every unrecognised value as production, so a typo that slipped
+// through would silently disable debug logging instead of failing at
+// startup.
+var validEnvs = []string{EnvDevelopment, EnvStaging, EnvProduction}
 
 // NewAppConfig reads AppConfig fields from the provided Viper instance.
 //
@@ -183,11 +181,13 @@ func NewAppConfig(v *viper.Viper) *AppConfig {
 // registered: a full startup spent to learn that one number was out of
 // range.
 //
-// The check is a chained else-if so an absent key produces one error rather
-// than two: 0 is caught as "required" and never also reported as out of range.
-// It runs on the unix-socket path too, where the application drops the port
-// entirely — a socket deployment has to set a port it will never bind, which
-// is the same requirement the zero check already imposed.
+// The check is upstream.CheckPort, the rule notification.email.port is held
+// to as well and the one database.New refuses database.port by, and an
+// absent key produces one error rather than two: 0 is caught as "required"
+// and never also reported as out of range. It runs on the unix-socket path
+// too, where the application drops the port entirely — a socket deployment
+// has to set a port it will never bind, which is the same requirement the
+// zero check already imposed.
 //
 // Every check appends rather than returning early, so one restart surfaces
 // every app.* problem at once.
@@ -205,17 +205,11 @@ func (c *AppConfig) Validate() error {
 	if c.Version == "" {
 		errs = append(errs, errors.New("app.version is required"))
 	}
-	if _, ok := validEnvs[c.Env]; !ok {
-		errs = append(errs, fmt.Errorf("app.env must be one of: development, "+
-			"staging, production (got %q)",
-			c.Env))
+	if !slices.Contains(validEnvs, c.Env) {
+		errs = append(errs, notOneOf("app.env", c.Env, validEnvs))
 	}
-	if c.Port == 0 {
-		errs = append(errs, errors.New("app.port is required"))
-	} else if c.Port < 0 || c.Port > 65535 {
-		errs = append(errs, fmt.Errorf("app.port must be between 1 and 65535 "+
-			"(got %d)",
-			c.Port))
+	if err := upstream.CheckPort("app.port", c.Port); err != nil {
+		errs = append(errs, err)
 	}
 	if c.Location == "" {
 		errs = append(errs, errors.New("app.location is required"))

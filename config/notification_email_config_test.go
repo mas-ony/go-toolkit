@@ -28,17 +28,13 @@ var emailBase = map[string]any{
 	"notification.email.timeout": "30s",
 }
 
-// buildEmail adapts NewEmailConfig to the constructor shape runRules
-// takes.
-func buildEmail(v *viper.Viper) SectionConfig { return NewEmailConfig(v) }
-
 // TestEmailValidate holds the section's rules, each beside the value that
 // satisfies it: the required keys, the port range, the TLS modes and the
 // two ports whose mode is fixed, the sender's shape, the credential pair,
 // clear-text credentials only over loopback, and the timeout floor.
 func TestEmailValidate(t *testing.T) {
 	t.Parallel()
-	runRules(t, emailBase, buildEmail, []ruleCase{
+	runRules(t, emailBase, asSection(NewEmailConfig), []ruleCase{
 		{"no host", map[string]any{
 			"notification.email.host": nil}, "notification.email.host"},
 		{"no port", map[string]any{
@@ -121,8 +117,7 @@ func TestEmailValidate(t *testing.T) {
 // comment gives it.
 func TestNewEmailConfigReadsEveryKey(t *testing.T) {
 	t.Parallel()
-	v := viper.New()
-	for key, val := range map[string]any{
+	got := NewEmailConfig(withKeys(map[string]any{
 		"notification.email.host":     "smtp.example.com",
 		"notification.email.port":     465,
 		"notification.email.tls":      "implicit",
@@ -132,11 +127,7 @@ func TestNewEmailConfigReadsEveryKey(t *testing.T) {
 		"notification.email.from":     "App <app@example.com>",
 		"notification.email.timeout":  "45s",
 		"notification.email.async":    true,
-	} {
-		v.Set(key, val)
-	}
-
-	got := NewEmailConfig(v)
+	}, nil))
 	want := &EmailConfig{
 		Host:     "smtp.example.com",
 		Port:     465,

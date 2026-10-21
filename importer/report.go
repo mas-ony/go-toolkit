@@ -1,6 +1,7 @@
 package importer
 
 import (
+	"cmp"
 	"encoding/csv"
 	"fmt"
 	"io"
@@ -9,16 +10,6 @@ import (
 	"strconv"
 	"strings"
 )
-
-// orDefault substitutes a fallback for an empty column name, so a dataset
-// that leaves one unset still produces a CSV with a named header rather
-// than a blank cell an importer downstream cannot address.
-func orDefault(s, fallback string) string {
-	if s == "" {
-		return fallback
-	}
-	return s
-}
 
 // PrintSummary writes the human-facing result of a run.
 //
@@ -58,13 +49,13 @@ func PrintSummary(
 	rows := []Counter{{Name: "rows parsed", Value: t.Parsed, Always: true}}
 	if !run.Opt.DryRun {
 		rows = append(rows,
-			Counter{Name: "created", Value: t.Created},
-			Counter{Name: "updated", Value: t.Updated},
-			Counter{Name: "skipped", Value: t.Skipped},
+			Counter{Name: string(StatusCreated), Value: t.Created},
+			Counter{Name: string(StatusUpdated), Value: t.Updated},
+			Counter{Name: string(StatusSkipped), Value: t.Skipped},
 		)
 	}
 	rows = append(rows,
-		Counter{Name: "failed", Value: t.Failed, Always: true})
+		Counter{Name: string(StatusFailed), Value: t.Failed, Always: true})
 	rows = append(rows, t.Extras()...)
 
 	width := 0
@@ -132,11 +123,14 @@ func WriteReport(path string, ds Dataset, outcomes []Outcome) error {
 
 	w := csv.NewWriter(f)
 
+	// A column the dataset leaves unnamed gets a fallback name, so the CSV
+	// carries a named header rather than a blank cell an importer
+	// downstream cannot address.
 	header := make([]string, 0, len(shape.Fields)+5)
 	header = append(header, "excel_row",
-		orDefault(shape.Label, "label"),
+		cmp.Or(shape.Label, "label"),
 		"status",
-		orDefault(shape.ID, "id"))
+		cmp.Or(shape.ID, "id"))
 	header = append(header, shape.Fields...)
 	header = append(header, "notes")
 	if err := w.Write(header); err != nil {

@@ -11,6 +11,22 @@ import (
 	"testing"
 )
 
+// resolved is what ResolveLink makes of in against dir, once the test has
+// checked that it resolved at all and to the file named base. ok is false
+// when it did not resolve, which has been reported by then.
+func resolved(t *testing.T, in, dir, base string) (LinkTarget, bool) {
+	t.Helper()
+	got, err := ResolveLink(in, dir)
+	if err != nil {
+		t.Errorf("ResolveLink(%q): %v", in, err)
+		return got, false
+	}
+	if got.Base != base {
+		t.Errorf("ResolveLink(%q).Base = %q, want %q", in, got.Base, base)
+	}
+	return got, true
+}
+
 // A relative target resolves against the workbook's directory, not the
 // working directory, and percent-encoding is decoded so a name with a space
 // is found.
@@ -22,15 +38,9 @@ func TestResolveLinkRelative(t *testing.T) {
 		{`..\archive\4.pdf`, "4.pdf"},
 	}
 	for _, c := range cases {
-		got, err := ResolveLink(c.in, "/data/workbooks")
-		if err != nil {
-			t.Errorf("ResolveLink(%q): %v", c.in, err)
+		got, ok := resolved(t, c.in, "/data/workbooks", c.wantBase)
+		if !ok {
 			continue
-		}
-		if got.Base != c.wantBase {
-			t.Errorf(
-				"ResolveLink(%q).Base = %q, want %q",
-				c.in, got.Base, c.wantBase)
 		}
 		if got.Foreign {
 			t.Errorf("ResolveLink(%q): relative target marked foreign", c.in)
@@ -54,17 +64,9 @@ func TestResolveLinkForeign(t *testing.T) {
 		{"/mnt/archive/6.pdf", "6.pdf"},
 	}
 	for _, c := range cases {
-		got, err := ResolveLink(c.in, "/data/workbooks")
-		if err != nil {
-			t.Errorf("ResolveLink(%q): %v", c.in, err)
+		got, ok := resolved(t, c.in, "/data/workbooks", c.wantBase)
+		if !ok {
 			continue
-		}
-		if got.Base != c.wantBase {
-			t.Errorf(
-				"ResolveLink(%q).Base = %q, want %q",
-				c.in,
-				got.Base,
-				c.wantBase)
 		}
 		if !got.Foreign {
 			t.Errorf(
@@ -100,13 +102,7 @@ func TestResolveLinkEmpty(t *testing.T) {
 // filenames. Decoding must not throw the link away when it turns out not to
 // be URI-encoded at all.
 func TestResolveLinkKeepsAMalformedEncoding(t *testing.T) {
-	got, err := ResolveLink(`scans\100% raw.pdf`, "/data")
-	if err != nil {
-		t.Fatalf("Resolve: %v", err)
-	}
-	if got.Base != "100% raw.pdf" {
-		t.Errorf("Base = %q, want the name kept verbatim", got.Base)
-	}
+	resolved(t, `scans\100% raw.pdf`, "/data", "100% raw.pdf")
 }
 
 // Excel percent-encodes what it writes, so a file whose own name contains a
@@ -128,16 +124,7 @@ func TestResolveLinkDecodesFileURLExactlyOnce(t *testing.T) {
 		{"file://fileserver/scans/50%252B.pdf", "50%2B.pdf"},
 	}
 	for _, c := range cases {
-		got, err := ResolveLink(c.in, "/data")
-		if err != nil {
-			t.Errorf("ResolveLink(%q): %v", c.in, err)
-			continue
-		}
-		if got.Base != c.wantBase {
-			t.Errorf(
-				"ResolveLink(%q).Base = %q, want %q",
-				c.in, got.Base, c.wantBase)
-		}
+		resolved(t, c.in, "/data", c.wantBase)
 	}
 }
 
@@ -176,15 +163,9 @@ func TestResolveLinkRecoversAnUnparseableFileURL(t *testing.T) {
 		},
 	}
 	for _, c := range cases {
-		got, err := ResolveLink(c.in, "/data")
-		if err != nil {
-			t.Errorf("ResolveLink(%q): %v", c.in, err)
+		got, ok := resolved(t, c.in, "/data", c.wantBase)
+		if !ok {
 			continue
-		}
-		if got.Base != c.wantBase {
-			t.Errorf(
-				"ResolveLink(%q).Base = %q, want %q",
-				c.in, got.Base, c.wantBase)
 		}
 		if got.Path != filepath.FromSlash(c.wantPath) {
 			t.Errorf(
@@ -201,14 +182,8 @@ func TestResolveLinkRecoversAnUnparseableFileURL(t *testing.T) {
 // which is the same shape an authority-only URL has. Reporting ErrNotAFile
 // would send the caller off to its fallback route for a file that exists.
 func TestResolveLinkOpaqueFileURL(t *testing.T) {
-	got, err := ResolveLink("file:C:/Data/scan.pdf", "/data")
-	if err != nil {
-		t.Fatalf("ResolveLink: %v", err)
-	}
-	if got.Base != "scan.pdf" {
-		t.Errorf("Base = %q, want %q", got.Base, "scan.pdf")
-	}
-	if !got.Foreign {
+	got, ok := resolved(t, "file:C:/Data/scan.pdf", "/data", "scan.pdf")
+	if ok && !got.Foreign {
 		t.Error("a drive-lettered opaque target should be marked foreign")
 	}
 }

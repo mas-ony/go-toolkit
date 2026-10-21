@@ -7,28 +7,30 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
-	"regexp"
 	"strings"
 	"time"
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/gofiber/fiber/v3/client"
 	"github.com/mas-ony/go-toolkit/config"
+	"github.com/mas-ony/go-toolkit/internal/upstream"
+	"github.com/mas-ony/go-toolkit/response"
 	"github.com/rs/zerolog"
 )
 
-// Envelope is the success/message/data shape the service answers in.
+// Envelope is the success/message/data shape the service answers in:
+// response.Envelope, the declaration a handler built on that package
+// encodes its Response from, read here in the other direction.
 //
-// Data is a type parameter rather than an any, which is the whole reason
-// this type exists: a response decodes straight into the caller's type
-// instead of into a map the caller then has to re-marshal. That is also
-// why this is not response.Response, whose Data is an any because it is
-// the type a handler ENCODES from — the same three fields read in the
-// other direction.
+// Data is a type parameter rather than an any, so a response decodes
+// straight into the caller's type instead of into a map the caller then
+// has to re-marshal. The fields and their tags are response's, written
+// once for both directions, so the client cannot read an envelope the
+// handler does not write.
 //
 // A list endpoint answers with a page, and the page IS
-// response.Paginated. One definition for that shape, whichever way it is
-// travelling:
+// response.Paginated. One definition for that shape too, whichever way it
+// is travelling:
 //
 //	var env Envelope[response.Paginated[Item]]
 //
@@ -38,11 +40,7 @@ import (
 // arrived, and a service that does send it leaves Items nil — which
 // ranges zero times, so this matters only to a caller that tests the
 // slice rather than walking it.
-type Envelope[T any] struct {
-	Success bool   `json:"success"`
-	Message string `json:"message"`
-	Data    T      `json:"data"`
-}
+type Envelope[T any] = response.Envelope[T]
 
 // Error carries a non-2xx response. Msg is the message the server put in
 // the envelope, when it sent one, so a client has something to report
@@ -119,15 +117,6 @@ type Client struct {
 	log zerolog.Logger
 }
 
-// maxErrorBody bounds how much of a non-2xx body is copied out of the
-// response, not how much is read. The transport buffers the whole thing
-// before send sees any of it, so nothing here keeps a pathological body
-// from arriving; what the cap rules out is carrying it past resp.Close()
-// and holding it for the length of the error path. One mebibyte is far
-// more than an envelope or a proxy's error page needs, and the message a
-// caller sees is shorter still: see maxMessageRunes.
-const maxErrorBody = 1 << 20
-
 // maxMessageRunes bounds the message carried on an Error, whether it came
 // from the envelope or from a body that is not one. A message cut here
 // gains an ellipsis, so the cap is on the text and not on the length of
@@ -151,12 +140,6 @@ const (
 	maxBackoff      = 8 * time.Second
 	maxBackoffShift = 5
 )
-
-// quotedFragment matches one double-quoted Go string literal, escaped
-// characters included. That is the form strconv.Quote and the %q verb
-// produce, and the form in which url.Parse repeats part of its input inside
-// the cause it reports.
-var quotedFragment = regexp.MustCompile(`"(?:[^"\\]|\\.)*"`)
 
 // Sentinel errors for the three statuses a caller is likely to branch
 // on rather than merely report. Error.Unwrap reaches them, so errors.Is
@@ -182,62 +165,6 @@ func retryableStatus(code int) bool {
 		return true
 	}
 	return false
-}
-
-// redactUserinfo returns raw with any userinfo replaced by "***", so a
-// base URL can be quoted in an error without the credential it may carry:
-// "https://u:p@host/x" becomes "https://***@host/x".
-//
-// It works on the string rather than on a parsed *url.URL because it is
-// needed most where url.Parse has FAILED, and a password with a space in
-// it is enough to get there. The LAST "@" is taken to end the userinfo,
-// since a password may contain "@", "/" or "?" of its own. A URL whose
-// path or query happens to hold an "@" therefore has everything before it
-// masked, host included, which costs a less readable message rather than a
-// password in the log. The config package masks fiber.client.base_url with
-// a helper of the same shape.
-func redactUserinfo(raw string) string {
-	at := strings.LastIndex(raw, "@")
-	if at < 0 {
-		return raw
-	}
-	prefix := ""
-	if i := strings.Index(raw[:at], "://"); i >= 0 {
-		prefix = raw[:i+len("://")]
-	}
-	return prefix + "***" + raw[at:]
-}
-
-// parseCause returns what url.Parse objected to, without any of the input
-// it objected to.
-//
-// The *url.Error carries the whole raw URL, userinfo included, so its own
-// message is never used. The cause it wraps names the problem, but several
-// causes quote a fragment of the input too, and the fragment can be the
-// credential: a "/", "?" or "#" inside a password ends the authority early,
-// so for "https://u:secret/x@host" the host is "u:secret" and the cause
-// reads `invalid port ":secret" after host`. Every quoted fragment is
-// therefore masked, which keeps the shape of the message and loses what it
-// quoted. The config package guards fiber.client.base_url the same way.
-func parseCause(err error) error {
-	var ue *url.Error
-	if errors.As(err, &ue) {
-		err = ue.Err
-	}
-	return errors.New(quotedFragment.ReplaceAllString(err.Error(), `"***"`))
-}
-
-// contextErr reports a cancelled or expired context as an error that
-// names the call, and that errors.Is can match against context.Canceled
-// and context.DeadlineExceeded.
-func contextErr(ctx context.Context, method, rawURL string) error {
-	return fmt.Errorf("%s %s: %w", method, rawURL, ctx.Err())
-}
-
-// isSuccess reports whether a status is a 2xx. Do and send both ask,
-// once each way round, so the boundary is written in one place.
-func isSuccess(code int) bool {
-	return code >= 200 && code < 300
 }
 
 // attempts names a count of tries, singular for one, since a method in
@@ -279,13 +206,14 @@ func backoff(attempt int) time.Duration {
 //
 // ToValidUTF8 runs last, on the cut string, so that part is bounded by
 // the cap. The fold before it is not: strings.Fields walks the whole
-// body and allocates a slice header per token, so maxErrorBody is what
-// sets the peak here. A body that is not text at all still has to leave
-// here as something a JSON log line can carry, which is what ToValidUTF8
-// is for; it returns the string untouched when there is nothing to
-// repair. It replaces a run of invalid bytes with one character rather
-// than one apiece, so a binary body reads as a mark where the text stopped
-// making sense instead of as a wall of them.
+// body and allocates a slice header per token, so
+// upstream.MaxAnswerBytes is what sets the peak here. A body that is not
+// text at all still has to leave here as something a JSON log line can
+// carry, which is what ToValidUTF8 is for; it returns the string
+// untouched when there is nothing to repair. It replaces a run of invalid
+// bytes with one character rather than one apiece, so a binary body reads
+// as a mark where the text stopped making sense instead of as a wall of
+// them.
 func condense(s string) string {
 	s = strings.Join(strings.Fields(s), " ")
 	n := 0
@@ -311,11 +239,11 @@ func condense(s string) string {
 //
 // Both paths are condensed, not only the fallback. The envelope's
 // message is as unbounded as the page is: nothing between the wire and
-// here caps it except maxErrorBody, so a service answering with a
-// mebibyte of JSON puts a mebibyte on Error.Msg, which Error renders
-// into everything that touches it. Folding whitespace applies to both
-// for the same reason, since a server message carrying newlines breaks
-// a log line as thoroughly as an HTML page does.
+// here caps it except upstream.MaxAnswerBytes, so a service answering
+// with a mebibyte of JSON puts a mebibyte on Error.Msg, which Error
+// renders into everything that touches it. Folding whitespace applies to
+// both for the same reason, since a server message carrying newlines
+// breaks a log line as thoroughly as an HTML page does.
 func messageFrom(payload []byte) string {
 	var env Envelope[json.RawMessage]
 	if err := json.Unmarshal(payload, &env); err == nil {
@@ -327,53 +255,31 @@ func messageFrom(payload []byte) string {
 }
 
 // parseBase checks a base URL and takes suffix off the end of its path.
-// New and WithBaseURL both go through it, so a base that arrives at run
-// time passes exactly the checks one read from configuration does.
+// New and WithBaseURL both go through it, and the checks are
+// upstream.ParseBaseURL, the ones config.ClientConfig.Validate makes on
+// fiber.client.base_url, so a base that arrives at run time passes exactly
+// the checks one read from configuration does.
 //
 // The errors name no key and no flag, for the reason New gives. A base
 // passed to WithBaseURL may come from a table or a request as easily as
 // from config.yaml, and only the caller knows which.
 //
-// No error quotes a credential. A base carrying userinfo is refused, and
-// every message quotes the base with any userinfo masked, including the
-// one for a base url.Parse cannot read.
+// No error quotes a credential. A base carrying userinfo is refused rather
+// than sent: every URL built on it would carry the userinfo, and Error, the
+// retry log line and a cancellation each quote that URL in full, so a
+// password there reaches the logs on the first failure. A credential
+// belongs in the section's token or in Options.Headers, neither of which is
+// ever printed. Every message quotes the base with any userinfo masked,
+// including the one for a base url.Parse cannot read.
 func parseBase(raw, suffix string) (*url.URL, error) {
-	trimmed := strings.TrimRight(strings.TrimSpace(raw), "/")
-	if trimmed == "" {
+	if upstream.TrimBase(raw) == "" {
 		return nil, errors.New("base URL is required")
 	}
-	shown := redactUserinfo(raw)
-	u, err := url.Parse(trimmed)
+	u, err := upstream.ParseBaseURL("base URL", raw,
+		"every URL built on it is quoted in errors and logs, so send the "+
+			"credential as the token or through Options.Headers")
 	if err != nil {
-		// url.Parse copies its whole input into the error it returns, and
-		// the cause it wraps can quote the password as well; parseCause
-		// keeps the cause and masks what it quotes.
-		return nil, fmt.Errorf("invalid base URL %q: %w", shown,
-			parseCause(err))
-	}
-	if u.Scheme != "http" && u.Scheme != "https" {
-		return nil, fmt.Errorf(
-			"base URL must start with http:// or https:// (got %q)",
-			shown)
-	}
-	// A scheme on its own clears the check above. TrimRight takes both
-	// slashes off "https://", leaving "https:", which parses as a
-	// scheme with an empty host and an empty path. URL then builds
-	// "https:///items", and every request fails in the transport with
-	// a message that names neither the setting nor the reason.
-	if u.Host == "" {
-		return nil, fmt.Errorf("base URL names no host (got %q)", shown)
-	}
-	// Refused rather than sent. Every URL built on this base carries the
-	// userinfo, and Error, the retry log line and a cancellation each
-	// quote that URL in full, so a password here reaches the logs on the
-	// first failure. A credential belongs in the section's token or in
-	// Options.Headers, neither of which is ever printed.
-	if u.User != nil {
-		return nil, fmt.Errorf("base URL must not carry userinfo (got %q): "+
-			"every URL built on it is quoted in errors and logs, so send "+
-			"the credential as the token or through Options.Headers",
-			shown)
+		return nil, err
 	}
 
 	// The suffix comes off the parsed path rather than the raw string,
@@ -384,7 +290,7 @@ func parseBase(raw, suffix string) (*url.URL, error) {
 	// path that has already lost its slash, so leaving them on would
 	// strip nothing and produce exactly the doubled prefix
 	// Options.TrimPathSuffix exists to prevent.
-	suffix = strings.TrimRight(strings.TrimSpace(suffix), "/")
+	suffix = upstream.TrimBase(suffix)
 	if suffix != "" {
 		u.Path = strings.TrimRight(
 			strings.TrimSuffix(u.Path, suffix), "/")
@@ -435,10 +341,17 @@ func (c *Client) send(
 	}
 	defer resp.Close()
 
+	// A refusal's body is kept to upstream.MaxAnswerBytes, and the cap
+	// bounds how much of it is copied out of the response, not how much
+	// is read. The transport buffers the whole thing before send sees any
+	// of it, so nothing here keeps a pathological body from arriving; what
+	// the cap rules out is carrying it past resp.Close() and holding it for
+	// the length of the error path. The message a caller sees is shorter
+	// still: see maxMessageRunes.
 	status := resp.StatusCode()
 	payload := resp.Body()
-	if !isSuccess(status) && len(payload) > maxErrorBody {
-		payload = payload[:maxErrorBody]
+	if !upstream.IsSuccess(status) && len(payload) > upstream.MaxAnswerBytes {
+		payload = payload[:upstream.MaxAnswerBytes]
 	}
 	return status, bytes.Clone(payload), nil
 }
@@ -495,11 +408,11 @@ func New(cfg *config.ClientConfig, opt Options) (*Client, error) {
 
 	methods := cfg.NoRetryMethods
 	if methods == nil {
-		methods = []string{fiber.MethodPost}
+		methods = []string{config.DefaultNoRetryMethod}
 	}
 	noRetry := make(map[string]bool, len(methods))
 	for _, m := range methods {
-		noRetry[strings.ToUpper(m)] = true
+		noRetry[upstream.NormaliseMethod(m)] = true
 	}
 
 	// Clamped to the documented floor of one attempt. Do's loop runs
@@ -714,10 +627,15 @@ func (c *Client) Do(
 ) error {
 	var lastErr error
 
+	// call names the request in every error Do returns, a context error
+	// included, which upstream.StepErr wraps so errors.Is still reaches
+	// context.Canceled and context.DeadlineExceeded.
+	call := method + " " + rawURL
+
 	// The retry budget, not the attempt count: the loop below runs
 	// retries+1 times, which is what the give-up message reports.
 	retries := c.retries
-	if c.noRetry[strings.ToUpper(method)] {
+	if c.noRetry[upstream.NormaliseMethod(method)] {
 		retries = 0
 	}
 
@@ -729,7 +647,7 @@ func (c *Client) Do(
 			select {
 			case <-time.After(wait):
 			case <-ctx.Done():
-				return contextErr(ctx, method, rawURL)
+				return upstream.StepErr(ctx, call, ctx.Err())
 			}
 		}
 
@@ -738,19 +656,18 @@ func (c *Client) Do(
 		if err != nil {
 			if ctx.Err() != nil {
 				// The caller's deadline, not a transient failure.
-				return contextErr(ctx, method, rawURL)
+				return upstream.StepErr(ctx, call, ctx.Err())
 			}
 			lastErr = err
 			continue
 		}
 
-		if isSuccess(status) {
+		if upstream.IsSuccess(status) {
 			if out == nil {
 				return nil
 			}
 			if err := json.Unmarshal(payload, out); err != nil {
-				return fmt.Errorf("%s %s: decoding response: %w",
-					method, rawURL, err)
+				return fmt.Errorf("%s: decoding response: %w", call, err)
 			}
 			return nil
 		}
@@ -767,6 +684,6 @@ func (c *Client) Do(
 		lastErr = apiErr
 	}
 
-	return fmt.Errorf("%s %s: giving up after %s: %w",
-		method, rawURL, attempts(retries+1), lastErr)
+	return fmt.Errorf("%s: giving up after %s: %w",
+		call, attempts(retries+1), lastErr)
 }

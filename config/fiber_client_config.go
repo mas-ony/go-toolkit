@@ -22,10 +22,11 @@ package config
 import (
 	"errors"
 	"fmt"
-	"net/url"
+	"slices"
 	"strings"
 
 	"github.com/gofiber/fiber/v3"
+	"github.com/mas-ony/go-toolkit/internal/upstream"
 	"github.com/spf13/viper"
 )
 
@@ -90,14 +91,15 @@ type ClientConfig struct {
 	// the failure, and this key has THREE settings rather than two.
 	//
 	// Absent, it is nil, and the transport is expected to substitute its own
-	// default: POST alone. Stated, it is exactly what is stated. And stated
-	// EMPTY — `no_retry_methods: []` — every method is replayed, which is the
-	// opposite of the default and has to be asked for. splitList preserves
-	// that distinction (nil for a key no source supplies, non-nil for a stated
-	// empty list, as TestSplitListKeepsAbsentAndEmptyApart pins), which is
-	// what makes the third setting expressible at all. A transport that treats
-	// nil and empty alike collapses two of the three back into one, and this
-	// is the field to check when it does.
+	// default: DefaultNoRetryMethod, POST, alone. Stated, it is exactly what
+	// is stated. And stated EMPTY — `no_retry_methods: []` — every method is
+	// replayed, which is the opposite of the default and has to be asked
+	// for. splitList preserves that distinction (nil for a key no source
+	// supplies, non-nil for a stated empty list, as
+	// TestSplitListKeepsAbsentAndEmptyApart pins), which is what makes the
+	// third setting expressible at all. A transport that treats nil and
+	// empty alike collapses two of the three back into one, and this is the
+	// field to check when it does.
 	//
 	// From the ENVIRONMENT an empty value is not the empty list: Viper's
 	// AllowEmptyEnv is off, so FIBER_CLIENT_NO_RETRY_METHODS= reads as unset
@@ -124,33 +126,11 @@ type ClientConfig struct {
 	Insecure bool
 }
 
-// validNoRetryMethods is the allowlist checked by ClientConfig.Validate,
-// spelled with Fiber's own method constants so a rename upstream is a
-// compile error here rather than a silent gap in the list.
-//
-// Checked because a typo in this key is INVISIBLE at runtime. The transport
-// looks an entry up as strings.ToUpper(method), so "PSOT" matches no request
-// it will ever make: the method it was meant to exclude keeps its retries,
-// and the only symptom is a create replayed after a timeout — the one
-// failure the key exists to prevent, in a deployment whose config.yaml says
-// it cannot happen.
-//
-// The empty-struct value is the idiomatic set, the same shape validEnvs in
-// app_config.go uses. Membership is tested on the UPPERCASED entry, because
-// that is the form the transport compares, so "post" and "POST" are the same
-// setting here and there.
-var validNoRetryMethods = map[string]struct{}{
-	fiber.MethodGet:     {},
-	fiber.MethodHead:    {},
-	fiber.MethodPost:    {},
-	fiber.MethodPut:     {},
-	fiber.MethodPatch:   {},
-	fiber.MethodDelete:  {},
-	fiber.MethodConnect: {},
-	fiber.MethodOptions: {},
-	fiber.MethodTrace:   {},
-	fiber.MethodQuery:   {},
-}
+// DefaultNoRetryMethod is what an absent fiber.client.no_retry_methods
+// stands for: the one method httpclient.New gives a single attempt when
+// the key names none. String prints it for that case, so the startup line
+// and the transport cannot disagree about which method it is.
+const DefaultNoRetryMethod = fiber.MethodPost
 
 // NewClientConfig reads ClientConfig fields from the provided Viper instance.
 //
@@ -243,44 +223,24 @@ func (c *ClientConfig) Validate() error {
 	// different findings: absence says this deployment calls nothing, while a
 	// value that is not a URL says it meant to call something and cannot.
 	//
-	// Trimmed and re-parsed the way httpclient.New does, and held to the
-	// same four rules — it parses, its scheme is http or https, it names a
-	// host, and it carries no userinfo — so a value that passes here is one
-	// that constructor accepts, checked at startup instead of when something
-	// first builds a client, which may be a scheduled job hours later.
+	// The check is upstream.ParseBaseURL, the one httpclient.New makes, so
+	// a value that passes here is one that constructor accepts: it parses,
+	// its scheme is http or https, it names a host, and it carries no
+	// userinfo. Here it runs at startup instead of when something first
+	// builds a client, which may be a scheduled job hours later.
 	//
-	// No message quotes the value as written. Each quotes shown, which masks
-	// any userinfo, and the parse branch goes through urlParseCause, which
-	// drops the copy of the input url.Parse puts in its own error and masks
-	// any fragment the cause quotes. Both halves matter: a password with a
-	// space in it fails the parse before the userinfo case is ever reached,
-	// and one holding a "/" fails it as an invalid port that quotes the
-	// password.
+	// No message quotes the value as written. Each masks any userinfo, and
+	// the parse branch drops the copy of the input url.Parse puts in its own
+	// error and masks any fragment the cause quotes. Both halves matter: a
+	// password with a space in it fails the parse before the userinfo case
+	// is ever reached, and one holding a "/" fails it as an invalid port
+	// that quotes the password.
 	if c.BaseURL != "" {
-		raw := strings.TrimRight(strings.TrimSpace(c.BaseURL), "/")
-		shown := redactUserinfo(c.BaseURL)
-		u, err := url.Parse(raw)
-		switch {
-		case err != nil:
-			errs = append(errs, fmt.Errorf("fiber.client.base_url is not a "+
-				"valid URL (got %q): %w",
-				shown,
-				urlParseCause(err)))
-		case u.Scheme != "http" && u.Scheme != "https":
-			errs = append(errs, fmt.Errorf("fiber.client.base_url must "+
-				"start with http:// or https:// (got %q)",
-				shown))
-		case u.Host == "":
-			errs = append(errs, fmt.Errorf("fiber.client.base_url names no "+
-				"host (got %q): every request would be built against an "+
-				"address with nothing to dial",
-				shown))
-		case u.User != nil:
-			errs = append(errs, fmt.Errorf("fiber.client.base_url must not "+
-				"carry userinfo (got %q): the configuration is logged on "+
-				"every start, so a credential here reaches the log — put "+
-				"a bearer credential in fiber.client.token instead",
-				shown))
+		_, err := upstream.ParseBaseURL("fiber.client.base_url", c.BaseURL,
+			loggedCredential+" — put a bearer credential in "+
+				"fiber.client.token instead")
+		if err != nil {
+			errs = append(errs, err)
 		}
 	}
 
@@ -289,16 +249,29 @@ func (c *ClientConfig) Validate() error {
 	// and acts as the default, which is the shape this package refuses
 	// everywhere else. Rejecting it makes the file say what runs.
 	if c.Retries < 0 {
-		errs = append(errs, fmt.Errorf("fiber.client.retries cannot be "+
-			"negative (got %d): 0 already means one attempt and no retry",
-			c.Retries))
+		errs = append(errs, belowZero("fiber.client.retries", c.Retries,
+			"0 already means one attempt and no retry"))
 	}
 
 	// Entries are checked, the LIST is not: an empty one is the documented
 	// third setting of this key rather than a mistake, and rejecting it would
 	// leave no way to say "replay everything".
+	//
+	// Each entry has to be one of fiber.DefaultMethods, the method set Fiber
+	// itself declares, so the allowlist is Fiber's own rather than a copy
+	// of it that a new method upstream would leave behind. The entry is
+	// compared in upstream.NormaliseMethod's form, the one the transport
+	// matches a request's method in, so "post" and "POST" are the same
+	// setting here and there.
+	//
+	// Checked because a typo in this key is INVISIBLE at runtime: "PSOT"
+	// matches no request the client will ever make, so the method it was
+	// meant to exclude keeps its retries, and the only symptom is a create
+	// replayed after a timeout — the one failure the key exists to prevent,
+	// in a deployment whose config.yaml says it cannot happen.
 	for i, m := range c.NoRetryMethods {
-		if _, ok := validNoRetryMethods[strings.ToUpper(m)]; !ok {
+		if !slices.Contains(fiber.DefaultMethods,
+			upstream.NormaliseMethod(m)) {
 			errs = append(errs, fmt.Errorf("fiber.client.no_retry_"+
 				"methods[%d] is not an HTTP method (got %q): it would match "+
 				"no request the client makes, so the method it was meant to "+
@@ -317,9 +290,9 @@ func (c *ClientConfig) Validate() error {
 // Printing a value copy (%v on ClientConfig, not &ClientConfig) bypasses it
 // and dumps the struct fields directly — the token included.
 //
-// BaseURL goes through redactUserinfo. Validate refuses a base URL that
-// carries a credential, so a configuration that started has none to mask;
-// the mask is for a String called on one that did not start.
+// BaseURL goes through upstream.RedactUserinfo. Validate refuses a base URL
+// that carries a credential, so a configuration that started has none to
+// mask; the mask is for a String called on one that did not start.
 //
 // Token is reported as PRESENT OR NOT rather than printed. This struct holds
 // a credential and the omission is deliberate, as in DatabaseConfig.String —
@@ -340,15 +313,12 @@ func (c *ClientConfig) String() string {
 		return "<nil ClientConfig>"
 	}
 
-	token := "(none)"
-	if c.Token != "" {
-		token = "(set)"
-	}
+	token := setOrNone(c.Token != "")
 
 	methods := strings.Join(c.NoRetryMethods, ",")
 	switch {
 	case c.NoRetryMethods == nil:
-		methods = "POST (transport default)"
+		methods = DefaultNoRetryMethod + " (transport default)"
 	case len(c.NoRetryMethods) == 0:
 		methods = "none (every method is replayed)"
 	}
@@ -358,7 +328,7 @@ func (c *ClientConfig) String() string {
 		"Retries=%d "+
 		"NoRetryMethods=%s "+
 		"Insecure=%t",
-		redactUserinfo(c.BaseURL),
+		upstream.RedactUserinfo(c.BaseURL),
 		token,
 		c.Retries,
 		methods,

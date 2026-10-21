@@ -138,11 +138,12 @@
 // ErrInvalidPhone rejection, the error wrapping and the log lines — which is
 // to say everything this package actually decides.
 //
-// What it cannot reach is the JID construction, because a JID is built and
-// consumed within a single statement and never becomes an argument a test
-// can inspect. Swapping the user server for the group server would pass
-// every behavioural test here. So one test parses this package's own source
-// instead and asserts that every types.NewJID call uses the user server and
-// that there are exactly two of them — meaning a third send path added later
-// has to come and add itself rather than inheriting silence.
+// Every JID is built in one place, recipient, which hands it back, so a
+// test reads the server it carries directly. What no call can show is a
+// second place building one: a send path that called types.NewJID itself
+// with the group server would pass every behavioural test here. So one
+// test also parses this package's own source and asserts that every
+// types.NewJID call uses the user server and that there is exactly one of
+// them — meaning a send path added later has to resolve its number through
+// recipient rather than inheriting silence.
 package whatsapp

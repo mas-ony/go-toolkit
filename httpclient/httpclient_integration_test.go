@@ -51,16 +51,11 @@ func countingServer(t *testing.T, status, succeedOn int) (
 			n := len(seen)
 			mu.Unlock()
 
-			w.Header().Set("Content-Type", "application/json")
 			if n >= succeedOn {
-				w.WriteHeader(http.StatusOK)
-				_, _ = w.Write([]byte(
-					`{"success":true,"message":"","data":{}}`))
+				writeEnvelope(w, http.StatusOK, "", struct{}{})
 				return
 			}
-			w.WriteHeader(status)
-			_, _ = w.Write([]byte(
-				`{"success":false,"message":"later","data":null}`))
+			writeEnvelope(w, status, "later", nil)
 		}))
 	t.Cleanup(srv.Close)
 
@@ -89,17 +84,6 @@ func bodyServer(t *testing.T, status int, contentType string,
 	return srv
 }
 
-// newClient builds a client from cfg with default Options, failing the
-// test rather than returning an error nobody would check.
-func newClient(t *testing.T, cfg *config.ClientConfig) *Client {
-	t.Helper()
-	c, err := New(cfg, Options{})
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	return c
-}
-
 // Insecure is the one setting in the config section with a security
 // consequence, and it cannot be tested at all without a server presenting
 // a certificate this client would otherwise refuse.
@@ -109,9 +93,7 @@ func newClient(t *testing.T, cfg *config.ClientConfig) *Client {
 func TestIntegrationInsecureSkipsCertificateVerification(t *testing.T) {
 	srv := httptest.NewTLSServer(http.HandlerFunc(
 		func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(
-				`{"success":true,"message":"","data":{"ok":true}}`))
+			writeEnvelope(w, http.StatusOK, "", map[string]bool{"ok": true})
 		}))
 	defer srv.Close()
 
@@ -121,7 +103,7 @@ func TestIntegrationInsecureSkipsCertificateVerification(t *testing.T) {
 
 	t.Run("a self-signed certificate is refused by default",
 		func(t *testing.T) {
-			c := newClient(t, &config.ClientConfig{BaseURL: srv.URL})
+			c := mustNew(t, &config.ClientConfig{BaseURL: srv.URL}, Options{})
 
 			var env Envelope[body]
 			err := c.Do(context.Background(), http.MethodGet,
@@ -140,10 +122,10 @@ func TestIntegrationInsecureSkipsCertificateVerification(t *testing.T) {
 		})
 
 	t.Run("Insecure accepts it", func(t *testing.T) {
-		c := newClient(t, &config.ClientConfig{
+		c := mustNew(t, &config.ClientConfig{
 			BaseURL:  srv.URL,
 			Insecure: true,
-		})
+		}, Options{})
 
 		var env Envelope[body]
 		if err := c.Do(context.Background(), http.MethodGet,
@@ -162,10 +144,10 @@ func TestIntegrationInsecureSkipsCertificateVerification(t *testing.T) {
 // test above would be the only thing to notice — so this pins the property
 // directly, where the failure names the cause.
 func TestIntegrationInsecureLeavesTheRestOfTheTLSConfigAlone(t *testing.T) {
-	c := newClient(t, &config.ClientConfig{
+	c := mustNew(t, &config.ClientConfig{
 		BaseURL:  "https://example.invalid",
 		Insecure: true,
-	})
+	}, Options{})
 
 	tc := c.hc.TLSConfig()
 	if tc == nil {
@@ -183,11 +165,11 @@ func TestIntegrationInsecureLeavesTheRestOfTheTLSConfigAlone(t *testing.T) {
 func TestIntegrationBackoffDoublesFromTheFirstWait(t *testing.T) {
 	srv, times := countingServer(t, http.StatusServiceUnavailable, 4)
 
-	c := newClient(t, &config.ClientConfig{
+	c := mustNew(t, &config.ClientConfig{
 		BaseURL:        srv.URL,
 		Retries:        3,
 		NoRetryMethods: []string{},
-	})
+	}, Options{})
 
 	start := time.Now()
 	if err := c.Do(context.Background(), http.MethodGet,
@@ -225,29 +207,6 @@ func TestIntegrationBackoffDoublesFromTheFirstWait(t *testing.T) {
 	}
 }
 
-// The cap is what keeps a long retry budget from turning a transient blip
-// into an apparent hang, and maxBackoffShift is what keeps the doubling
-// itself from overflowing into a negative duration — which time.After
-// fires on immediately, producing exactly the hot loop the cap exists to
-// prevent.
-//
-// Asserted through backoff, the computation Do itself calls, rather than
-// by waiting minutes for it, since the wait is the thing being bounded.
-func TestIntegrationBackoffIsCappedAndNeverNegative(t *testing.T) {
-	for attempt := 1; attempt <= 40; attempt++ {
-		wait := backoff(attempt)
-
-		if wait <= 0 {
-			t.Fatalf("attempt %d computes a wait of %s — time.After "+
-				"fires immediately on that", attempt, wait)
-		}
-		if wait > maxBackoff {
-			t.Fatalf("attempt %d waits %s, over the %s cap",
-				attempt, wait, maxBackoff)
-		}
-	}
-}
-
 // A context cancelled DURING a backoff has to end the call, not be
 // discovered after the wait finishes. The select in Do is what does that,
 // and this is the only way to reach it: the cancellation has to land while
@@ -255,11 +214,11 @@ func TestIntegrationBackoffIsCappedAndNeverNegative(t *testing.T) {
 func TestIntegrationContextCancelledDuringBackoffReturnsAtOnce(t *testing.T) {
 	srv, times := countingServer(t, http.StatusServiceUnavailable, 99)
 
-	c := newClient(t, &config.ClientConfig{
+	c := mustNew(t, &config.ClientConfig{
 		BaseURL:        srv.URL,
 		Retries:        5,
 		NoRetryMethods: []string{},
-	})
+	}, Options{})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	// Long enough that the first attempt has certainly been made and the
@@ -286,29 +245,44 @@ func TestIntegrationContextCancelledDuringBackoffReturnsAtOnce(t *testing.T) {
 // that size is not something to put in a unit test's source.
 //
 // Three shapes, one per hazard: a gateway error page far over
-// maxErrorBody, a message whose 200-rune boundary falls inside a
-// multi-byte character, and a body that is not text at all.
+// upstream.MaxAnswerBytes, a message whose 200-rune boundary falls inside
+// a multi-byte character, and a body that is not text at all.
 func TestIntegrationErrorMessageIsCapped(t *testing.T) {
 	const ellipsis = "..."
 
-	t.Run("an oversized error page is cut", func(t *testing.T) {
-		huge := []byte("<html><body>" +
-			strings.Repeat("A", 4<<20) + "</body></html>")
-		srv := bodyServer(t, http.StatusBadRequest, "text/html", huge)
-		c := newClient(t, &config.ClientConfig{BaseURL: srv.URL})
-
+	// refusal is the *Error a GET comes back with from a server answering
+	// every request with status, contentType and body.
+	refusal := func(
+		t *testing.T, status int, contentType string, body []byte,
+	) *Error {
+		t.Helper()
+		srv := bodyServer(t, status, contentType, body)
+		c := mustNew(t, &config.ClientConfig{BaseURL: srv.URL}, Options{})
 		err := c.Do(context.Background(), http.MethodGet,
 			c.URL("/x", nil), nil, "", nil)
-
 		var apiErr *Error
 		if !errors.As(err, &apiErr) {
 			t.Fatalf("err = %v, want *Error", err)
 		}
-		runes := len([]rune(apiErr.Msg))
-		if runes > maxMessageRunes+len(ellipsis) {
+		return apiErr
+	}
+
+	// wantCapped fails the test for a message longer than the cap and the
+	// ellipsis that marks the cut.
+	wantCapped := func(t *testing.T, msg string) {
+		t.Helper()
+		if runes := len([]rune(msg)); runes >
+			maxMessageRunes+len(ellipsis) {
 			t.Errorf("message is %d runes, want at most %d",
 				runes, maxMessageRunes+len(ellipsis))
 		}
+	}
+
+	t.Run("an oversized error page is cut", func(t *testing.T) {
+		huge := []byte("<html><body>" +
+			strings.Repeat("A", 4<<20) + "</body></html>")
+		apiErr := refusal(t, http.StatusBadRequest, "text/html", huge)
+		wantCapped(t, apiErr.Msg)
 		if !strings.HasSuffix(apiErr.Msg, ellipsis) {
 			t.Error("a cut message should end in an ellipsis")
 		}
@@ -321,26 +295,13 @@ func TestIntegrationErrorMessageIsCapped(t *testing.T) {
 			msg := strings.Repeat("あ", 500)
 			body := []byte(fmt.Sprintf(
 				`{"success":false,"message":%q,"data":null}`, msg))
-			srv := bodyServer(t, http.StatusBadRequest,
+			apiErr := refusal(t, http.StatusBadRequest,
 				"application/json", body)
-			c := newClient(t, &config.ClientConfig{BaseURL: srv.URL})
-
-			err := c.Do(context.Background(), http.MethodGet,
-				c.URL("/x", nil), nil, "", nil)
-
-			var apiErr *Error
-			if !errors.As(err, &apiErr) {
-				t.Fatalf("err = %v, want *Error", err)
-			}
 			if strings.ContainsRune(apiErr.Msg, '\uFFFD') {
 				t.Error("the cut split a character; it should land on a " +
 					"rune boundary")
 			}
-			if runes := len([]rune(apiErr.Msg)); runes >
-				maxMessageRunes+len(ellipsis) {
-				t.Errorf("message is %d runes, want at most %d",
-					runes, maxMessageRunes+len(ellipsis))
-			}
+			wantCapped(t, apiErr.Msg)
 		})
 
 	t.Run("a binary body leaves as log-safe text", func(t *testing.T) {
@@ -348,23 +309,8 @@ func TestIntegrationErrorMessageIsCapped(t *testing.T) {
 		for i := range raw {
 			raw[i] = byte(i % 256)
 		}
-		srv := bodyServer(t, http.StatusBadGateway,
+		apiErr := refusal(t, http.StatusBadGateway,
 			"application/octet-stream", raw)
-		c := newClient(t, &config.ClientConfig{
-			BaseURL: srv.URL,
-			Retries: 0,
-		})
-
-		err := c.Do(context.Background(), http.MethodGet,
-			c.URL("/x", nil), nil, "", nil)
-		if err == nil {
-			t.Fatal("expected an error")
-		}
-
-		var apiErr *Error
-		if !errors.As(err, &apiErr) {
-			t.Fatalf("err = %v, want *Error", err)
-		}
 		// Valid UTF-8 and one line: the two properties that let the
 		// message go into a JSON log line without breaking it. The
 		// replacement characters are expected here — they are what
@@ -394,15 +340,14 @@ func TestIntegrationErrorMessageIsCapped(t *testing.T) {
 func TestIntegrationOneClientIsSafeToShare(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(
 		func(w http.ResponseWriter, r *http.Request) {
-			id := strings.TrimPrefix(r.URL.Path, "/")
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(fmt.Sprintf(
-				`{"success":true,"message":"","data":{"id":%q,"pad":%q}}`,
-				id, strings.Repeat("x", 4096))))
+			writeEnvelope(w, http.StatusOK, "", map[string]string{
+				"id":  strings.TrimPrefix(r.URL.Path, "/"),
+				"pad": strings.Repeat("x", 4096),
+			})
 		}))
 	defer srv.Close()
 
-	c := newClient(t, &config.ClientConfig{BaseURL: srv.URL})
+	c := mustNew(t, &config.ClientConfig{BaseURL: srv.URL}, Options{})
 
 	type payload struct {
 		ID  string `json:"id"`

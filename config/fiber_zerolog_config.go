@@ -25,6 +25,7 @@ import (
 	"strings"
 
 	fiberzerolog "github.com/gofiber/contrib/v3/zerolog"
+	"github.com/mas-ony/go-toolkit/internal/strlist"
 	"github.com/rs/zerolog"
 	"github.com/spf13/viper"
 )
@@ -178,7 +179,7 @@ func classListErrors(key string, n int) []error {
 // Matching is case-insensitive, as zerolog's own parser is. Lowercase is
 // canonical and is what config.yaml and every error message here use.
 func parseLevel(name string) (zerolog.Level, error) {
-	switch strings.ToLower(strings.TrimSpace(name)) {
+	switch strlist.Normalise(name) {
 	case "trace":
 		return zerolog.TraceLevel, nil
 	case "debug":
@@ -343,7 +344,7 @@ func NewZerologConfig(v *viper.Viper) *ZerologConfig {
 			// written to the structured log entry for every HTTP request. The
 			// order here determines the order of keys in the log output.
 			//
-			// Available field names (constants in contrib zerolog v1.1.5 —
+			// Available field names (constants in contrib zerolog v1.1.7 —
 			// unknown names are silently ignored, so a typo produces no field
 			// and no error):
 			//   error         — handler error message (only added when
@@ -799,12 +800,12 @@ func (c *ZerologConfig) String() string {
 	}
 	messages := fmt.Sprintf("%q", c.Messages)
 	if c.Messages == nil {
-		messages = "(middleware default)"
+		messages = middlewareDefaultLabel
 	}
 
 	levels := fmt.Sprintf("%v", c.Levels)
 	if c.Levels == nil {
-		levels = "(middleware default)"
+		levels = middlewareDefaultLabel
 	}
 
 	return fmt.Sprintf("Fields=%v "+

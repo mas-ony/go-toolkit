@@ -142,6 +142,18 @@ func root(t *testing.T, msg *mail.Message) entity {
 	return decode(t, msg.Header.Get, msg.Body)
 }
 
+// subjectOf decodes msg's Subject header the way a recipient's software
+// would.
+func subjectOf(t *testing.T, msg *mail.Message) string {
+	t.Helper()
+	var dec mime.WordDecoder
+	s, err := dec.DecodeHeader(msg.Header.Get("Subject"))
+	if err != nil {
+		t.Fatalf("Subject %q: %v", msg.Header.Get("Subject"), err)
+	}
+	return s
+}
+
 // The headers read back through a recipient's parser match what was sent,
 // a non-ASCII subject and display name included.
 func TestComposeHeadersReadBack(t *testing.T) {
@@ -155,10 +167,8 @@ func TestComposeHeadersReadBack(t *testing.T) {
 		Text:    "isi",
 	}))
 
-	var dec mime.WordDecoder
-	got, err := dec.DecodeHeader(msg.Header.Get("Subject"))
-	if err != nil || got != subject {
-		t.Errorf("Subject decodes to %q (%v), want %q", got, err, subject)
+	if got := subjectOf(t, msg); got != subject {
+		t.Errorf("Subject decodes to %q, want %q", got, subject)
 	}
 
 	for _, c := range []struct{ field, name, addr string }{
@@ -233,10 +243,8 @@ func TestComposeKeepsEveryLineLegal(t *testing.T) {
 	}
 
 	msg := read(t, raw)
-	var dec mime.WordDecoder
-	if got, err := dec.DecodeHeader(msg.Header.Get("Subject")); err != nil ||
-		got != subject {
-		t.Errorf("folded Subject decodes to %q (%v)", got, err)
+	if got := subjectOf(t, msg); got != subject {
+		t.Errorf("folded Subject decodes to %q", got)
 	}
 	if list, err := msg.Header.AddressList("To"); err != nil ||
 		len(list) != len(to) {
@@ -260,9 +268,7 @@ func TestASubjectCannotAddAHeader(t *testing.T) {
 	if got := msg.Header.Get("Bcc"); got != "" {
 		t.Fatalf("the subject added a header: Bcc: %s", got)
 	}
-	var dec mime.WordDecoder
-	if got, _ := dec.DecodeHeader(msg.Header.Get("Subject")); got !=
-		subject {
+	if got := subjectOf(t, msg); got != subject {
 		t.Errorf("Subject decodes to %q, want %q", got, subject)
 	}
 	if got := string(root(t, msg).body); got != "isi asli" {
@@ -343,10 +349,8 @@ func TestInvalidUTF8BecomesTheReplacementCharacter(t *testing.T) {
 		Subject: "caf\xe9",
 		Text:    "caf\xe9",
 	}))
-	var dec mime.WordDecoder
-	subject, _ := dec.DecodeHeader(msg.Header.Get("Subject"))
 	for what, got := range map[string]string{
-		"Subject": subject,
+		"Subject": subjectOf(t, msg),
 		"body":    string(root(t, msg).body),
 	} {
 		if got != "caf\uFFFD" {

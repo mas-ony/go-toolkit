@@ -90,6 +90,8 @@ import (
 	"sync/atomic"
 
 	"github.com/jmoiron/sqlx"
+	"github.com/mas-ony/go-toolkit/internal/dbdriver"
+	"github.com/mas-ony/go-toolkit/internal/strlist"
 )
 
 // Dialect is the statement grammar the helpers in this file emit.
@@ -120,6 +122,17 @@ const (
 	// DialectSQLServer emits T-SQL for SQL Server and Azure SQL Database.
 	DialectSQLServer
 )
+
+// engines pairs each grammar with the engine it spells SQL for, named as
+// internal/dbdriver names it. It is the one statement of which Dialect
+// values are grammars and what each is called: ParseDialect reads it from
+// an engine to a grammar, String from a grammar to an engine, and valid
+// asks whether a value is in it at all, so the three cannot disagree about
+// a pairing or about the set.
+var engines = map[Dialect]string{
+	DialectMySQL:     dbdriver.MySQL,
+	DialectSQLServer: dbdriver.SQLServer,
+}
 
 // selectedDialect holds the Dialect passed to SetDialect, or zero before
 // the first call.
@@ -170,6 +183,12 @@ func activeDialect() Dialect {
 	return d
 }
 
+// valid reports whether d is one of the grammars in engines.
+func (d Dialect) valid() bool {
+	_, ok := engines[d]
+	return ok
+}
+
 // isMySQL reports whether d spells MySQL grammar, and panics on a value that
 // spells no grammar at all.
 //
@@ -180,13 +199,18 @@ func activeDialect() Dialect {
 // is a wiring mistake, and emitting the wrong grammar for it would surface
 // as a syntax error far from the cause.
 func (d Dialect) isMySQL() bool {
-	switch d {
-	case DialectMySQL:
-		return true
-	case DialectSQLServer:
-		return false
+	if !d.valid() {
+		panic("database: " + d.String() + " is not a grammar")
 	}
-	panic("database: " + d.String() + " is not a grammar")
+	return d == DialectMySQL
+}
+
+// unsupportedDriver is the error for a driver name this package cannot
+// use, naming it. buildDSN and ParseDialect both refuse a name with it, so
+// the one condition ErrUnsupportedDriver stands for reads the same from
+// either.
+func unsupportedDriver(driver string) error {
+	return fmt.Errorf("%w: %q", ErrUnsupportedDriver, driver)
 }
 
 // insertMySQL is the MySQL half of InsertReturningID.
@@ -251,6 +275,13 @@ func insertSQLServer(
 //	mysql                       DialectMySQL
 //	sqlserver, mssql, azuresql  DialectSQLServer
 //
+// Every name but the last is resolved through dbdriver.Engine, the table
+// New opens a driver by and config validates database.driver against, so
+// the grammar ParseDialect picks is the one New connects with. "azuresql"
+// is the one spelling added here, for a caller that opens that driver
+// itself. The engine is then looked up in engines, the table String reads
+// the other way.
+//
 // Any other name returns an error wrapping ErrUnsupportedDriver. A guess
 // would hide the mistake until the first query failed.
 //
@@ -258,13 +289,16 @@ func insertSQLServer(
 // placeholders, which that driver does not rewrite. Register it with
 // sqlx.BindDriver("azuresql", sqlx.AT) before using that name with sqlx.
 func ParseDialect(driver string) (Dialect, error) {
-	switch strings.ToLower(strings.TrimSpace(driver)) {
-	case "mysql":
-		return DialectMySQL, nil
-	case "sqlserver", "mssql", "azuresql":
-		return DialectSQLServer, nil
+	engine := dbdriver.Engine(driver)
+	if strlist.Normalise(driver) == "azuresql" {
+		engine = dbdriver.SQLServer
 	}
-	return 0, fmt.Errorf("%w: %q", ErrUnsupportedDriver, driver)
+	for d, e := range engines {
+		if e == engine {
+			return d, nil
+		}
+	}
+	return 0, unsupportedDriver(driver)
 }
 
 // SetDialect selects the grammar for the whole package. Call it once at
@@ -287,7 +321,7 @@ func ParseDialect(driver string) (Dialect, error) {
 //
 // SetDialect panics if d is neither DialectMySQL nor DialectSQLServer.
 func SetDialect(d Dialect) {
-	if d != DialectMySQL && d != DialectSQLServer {
+	if !d.valid() {
 		panic("SetDialect: invalid " + d.String())
 	}
 	selectedDialect.Store(int32(d))
@@ -572,14 +606,11 @@ func (d Dialect) RecursiveCTE(name string) string {
 	return "WITH " + name + " AS ("
 }
 
-// String returns the canonical driver name of d, or Dialect(n) for a value
-// that is not a grammar.
+// String returns the canonical driver name of d, as engines pairs it, or
+// Dialect(n) for a value that is not a grammar.
 func (d Dialect) String() string {
-	switch d {
-	case DialectMySQL:
-		return "mysql"
-	case DialectSQLServer:
-		return "sqlserver"
+	if engine, ok := engines[d]; ok {
+		return engine
 	}
 	return "Dialect(" + strconv.Itoa(int(d)) + ")"
 }

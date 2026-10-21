@@ -7,6 +7,7 @@ import (
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/mas-ony/go-toolkit/database"
+	"github.com/mas-ony/go-toolkit/internal/strlist"
 )
 
 // Paging defaults, and the ceiling on how many rows one page may hold.
@@ -27,25 +28,14 @@ var (
 	MaxLimit     = 100
 )
 
-// splitList cuts a comma-separated query value into trimmed, non-empty
-// pieces, so the list parameters share one definition of what a list is. It
-// returns nil for an absent or empty value.
-//
-// The pieces still point into the request buffer. A caller that keeps one
-// clones it.
-func splitList(raw string) []string {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return nil
+// positiveID returns id, or the 400 ID and QueryID answer for a value that
+// is missing, non-numeric or not positive, all of which Fiber has already
+// read as 0 or less. param names the parameter in the error.
+func positiveID(id int, param string) (int, error) {
+	if id < 1 {
+		return 0, fiber.NewError(fiber.StatusBadRequest, "invalid "+param)
 	}
-	parts := strings.Split(raw, ",")
-	tokens := make([]string, 0, len(parts))
-	for _, p := range parts {
-		if p = strings.TrimSpace(p); p != "" {
-			tokens = append(tokens, p)
-		}
-	}
-	return tokens
+	return id, nil
 }
 
 // ID reads a route parameter, as in /items/:id, as a positive integer:
@@ -62,11 +52,7 @@ func splitList(raw string) []string {
 // and a missing segment are indistinguishable here. All three deserve the
 // same 400, so that conflation costs nothing.
 func ID(c fiber.Ctx, param string) (int, error) {
-	id := fiber.Params[int](c, param)
-	if id < 1 {
-		return 0, fiber.NewError(fiber.StatusBadRequest, "invalid "+param)
-	}
-	return id, nil
+	return positiveID(fiber.Params[int](c, param), param)
 }
 
 // IDs reads a comma-separated list of positive integers from a query
@@ -82,6 +68,11 @@ func ID(c fiber.Ctx, param string) (int, error) {
 // an empty slice when the parameter is absent or holds nothing usable, so a
 // caller can test len(ids) == 0 and leave its IN clause out.
 //
+// The list parameters, this one, Cols and Sort, share one definition of
+// what a list is, strlist.Split, which is also how config reads a list
+// key. Its pieces still point into the request buffer, so a caller that
+// keeps one as a string clones it.
+//
 // Each value becomes one bound parameter downstream, and SQL Server refuses
 // a statement carrying more than 2100 of them. Fiber's default 4 KiB read
 // buffer turns a query string that long away before it gets here, so the
@@ -89,7 +80,7 @@ func ID(c fiber.Ctx, param string) (int, error) {
 // and that deployment needs a limit of its own.
 func IDs(c fiber.Ctx, param string) []int {
 	var ids []int
-	for _, token := range splitList(c.Query(param)) {
+	for _, token := range strlist.Split(c.Query(param)) {
 		n, err := strconv.Atoi(token)
 		if err != nil || n < 1 || slices.Contains(ids, n) {
 			continue
@@ -107,11 +98,7 @@ func IDs(c fiber.Ctx, param string) []int {
 // narrows a search belongs in IntPtr, which treats a missing value as
 // "do not filter" rather than as a mistake.
 func QueryID(c fiber.Ctx, param string) (int, error) {
-	id := fiber.Query[int](c, param)
-	if id < 1 {
-		return 0, fiber.NewError(fiber.StatusBadRequest, "invalid "+param)
-	}
-	return id, nil
+	return positiveID(fiber.Query[int](c, param), param)
 }
 
 // Cols reads ?cols= into the column names a repository restricts its
@@ -123,7 +110,7 @@ func QueryID(c fiber.Ctx, param string) (int, error) {
 // receives more than it asked for rather than an error. A partly wrong list
 // does not fail a read, at the price of a typo that never shows.
 func Cols(c fiber.Ctx) []string {
-	tokens := splitList(c.Query("cols"))
+	tokens := strlist.Split(c.Query("cols"))
 	cols := make([]string, 0, len(tokens))
 	for _, token := range tokens {
 		cols = append(cols, strings.Clone(token))
@@ -164,17 +151,19 @@ func Page(c fiber.Ctx) (page, limit int) {
 //	?sort=                       nil, leaving the repository's default
 //
 // The direction is optional, and anything other than "desc", in any letter
-// case, sorts ascending. A column keeps the spelling the client sent,
-// qualified with whatever table alias the caller's queries use, because
-// database.SortClause matches it against the repository's ORDER BY
-// allowlist and drops whatever is missing from it; no unvalidated name
-// reaches the SQL text.
+// case, sorts ascending: each field's Dir is what
+// database.SortField.Direction reads it as, "ASC" or "DESC", the same rule
+// database.SortClause applies to whatever it is handed. A column keeps the
+// spelling the client sent, qualified with whatever table alias the
+// caller's queries use, because database.SortClause matches it against
+// the repository's ORDER BY allowlist and drops whatever is missing from
+// it; no unvalidated name reaches the SQL text.
 //
 // A column is cut at its first colon, since that is what separates the
 // direction. One that contains a colon of its own therefore arrives
 // truncated, and the allowlist drops it like any other unknown name.
 func Sort(c fiber.Ctx) []database.SortField {
-	tokens := splitList(c.Query("sort"))
+	tokens := strlist.Split(c.Query("sort"))
 	fields := make([]database.SortField, 0, len(tokens))
 	for _, token := range tokens {
 		col, dir, _ := strings.Cut(token, ":")
@@ -182,10 +171,10 @@ func Sort(c fiber.Ctx) []database.SortField {
 		if col == "" {
 			continue
 		}
-		field := database.SortField{Col: strings.Clone(col), Dir: "ASC"}
-		if strings.EqualFold(strings.TrimSpace(dir), "desc") {
-			field.Dir = "DESC"
-		}
+		// Direction reads dir as SortClause will and returns a constant,
+		// so the direction keeps nothing of the request buffer.
+		field := database.SortField{Col: strings.Clone(col), Dir: dir}
+		field.Dir = field.Direction()
 		fields = append(fields, field)
 	}
 	if len(fields) == 0 {
@@ -229,7 +218,7 @@ func IntPtr(c fiber.Ctx, key string) *int {
 // ?has_file=yeah would return every row WITHOUT a file, the opposite of what
 // was meant.
 func BoolPtr(c fiber.Ctx, key string) *bool {
-	switch strings.ToLower(strings.TrimSpace(c.Query(key))) {
+	switch strlist.Normalise(c.Query(key)) {
 	case "true", "1", "yes":
 		t := true
 		return &t

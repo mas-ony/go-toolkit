@@ -33,8 +33,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/mas-ony/go-toolkit/internal/testutil/xlsxtest"
 	"github.com/mas-ony/go-toolkit/xlsx"
-	"github.com/rs/zerolog"
 	"github.com/xuri/excelize/v2"
 )
 
@@ -58,9 +58,6 @@ type recorder struct {
 	onImport func(i int, run *Run) Outcome
 }
 
-// itSheet is the sheet every fixture writes, excelize's default.
-const itSheet = "Sheet1"
-
 // matchingColumns is a contract the fixture satisfies.
 func matchingColumns() []xlsx.Column {
 	return []xlsx.Column{
@@ -69,43 +66,31 @@ func matchingColumns() []xlsx.Column {
 	}
 }
 
-// newRun builds the Run Execute is given.
+// newRun builds the Run Execute is given: quietRun with fresh counters,
+// and a layout whose header is row 1 unless opt names one.
 func newRun(opt Options) *Run {
 	if opt.Layout.HeaderRow == 0 {
 		opt.Layout = xlsx.Layout{HeaderRow: 1, FirstRow: 2}
 	}
-	return &Run{Log: zerolog.Nop(), Opt: opt, Count: &Counters{}}
+	return quietRun(opt, &Counters{})
 }
 
 // writeSheet builds a workbook whose header row carries captions and whose
 // data rows carry values, and returns its path.
 func writeSheet(t *testing.T, captions []string, rows int) string {
 	t.Helper()
-
-	f := excelize.NewFile()
-	t.Cleanup(func() { _ = f.Close() })
-
-	for i, caption := range captions {
-		cell := fmt.Sprintf("%c1", 'A'+i)
-		if err := f.SetCellValue(itSheet, cell, caption); err != nil {
-			t.Fatalf("SetCellValue %s: %v", cell, err)
-		}
-	}
-	for row := 2; row <= rows+1; row++ {
-		for i := range captions {
-			cell := fmt.Sprintf("%c%d", 'A'+i, row)
-			if err := f.SetCellValue(itSheet, cell,
-				fmt.Sprintf("v%d-%d", row, i)); err != nil {
-				t.Fatalf("SetCellValue %s: %v", cell, err)
+	return xlsxtest.WriteWorkbook(t, "book.xlsx",
+		func(t *testing.T, f *excelize.File) {
+			for i, caption := range captions {
+				xlsxtest.SetCell(t, f, fmt.Sprintf("%c1", 'A'+i), caption)
 			}
-		}
-	}
-
-	path := filepath.Join(t.TempDir(), "book.xlsx")
-	if err := f.SaveAs(path); err != nil {
-		t.Fatalf("SaveAs: %v", err)
-	}
-	return path
+			for row := 2; row <= rows+1; row++ {
+				for i := range captions {
+					xlsxtest.SetCell(t, f, fmt.Sprintf("%c%d", 'A'+i, row),
+						fmt.Sprintf("v%d-%d", row, i))
+				}
+			}
+		})
 }
 
 // Info names the recorder.
@@ -218,9 +203,9 @@ func TestIntegrationExecuteResolvesTheSheetName(t *testing.T) {
 	if _, err := Execute(context.Background(), ds, path, run); err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
-	if run.Opt.Layout.Sheet != itSheet {
+	if run.Opt.Layout.Sheet != xlsxtest.Sheet {
 		t.Errorf("Layout.Sheet = %q, want %q",
-			run.Opt.Layout.Sheet, itSheet)
+			run.Opt.Layout.Sheet, xlsxtest.Sheet)
 	}
 }
 

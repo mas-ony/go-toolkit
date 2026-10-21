@@ -101,6 +101,14 @@ func (i *Index) resolve(paths []string) (string, error) {
 	return "", fmt.Errorf("%w: %s", ErrAmbiguous, strings.Join(names, ", "))
 }
 
+// stemOf is lower, a lowercased file name, without its extension. NewIndex
+// files a document under it in byStem, and Lookup asks byStem for it when
+// a reference carries an extension, so the key a file is stored under and
+// the key a reference is looked up by are derived one way.
+func stemOf(lower string) string {
+	return strings.TrimSuffix(lower, filepath.Ext(lower))
+}
+
 // read is the tail shared by Load and ReadFile: name the file, check the name
 // against the column width, read it, and refuse an empty one.
 //
@@ -252,7 +260,7 @@ func NewIndex(dir string, recursive bool) (*Index, error) {
 		}
 
 		lower := strings.ToLower(name)
-		stem := strings.TrimSuffix(lower, strings.ToLower(filepath.Ext(name)))
+		stem := stemOf(lower)
 
 		idx.byName[lower] = append(idx.byName[lower], path)
 		idx.byStem[stem] = append(idx.byStem[stem], path)
@@ -331,8 +339,7 @@ func (i *Index) Lookup(ref string) (string, error) {
 		// not, so the gate separates the case this fallback is for from the
 		// case it breaks.
 		if fileutil.HasAllowedExt(ref) {
-			ext := strings.ToLower(filepath.Ext(ref))
-			if stem := strings.TrimSuffix(lower, ext); stem != lower {
+			if stem := stemOf(lower); stem != lower {
 				paths, ok = i.byStem[stem]
 			}
 		}

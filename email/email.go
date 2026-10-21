@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/mas-ony/go-toolkit/config"
+	"github.com/mas-ony/go-toolkit/internal/strlist"
+	"github.com/mas-ony/go-toolkit/internal/upstream"
 	"github.com/rs/zerolog"
 )
 
@@ -58,16 +60,6 @@ type Service struct {
 // in. A relay that insists on a fully qualified name refuses it, and the
 // error names EHLO as the step that failed.
 const helloName = "localhost"
-
-// loopbackHosts are the host spellings credentials may cross to without
-// TLS: the three net/smtp's PlainAuth accepts, and the three
-// config.EmailConfig.Validate accepts.
-// TestClearTextCredentialsAgreeWithValidate holds the last two equal.
-var loopbackHosts = map[string]bool{
-	"localhost": true,
-	"127.0.0.1": true,
-	"::1":       true,
-}
 
 // errNoStartTLS ends a starttls send to a server that does not offer the
 // upgrade.
@@ -121,26 +113,6 @@ func names(rcpts []string) string {
 		strings.Join(rcpts[:shown], ", "), len(rcpts)-shown)
 }
 
-// offers reports whether mechs lists mech, in any case.
-func offers(mechs []string, mech string) bool {
-	for _, m := range mechs {
-		if strings.EqualFold(m, mech) {
-			return true
-		}
-	}
-	return false
-}
-
-// stepErr names the step of the conversation err ended. When ctx has
-// ended too, its error is wrapped alongside, since a deadline surfaces
-// from the connection as an I/O timeout that mentions no context.
-func stepErr(ctx context.Context, step string, err error) error {
-	if cerr := ctx.Err(); cerr != nil {
-		return fmt.Errorf("%s: %w: %w", step, cerr, err)
-	}
-	return fmt.Errorf("%s: %w", step, err)
-}
-
 // dial opens the connection within ctx: TCP, and under implicit TLS the
 // handshake too.
 func (s *Service) dial(ctx context.Context) (net.Conn, error) {
@@ -158,8 +130,8 @@ func (s *Service) dial(ctx context.Context) (net.Conn, error) {
 // net/smtp takes no context, so the bound is applied to the connection.
 // ctx gains the configured timeout, and the moment it ends — by deadline
 // or by cancellation — the connection's deadline moves to now, which
-// fails whatever read or write is blocked. stepErr then wraps ctx's error
-// in alongside the connection's, so a caller tests for
+// fails whatever read or write is blocked. upstream.StepErr then wraps
+// ctx's error in alongside the connection's, so a caller tests for
 // context.DeadlineExceeded rather than for an I/O timeout it never set.
 //
 // The connection's deadline is never set from ctx's deadline directly.
@@ -175,7 +147,7 @@ func (s *Service) deliver(
 
 	conn, err := s.dial(ctx)
 	if err != nil {
-		return stepErr(ctx, "connect", err)
+		return upstream.StepErr(ctx, "connect", err)
 	}
 	stop := context.AfterFunc(ctx, func() {
 		_ = conn.SetDeadline(time.Now())
@@ -185,28 +157,28 @@ func (s *Service) deliver(
 	// NewClient closes the connection itself when the greeting fails.
 	c, err := smtp.NewClient(conn, s.host)
 	if err != nil {
-		return stepErr(ctx, "greeting", err)
+		return upstream.StepErr(ctx, "greeting", err)
 	}
 	defer c.Close()
 
 	if err := c.Hello(helloName); err != nil {
-		return stepErr(ctx, "EHLO", err)
+		return upstream.StepErr(ctx, "EHLO", err)
 	}
 	// Strict, for the reason on config.EmailConfig.TLS: the offer arrives
 	// in clear text, so carrying on without it would hand the message and
 	// the password to whoever deleted it.
 	if s.mode == config.EmailTLSStartTLS {
 		if ok, _ := c.Extension("STARTTLS"); !ok {
-			return stepErr(ctx, "STARTTLS", errNoStartTLS)
+			return upstream.StepErr(ctx, "STARTTLS", errNoStartTLS)
 		}
 		if err := c.StartTLS(s.tlsConf); err != nil {
-			return stepErr(ctx, "STARTTLS", err)
+			return upstream.StepErr(ctx, "STARTTLS", err)
 		}
 	}
 	if s.username != "" {
 		a := &auth{username: s.username, password: s.password}
 		if err := c.Auth(a); err != nil {
-			return stepErr(ctx, "AUTH", err)
+			return upstream.StepErr(ctx, "AUTH", err)
 		}
 	}
 
@@ -223,24 +195,24 @@ func (s *Service) deliver(
 	}
 
 	if err := c.Mail(s.from.Address); err != nil {
-		return stepErr(ctx, "MAIL FROM", err)
+		return upstream.StepErr(ctx, "MAIL FROM", err)
 	}
 	for _, r := range rcpts {
 		if err := c.Rcpt(r); err != nil {
-			return stepErr(ctx, "RCPT TO <"+r+">", err)
+			return upstream.StepErr(ctx, "RCPT TO <"+r+">", err)
 		}
 	}
 	w, err := c.Data()
 	if err != nil {
-		return stepErr(ctx, "DATA", err)
+		return upstream.StepErr(ctx, "DATA", err)
 	}
 	if _, err := w.Write(msg); err != nil {
-		return stepErr(ctx, "upload", err)
+		return upstream.StepErr(ctx, "upload", err)
 	}
 	// Close sends the terminating dot and reads the relay's verdict on
 	// the whole message. This reply is the one that decides the send.
 	if err := w.Close(); err != nil {
-		return stepErr(ctx, "end of DATA", err)
+		return upstream.StepErr(ctx, "end of DATA", err)
 	}
 
 	// Accepted. The reply to QUIT is not checked; see the package
@@ -256,16 +228,14 @@ func (s *Service) deliver(
 // service whose main job is something else.
 //
 // ErrNotConfigured means there is nothing to send with: cfg is nil or
-// holds no setting at all, which is what a deployment without
-// notification.email.* produces. Call New only when notification.channels
-// includes email, and treat that error as fatal there. Any other problem
-// is Validate's joined error, so a section filled in halfway fails loudly
-// instead of quietly switching mail off.
+// holds no setting at all, as config.EmailConfig.Configured reports, which
+// is what a deployment without notification.email.* produces. Call New
+// only when notification.channels includes email, and treat that error as
+// fatal there. Any other problem is Validate's joined error, so a section
+// filled in halfway fails loudly instead of quietly switching mail off.
+// upstream.CheckSection draws that line, as it does for telegram.New.
 func New(cfg *config.EmailConfig, log zerolog.Logger) (*Service, error) {
-	if cfg == nil || *cfg == (config.EmailConfig{}) {
-		return nil, ErrNotConfigured
-	}
-	if err := cfg.Validate(); err != nil {
+	if err := upstream.CheckSection(cfg, ErrNotConfigured); err != nil {
 		return nil, err
 	}
 	// Validate has parsed From already. The error is checked all the
@@ -279,7 +249,7 @@ func New(cfg *config.EmailConfig, log zerolog.Logger) (*Service, error) {
 	s := &Service{
 		host:     host,
 		addr:     net.JoinHostPort(host, strconv.Itoa(cfg.Port)),
-		mode:     strings.ToLower(strings.TrimSpace(cfg.TLS)),
+		mode:     strlist.Normalise(cfg.TLS),
 		username: cfg.Username,
 		password: cfg.Password,
 		from:     from,
@@ -303,16 +273,16 @@ func New(cfg *config.EmailConfig, log zerolog.Logger) (*Service, error) {
 // get here with credentials for a remote relay in clear text; the check
 // stays so that the send path does not depend on that.
 func (a *auth) Start(server *smtp.ServerInfo) (string, []byte, error) {
-	if !server.TLS && !loopbackHosts[server.Name] {
+	if !server.TLS && !upstream.IsLoopback(server.Name) {
 		return "", nil, errors.New("refusing to send credentials over " +
 			"a connection that is not encrypted")
 	}
 	switch {
-	case offers(server.Auth, "PLAIN"):
+	case strlist.ContainsFold(server.Auth, "PLAIN"):
 		a.mech = "PLAIN"
 		return a.mech, []byte("\x00" + a.username + "\x00" + a.password),
 			nil
-	case offers(server.Auth, "LOGIN"):
+	case strlist.ContainsFold(server.Auth, "LOGIN"):
 		a.mech = "LOGIN"
 		return a.mech, nil, nil
 	}

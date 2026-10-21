@@ -63,6 +63,10 @@ type JWTConfig struct {
 // signature's strength at the key's own length.
 const minJWTSecretBytes = 32
 
+// whenJWT is the condition both keys are required under, as the message for
+// an absent one states it.
+const whenJWT = ` when fiber.auth.mode is "` + AuthModeJWT + `"`
+
 // NewJWTConfig reads JWT fields from the provided Viper instance.
 //
 // Never returns an error: absent keys and uncastable values both come back
@@ -127,8 +131,8 @@ func (c *JWTConfig) Validate() error {
 	// where 0 is the absent value.
 	switch {
 	case c.Secret == "":
-		errs = append(errs, errors.New("fiber.jwt.secret is required when "+
-			"fiber.auth.mode is \"jwt\""))
+		errs = append(errs,
+			errors.New("fiber.jwt.secret is required"+whenJWT))
 	case len(c.Secret) < minJWTSecretBytes:
 		errs = append(errs, fmt.Errorf("fiber.jwt.secret must be at least "+
 			"%d bytes (got %d)",
@@ -140,16 +144,10 @@ func (c *JWTConfig) Validate() error {
 	// else under a second is out of range. That range holds both mistakes
 	// worth catching: a bare number, read as nanoseconds, and a negative
 	// value, which would issue every token already expired.
-	switch {
-	case c.Expiry == 0:
-		errs = append(errs, errors.New("fiber.jwt.expiry is required when "+
-			"fiber.auth.mode is \"jwt\""))
-	case c.Expiry < time.Second:
-		errs = append(errs, fmt.Errorf("fiber.jwt.expiry must be at least "+
-			"1s (got %s): a shorter token expires before the client can "+
-			"use it, and if this was meant as seconds, write the unit — a "+
-			"bare number is nanoseconds",
-			c.Expiry))
+	err := checkDuration("fiber.jwt.expiry", c.Expiry, whenJWT,
+		"a shorter token expires before the client can use it")
+	if err != nil {
+		errs = append(errs, err)
 	}
 
 	return errors.Join(errs...)

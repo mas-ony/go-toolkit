@@ -22,6 +22,7 @@ import (
 	"strings"
 
 	"github.com/jmoiron/sqlx"
+	"github.com/mas-ony/go-toolkit/internal/strlist"
 )
 
 // SortField is one column and direction for an ORDER BY clause, in the shape
@@ -38,8 +39,9 @@ type SortField struct {
 	// "t.created_at".
 	Col string
 
-	// Dir is the sort direction. SortClause normalises it: anything that is
-	// not "desc", in any letter case, sorts ascending.
+	// Dir is the sort direction. SortClause normalises it through
+	// Direction: anything that is not "desc", in any letter case and with
+	// any surrounding space, sorts ascending.
 	Dir string
 }
 
@@ -62,6 +64,46 @@ func activeCols(cols, defaults []string, allowed map[string]string) []string {
 		return defaults
 	}
 	return known
+}
+
+// scanNamed binds args into query by name, in ext's placeholder style, and
+// reads what the query returns into dest through scan, which is the step
+// GetOne, CountQuery and SelectList share. GetOne and CountQuery pass
+// sqlx.GetContext, which scans one row and reports a missing one as
+// sql.ErrNoRows: GetOne turns that into its found result, and CountQuery
+// passes it on. SelectList passes sqlx.SelectContext, which scans every
+// row.
+func scanNamed(
+	ctx context.Context,
+	ext sqlx.ExtContext,
+	query string,
+	args map[string]any,
+	dest any,
+	scan func(context.Context, sqlx.QueryerContext, any, string,
+		...any) error,
+) error {
+	bound, boundArgs, err := ext.BindNamed(query, args)
+	if err != nil {
+		return err
+	}
+	return scan(ctx, ext, dest, bound, boundArgs...)
+}
+
+// Direction returns the ORDER BY keyword Dir stands for: "DESC" for
+// "desc" in any letter case and with any surrounding space, and "ASC" for
+// anything else, an empty Dir included.
+//
+// It is the one reading of a direction, so a parser that normalises Dir
+// as it fills the struct, as request.Sort does, and SortClause, which
+// normalises whatever it is handed, cannot read the same text two ways.
+// The word is read through strlist.Normalise, the form every word matched
+// against a fixed vocabulary is read in, a boolean in a query among them.
+// The result is one of two constants and never the text it was read from.
+func (f SortField) Direction() string {
+	if strlist.Normalise(f.Dir) == "desc" {
+		return "DESC"
+	}
+	return "ASC"
 }
 
 // NeedsJoin reports whether the requested columns include any that a JOIN
@@ -153,11 +195,7 @@ func GetOne(
 	args map[string]any,
 	dest any,
 ) (found bool, err error) {
-	bound, boundArgs, err := ext.BindNamed(query, args)
-	if err != nil {
-		return false, err
-	}
-	err = sqlx.GetContext(ctx, ext, dest, bound, boundArgs...)
+	err = scanNamed(ctx, ext, query, args, dest, sqlx.GetContext)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return false, nil
@@ -198,16 +236,14 @@ func CountQuery(
 	query string,
 	args map[string]any,
 ) (int, error) {
-	bound, boundArgs, err := ext.BindNamed(`
+	var total int
+	err := scanNamed(ctx, ext, `
 SELECT COUNT(*)
 FROM (`+query+`) sub`,
 		args,
+		&total,
+		sqlx.GetContext,
 	)
-	if err != nil {
-		return 0, err
-	}
-	var total int
-	err = sqlx.GetContext(ctx, ext, &total, bound, boundArgs...)
 	if err != nil {
 		return 0, err
 	}
@@ -228,11 +264,7 @@ func SelectList(
 	args map[string]any,
 	dest any,
 ) error {
-	bound, boundArgs, err := ext.BindNamed(query, args)
-	if err != nil {
-		return err
-	}
-	return sqlx.SelectContext(ctx, ext, dest, bound, boundArgs...)
+	return scanNamed(ctx, ext, query, args, dest, sqlx.SelectContext)
 }
 
 // SelectClause builds the comma-separated column list of a SELECT.
@@ -304,8 +336,8 @@ func GroupClause(col string, allowed []string) string {
 
 // SortClause builds an "\nORDER BY col1 DIR1, col2 DIR2" fragment from
 // fields, keeping only those whose Col is in allowed and normalising each
-// direction to ASC or DESC. When nothing is left it orders by fallback
-// instead, so the result is never empty.
+// direction to ASC or DESC through SortField.Direction. When nothing is
+// left it orders by fallback instead, so the result is never empty.
 //
 // That matters beyond tidiness. PageClause emits OFFSET/FETCH on SQL Server,
 // which is a syntactic extension of ORDER BY and cannot appear without one,
@@ -331,11 +363,8 @@ func SortClause(fields []SortField, allowed []string, fallback string) string {
 			sb.WriteString(", ")
 		}
 		sb.WriteString(f.Col)
-		if strings.EqualFold(f.Dir, "desc") {
-			sb.WriteString(" DESC")
-		} else {
-			sb.WriteString(" ASC")
-		}
+		sb.WriteString(" ")
+		sb.WriteString(f.Direction())
 		written = append(written, f.Col)
 	}
 

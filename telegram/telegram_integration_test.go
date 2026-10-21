@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/mas-ony/go-toolkit/config"
+	"github.com/mas-ony/go-toolkit/internal/testutil"
 )
 
 // hang is a reply that never answers: it holds the request until the
@@ -69,7 +70,7 @@ func TestIntegrationAnUntrustedCertificateIsRefused(t *testing.T) {
 	if n := len(b.seen()); n != 0 {
 		t.Errorf("the API saw %d requests, want none", n)
 	}
-	if strings.Contains(err.Error(), testToken) {
+	if strings.Contains(err.Error(), testutil.BotToken) {
 		t.Errorf("err = %v, want it without the token", err)
 	}
 }
@@ -92,7 +93,7 @@ func TestIntegrationTheTimeoutEndsASend(t *testing.T) {
 	if took < 900*time.Millisecond || took > 5*time.Second {
 		t.Errorf("the send took %s, want about the 1s timeout", took)
 	}
-	if strings.Contains(err.Error(), testToken) {
+	if strings.Contains(err.Error(), testutil.BotToken) {
 		t.Errorf("err = %v, want it without the token", err)
 	}
 }

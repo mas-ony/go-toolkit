@@ -9,6 +9,14 @@ import (
 	"github.com/rs/zerolog"
 )
 
+// development reports whether env selects the development shape: exactly
+// config.EnvDevelopment, neither trimmed nor case-folded, for the reasons
+// New gives. newTo picks the format by it and Level the threshold, so the
+// two halves of that shape cannot be chosen by different rules.
+func development(env string) bool {
+	return env == config.EnvDevelopment
+}
+
 // newTo is New with the destination supplied by the caller.
 //
 // It exists so the tests can assert level, format, caller and field
@@ -20,25 +28,41 @@ import (
 // Unexported on purpose: the destination is a deployment decision, not a
 // caller's, and exporting it would invite a component to log somewhere the
 // container runtime does not collect.
+//
+// Both environments build one chain, level and timestamp alike, and
+// development changes two links of it: the writer, which becomes a
+// ConsoleWriter around w, and the caller field, which only it carries.
 func newTo(w io.Writer, env string) zerolog.Logger {
-	if env == config.EnvDevelopment {
-		console := zerolog.ConsoleWriter{
+	dev := development(env)
+	if dev {
+		w = zerolog.ConsoleWriter{
 			Out:        w,
 			TimeFormat: time.DateTime,
 		}
-		return zerolog.New(console).
-			Level(zerolog.DebugLevel).
-			With().
-			Timestamp().
-			Caller().
-			Logger()
 	}
-
-	return zerolog.New(w).
-		Level(zerolog.InfoLevel).
+	ctx := zerolog.New(w).
+		Level(Level(env)).
 		With().
-		Timestamp().
-		Logger()
+		Timestamp()
+	if dev {
+		ctx = ctx.Caller()
+	}
+	return ctx.Logger()
+}
+
+// Level returns the threshold New applies for env: zerolog.DebugLevel for
+// exactly config.EnvDevelopment and zerolog.InfoLevel for any other value,
+// matched as New documents.
+//
+// It is exported for the checks that have to agree with the logger, such
+// as a service refusing a request-log level its logger would drop. Asking
+// here keeps that check on the logger's own rule instead of a copy of it
+// that goes stale the day the rule changes.
+func Level(env string) zerolog.Level {
+	if development(env) {
+		return zerolog.DebugLevel
+	}
+	return zerolog.InfoLevel
 }
 
 // New returns a zerolog.Logger configured for the given environment,

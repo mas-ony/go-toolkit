@@ -10,8 +10,8 @@ package config
 //
 // Rule cases are built through NewDatabaseConfig from a Viper, the way a
 // deployment builds the section, so a passing case has exercised the key
-// name and the cast as well as the rule. Configured is a question about the
-// struct itself, so its test builds literals as well.
+// name and the cast as well as the rule. Configured is held to the rule it
+// shares with the other sections that have it, in sections_test.go.
 
 import (
 	"strings"
@@ -37,18 +37,12 @@ var sqlServerBase = map[string]any{
 	"database.max_open_conns":     10,
 }
 
-// buildDatabase adapts NewDatabaseConfig to the constructor shape runRules
-// takes.
-func buildDatabase(v *viper.Viper) SectionConfig {
-	return NewDatabaseConfig(v)
-}
-
 // TestDatabaseValidate holds the section's rules: the required keys, the
 // naming rules each driver brings, the encrypt vocabulary, the duration
 // floors, and the pool invariants.
 func TestDatabaseValidate(t *testing.T) {
 	t.Parallel()
-	runRules(t, sqlServerBase, buildDatabase, []ruleCase{
+	runRules(t, sqlServerBase, asSection(NewDatabaseConfig), []ruleCase{
 		{"an unknown driver", map[string]any{
 			"database.driver": "oracle"}, "database.driver"},
 		{"no host", map[string]any{"database.host": nil}, "database.host"},
@@ -166,30 +160,6 @@ func TestDatabaseStringNamesTheTarget(t *testing.T) {
 	for _, want := range []string{"sqlserver", "db.internal", "1433"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("String does not show %q:\n%s", want, got)
-		}
-	}
-}
-
-// Configured tells an absent section from a present one, a nil section
-// included, and one setting is enough to count as present.
-func TestDatabaseConfigured(t *testing.T) {
-	t.Parallel()
-	var none *DatabaseConfig
-	for name, c := range map[string]*DatabaseConfig{
-		"nil":         none,
-		"zero":        {},
-		"from no key": NewDatabaseConfig(viper.New()),
-	} {
-		if c.Configured() {
-			t.Errorf("%s: Configured() = true, want false", name)
-		}
-	}
-	for name, c := range map[string]*DatabaseConfig{
-		"a full section": NewDatabaseConfig(withKeys(sqlServerBase, nil)),
-		"one setting":    {Host: "db.internal"},
-	} {
-		if !c.Configured() {
-			t.Errorf("%s: Configured() = false, want true", name)
 		}
 	}
 }

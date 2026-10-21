@@ -32,7 +32,9 @@
 // A caller names "C" and gets what is in C. That is stable across every
 // cosmetic change an operator makes — renaming a sheet, reordering rows,
 // restyling a header — and it is fast, because the sheet is already a
-// grid.
+// grid. ColumnIndex is the one reading of a letter every lookup here
+// uses, exported for code that has to agree with it, as importer's check
+// of a column table does.
 //
 // What it does not survive is a column MOVING. The new occupant is usually
 // the same type and a plausible length, so it parses, imports cleanly, and

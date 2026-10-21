@@ -13,7 +13,7 @@ import (
 	"time"
 
 	"github.com/gofiber/fiber/v3/middleware/session"
-	"github.com/spf13/viper"
+	"github.com/mas-ony/go-toolkit/internal/testutil"
 )
 
 // sessionBase is a configuration the session section accepts, which each
@@ -24,29 +24,11 @@ var sessionBase = map[string]any{
 	"fiber.session.cookie_same_site": "Lax",
 }
 
-// buildSession adapts NewSessionConfig to the constructor shape runRules
-// takes.
-func buildSession(v *viper.Viper) SectionConfig { return NewSessionConfig(v) }
-
-// containsFold, the comparison validSameSite goes through, matches under
-// case folding and finds nothing that is not in the list, least of all in
-// an empty one. A misspelling is absent however it is capitalised.
-func TestContainsFold(t *testing.T) {
-	t.Parallel()
-	list := []string{"Strict", "Lax"}
-	if !containsFold(list, "strict") || !containsFold(list, "LAX") {
-		t.Error("containsFold should ignore case")
-	}
-	if containsFold(list, "Strcit") || containsFold(nil, "Lax") {
-		t.Error("containsFold found something absent")
-	}
-}
-
 // TestSessionValidate holds the section's rules, each beside the value
 // that satisfies it.
 func TestSessionValidate(t *testing.T) {
 	t.Parallel()
-	runRules(t, sessionBase, buildSession, []ruleCase{
+	runRules(t, sessionBase, asSection(NewSessionConfig), []ruleCase{
 		{"no absolute timeout", map[string]any{
 			"fiber.session.absolute_timeout": nil},
 			"fiber.session.absolute_timeout is required"},
@@ -138,15 +120,11 @@ func TestSessionValidatePassesNothingThatPanics(t *testing.T) {
 			if c.Validate() != nil {
 				continue
 			}
-			func() {
-				defer func() {
-					if p := recover(); p != nil {
-						t.Errorf("absolute=%s idle=%s validated, then "+
-							"session.New panicked: %v", abs, idle, p)
-					}
-				}()
-				_ = session.New(*c.Config)
-			}()
+			p := testutil.CapturePanic(func() { _ = session.New(*c.Config) })
+			if p != nil {
+				t.Errorf("absolute=%s idle=%s validated, then "+
+					"session.New panicked: %v", abs, idle, p)
+			}
 		}
 	}
 }
@@ -156,16 +134,13 @@ func TestSessionValidatePassesNothingThatPanics(t *testing.T) {
 // builds one, and a placeholder rather than a panic when the embedded
 // Config was never built.
 //
-// The default is spelled twice, once in sessionCookieName and once in the
-// middleware's ConfigDefault, so the two are compared first: a Fiber
-// release that renamed its cookie fails here, not in a log line.
+// The default is read from the middleware's own ConfigDefault rather than
+// spelled out in this package, so the line follows it. The name it is
+// held to below is the one a deployment's clients and proxies see, so a
+// Fiber release that renamed its cookie fails here rather than in
+// production.
 func TestSessionStringNamesTheCookie(t *testing.T) {
 	t.Parallel()
-	if def := session.ConfigDefault.Extractor.Key; def != sessionCookieName {
-		t.Errorf("sessionCookieName = %q, but the middleware's default "+
-			"cookie is %q", sessionCookieName, def)
-	}
-
 	got := NewSessionConfig(withKeys(sessionBase, nil)).String()
 	want := "CookieName=session_id (middleware default)"
 	if !strings.Contains(got, want) {

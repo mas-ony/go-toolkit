@@ -19,22 +19,33 @@ import (
 	"time"
 
 	"github.com/jmoiron/sqlx"
+	"github.com/mas-ony/go-toolkit/internal/testutil"
 )
 
-// fakeDriver is the driver.Driver behind fakeConnector.
+// fakeDriver is the driver.Driver behind both fakes in this package's
+// tests: fakeConnector's here, and queryConnector's in
+// read_helpers_test.go. Its Open refuses, because each fake is reached
+// only through its connector.
 type fakeDriver struct{}
+
+// connBase supplies the two methods a driver.Conn must have that neither
+// fake uses. Prepare refuses, because every statement reaches a fake
+// through QueryContext or BeginTx instead, and Close releases nothing,
+// because a fake holds nothing to release. Both conns embed it.
+type connBase struct{}
+
+// connectorBase supplies the Driver method of both connectors, which
+// belong to fakeDriver alike. Both connectors embed it.
+type connectorBase struct{}
 
 // fakeDB is the shared state behind the connector, connections and
 // transactions below. Every field is guarded by mu because database/sql calls
 // Rollback from its own awaitDone goroutine, concurrently with the test.
 type fakeDB struct {
-	mu        sync.Mutex
-	connects  int
-	begins    int
-	commits   int
-	rollbacks int
-	opts      []driver.TxOptions
-	ctx       context.Context
+	mu   sync.Mutex
+	opts []driver.TxOptions
+	ctx  context.Context
+	counts
 
 	// Injected failures, set before open and not mutated afterwards.
 	beginErr       error
@@ -49,20 +60,27 @@ type fakeDB struct {
 
 // fakeConnector hands out connections to one fakeDB, so that sql.OpenDB can
 // use the fake without registering a driver name.
-type fakeConnector struct{ db *fakeDB }
+type fakeConnector struct {
+	connectorBase
+	db *fakeDB
+}
 
 // fakeConn implements driver.ConnBeginTx as well as driver.Conn. That is the
 // point: database/sql only forwards the context and the isolation options to a
 // driver that implements the Tx variant, so a conn with a bare Begin would
 // make half the assertions in this file untestable — and, on a real driver,
 // would silently drop the very options WithTxContext exists to pass.
-type fakeConn struct{ db *fakeDB }
+type fakeConn struct {
+	connBase
+	db *fakeDB
+}
 
 // fakeTx counts COMMIT and ROLLBACK and returns the injected failure for
 // each.
 type fakeTx struct{ db *fakeDB }
 
-// counts is the observable behaviour of one transaction, as the driver saw it.
+// counts is the observable behaviour of one transaction, as the driver saw
+// it: the counters fakeDB keeps and a snapshot copies out.
 type counts struct {
 	connects  int
 	begins    int
@@ -89,16 +107,23 @@ func newFakeDB() *fakeDB {
 	return &fakeDB{rolledBack: make(chan struct{}, 8)}
 }
 
-// open returns a *sqlx.DB backed by this fake.
+// openFake returns a *sqlx.DB over c, bound as driverName, and closes it
+// when the test ends. Both fakes in this package's tests open this way.
 //
 // sql.OpenDB with a custom connector avoids sql.Register, which is a
 // process-global map: registering per test would either collide or force a
 // unique name scheme, and both are worse than passing the connector directly.
-func (f *fakeDB) open(t *testing.T) *sqlx.DB {
+func openFake(t *testing.T, c driver.Connector, driverName string) *sqlx.DB {
 	t.Helper()
-	db := sqlx.NewDb(sql.OpenDB(&fakeConnector{db: f}), "fake")
+	db := sqlx.NewDb(sql.OpenDB(c), driverName)
 	t.Cleanup(func() { _ = db.Close() })
 	return db
+}
+
+// open returns a *sqlx.DB backed by this fake.
+func (f *fakeDB) open(t *testing.T) *sqlx.DB {
+	t.Helper()
+	return openFake(t, &fakeConnector{db: f}, "fake")
 }
 
 // snapshot copies the fake's state under its lock, so a test can read it
@@ -107,14 +132,9 @@ func (f *fakeDB) snapshot() snapshotResult {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return snapshotResult{
-		counts: counts{
-			connects:  f.connects,
-			begins:    f.begins,
-			commits:   f.commits,
-			rollbacks: f.rollbacks,
-		},
-		opts: append([]driver.TxOptions(nil), f.opts...),
-		ctx:  f.ctx,
+		counts: f.counts,
+		opts:   append([]driver.TxOptions(nil), f.opts...),
+		ctx:    f.ctx,
 	}
 }
 
@@ -168,15 +188,8 @@ func (f *fakeDB) waitForRollback(timeout time.Duration) bool {
 	}
 }
 
-// capturePanic runs fn and returns whatever it panicked with, or nil.
-func capturePanic(fn func()) (recovered any) {
-	defer func() { recovered = recover() }()
-	fn()
-	return nil
-}
-
-// Driver returns the driver the connector belongs to.
-func (c *fakeConnector) Driver() driver.Driver { return fakeDriver{} }
+// Driver returns the driver both connectors belong to.
+func (connectorBase) Driver() driver.Driver { return fakeDriver{} }
 
 // Connect counts the connection, which is what the nesting tests read, and
 // opens it onto the shared fakeDB.
@@ -187,8 +200,8 @@ func (c *fakeConnector) Connect(context.Context) (driver.Conn, error) {
 	return &fakeConn{db: c.db}, nil
 }
 
-// Prepare refuses: no test here runs a statement.
-func (c *fakeConn) Prepare(string) (driver.Stmt, error) {
+// Prepare refuses: no fake here is handed a statement to prepare.
+func (connBase) Prepare(string) (driver.Stmt, error) {
 	return nil, errors.New("fake: statements are not supported")
 }
 
@@ -260,7 +273,7 @@ func (t *fakeTx) Rollback() error {
 }
 
 // Close releases nothing; the fake holds no resources.
-func (c *fakeConn) Close() error { return nil }
+func (connBase) Close() error { return nil }
 
 // These tests run against a fake driver defined at the top of this file
 // rather than against a real SQL Server, for two reasons.
@@ -430,7 +443,7 @@ func TestWithTxRollsBackAndRepanics(t *testing.T) {
 			f := newFakeDB()
 			db := f.open(t)
 
-			got := capturePanic(func() {
+			got := testutil.CapturePanic(func() {
 				_ = WithTx(db, func(*sqlx.Tx) error { panic(tc.value) })
 			})
 			if got != tc.value {
@@ -455,7 +468,7 @@ func TestWithTxHandlesRuntimePanics(t *testing.T) {
 	f := newFakeDB()
 	db := f.open(t)
 
-	got := capturePanic(func() {
+	got := testutil.CapturePanic(func() {
 		_ = WithTx(db, func(*sqlx.Tx) error {
 			var m map[string]int
 			m["boom"] = 1 // assignment to entry in nil map
@@ -521,7 +534,7 @@ func TestRollbackErrorsAreDiscardedNotReturned(t *testing.T) {
 		f.rollbackErr = rollbackFailure
 		db := f.open(t)
 
-		got := capturePanic(func() {
+		got := testutil.CapturePanic(func() {
 			_ = WithTx(db, func(*sqlx.Tx) error { panic(panicValue) })
 		})
 		if got != panicValue {
@@ -605,15 +618,13 @@ func TestWithTxUsesBackgroundContextAndNoOptions(t *testing.T) {
 	}
 
 	s := f.snapshot()
-	if len(s.opts) != 1 {
-		t.Fatalf("BEGIN was issued %d times, want 1", len(s.opts))
-	}
+	begin := testutil.Only(t, "BEGINs", s.opts)
 	wantDefault := driver.IsolationLevel(sql.LevelDefault)
-	if got := s.opts[0].Isolation; got != wantDefault {
+	if got := begin.Isolation; got != wantDefault {
 		t.Errorf("isolation: got %v, want LevelDefault — nil opts must not "+
 			"change the session", got)
 	}
-	if s.opts[0].ReadOnly {
+	if begin.ReadOnly {
 		t.Error("ReadOnly: got true, want false")
 	}
 	if s.ctx == nil {
@@ -660,11 +671,8 @@ func TestWithTxContextPassesIsolationLevelThrough(t *testing.T) {
 				t.Fatalf("WithTxContext: %v", err)
 			}
 
-			s := f.snapshot()
-			if len(s.opts) != 1 {
-				t.Fatalf("BEGIN was issued %d times, want 1", len(s.opts))
-			}
-			got, want := s.opts[0].Isolation, driver.IsolationLevel(level)
+			begin := testutil.Only(t, "BEGINs", f.snapshot().opts)
+			got, want := begin.Isolation, driver.IsolationLevel(level)
 			if got != want {
 				t.Errorf("isolation: got %v, want %v", got, want)
 			}

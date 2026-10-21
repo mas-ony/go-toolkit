@@ -13,24 +13,16 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mas-ony/go-toolkit/internal/testutil"
 	"github.com/spf13/viper"
 )
-
-// testBotToken has the shape BotFather issues and is worth nothing.
-const testBotToken = "123456789:AAFakeTokenForTests_0123456789abcdefg"
 
 // telegramBase is a configuration the telegram section accepts: the hosted
 // API, with a token and a timeout. Each rule case changes it one key at a
 // time.
 var telegramBase = map[string]any{
-	"notification.telegram.token":   testBotToken,
+	"notification.telegram.token":   testutil.BotToken,
 	"notification.telegram.timeout": "30s",
-}
-
-// buildTelegram adapts NewTelegramConfig to the constructor shape runRules
-// takes.
-func buildTelegram(v *viper.Viper) SectionConfig {
-	return NewTelegramConfig(v)
 }
 
 // TestTelegramValidate holds the section's rules, each beside the value
@@ -41,7 +33,7 @@ func TestTelegramValidate(t *testing.T) {
 	const token = "notification.telegram.token"
 	const apiURL = "notification.telegram.api_url"
 	const timeout = "notification.telegram.timeout"
-	runRules(t, telegramBase, buildTelegram, []ruleCase{
+	runRules(t, telegramBase, asSection(NewTelegramConfig), []ruleCase{
 		{"no token", map[string]any{token: nil},
 			"notification.telegram.token is required"},
 		{"a token with no secret", map[string]any{token: "123456789"},
@@ -60,7 +52,7 @@ func TestTelegramValidate(t *testing.T) {
 			"is not a bot token"},
 		// A secret read from a file ends in a newline.
 		{"a token padded with whitespace",
-			map[string]any{token: "  " + testBotToken + "\n"}, ""},
+			map[string]any{token: "  " + testutil.BotToken + "\n"}, ""},
 
 		{"the hosted API spelled out",
 			map[string]any{apiURL: "https://api.telegram.org"}, ""},
@@ -121,19 +113,14 @@ func TestTelegramValidate(t *testing.T) {
 // header comment gives it.
 func TestNewTelegramConfigReadsEveryKey(t *testing.T) {
 	t.Parallel()
-	v := viper.New()
-	for key, val := range map[string]any{
-		"notification.telegram.token":   testBotToken,
+	got := NewTelegramConfig(withKeys(map[string]any{
+		"notification.telegram.token":   testutil.BotToken,
 		"notification.telegram.api_url": "https://bot.example.go.id/tg",
 		"notification.telegram.timeout": "45s",
 		"notification.telegram.async":   true,
-	} {
-		v.Set(key, val)
-	}
-
-	got := NewTelegramConfig(v)
+	}, nil))
 	want := &TelegramConfig{
-		Token:   testBotToken,
+		Token:   testutil.BotToken,
 		APIURL:  "https://bot.example.go.id/tg",
 		Timeout: 45 * time.Second,
 		Async:   true,
@@ -148,11 +135,11 @@ func TestNewTelegramConfigReadsEveryKey(t *testing.T) {
 func TestNewTelegramConfigTrimsTokenAndURL(t *testing.T) {
 	t.Parallel()
 	v := viper.New()
-	v.Set("notification.telegram.token", " "+testBotToken+"\n")
+	v.Set("notification.telegram.token", " "+testutil.BotToken+"\n")
 	v.Set("notification.telegram.api_url", " https://bot.example.go.id/ ")
 
 	got := NewTelegramConfig(v)
-	if got.Token != testBotToken {
+	if got.Token != testutil.BotToken {
 		t.Errorf("Token = %q, want it trimmed", got.Token)
 	}
 	if got.APIURL != "https://bot.example.go.id/" {
@@ -178,7 +165,7 @@ func TestTelegramAbsentValuesStayZero(t *testing.T) {
 func TestTelegramDefaultAPIURLIsValid(t *testing.T) {
 	t.Parallel()
 	c := &TelegramConfig{
-		Token:   testBotToken,
+		Token:   testutil.BotToken,
 		APIURL:  DefaultTelegramAPIURL,
 		Timeout: time.Minute,
 	}
@@ -192,7 +179,7 @@ func TestTelegramDefaultAPIURLIsValid(t *testing.T) {
 func TestTelegramValidateNormalisesAStructLiteral(t *testing.T) {
 	t.Parallel()
 	c := &TelegramConfig{
-		Token:   " " + testBotToken + "\n",
+		Token:   " " + testutil.BotToken + "\n",
 		APIURL:  " https://bot.example.go.id/ ",
 		Timeout: 30 * time.Second,
 	}
@@ -213,16 +200,16 @@ func TestTelegramValidateNeverQuotesACredential(t *testing.T) {
 			Token: "not-a-token-" + secret, Timeout: time.Minute},
 		"a token with a space": {
 			Token: "123456789:" + secret + " x", Timeout: time.Minute},
-		"userinfo in the URL": {Token: testBotToken, Timeout: time.Minute,
+		"userinfo in the URL": {Token: testutil.BotToken, Timeout: time.Minute,
 			APIURL: "https://bot:" + secret + "@bot.example.go.id"},
 		"userinfo in a URL that does not parse": {
-			Token: testBotToken, Timeout: time.Minute,
+			Token: testutil.BotToken, Timeout: time.Minute,
 			APIURL: "https://bot:" + secret + "@bot.example.go.id/%zz"},
 		"a slash inside the password": {
-			Token: testBotToken, Timeout: time.Minute,
+			Token: testutil.BotToken, Timeout: time.Minute,
 			APIURL: "https://bot:" + secret + "/x@bot.example.go.id"},
 		"a space inside the password": {
-			Token: testBotToken, Timeout: time.Minute,
+			Token: testutil.BotToken, Timeout: time.Minute,
 			APIURL: "https://bot:" + secret + " x@bot.example.go.id"},
 	} {
 		err := c.Validate()
@@ -240,7 +227,7 @@ func TestTelegramValidateNeverQuotesACredential(t *testing.T) {
 // shows the address a blank one stands for, with any userinfo masked.
 func TestTelegramString(t *testing.T) {
 	t.Parallel()
-	with := (&TelegramConfig{Token: testBotToken, Async: true}).String()
+	with := (&TelegramConfig{Token: testutil.BotToken, Async: true}).String()
 	for _, want := range []string{
 		"Token=(set)",
 		"APIURL=https://api.telegram.org (default)",
@@ -250,7 +237,7 @@ func TestTelegramString(t *testing.T) {
 			t.Errorf("String = %q, want it to show %s", with, want)
 		}
 	}
-	for _, secret := range []string{testBotToken, "123456789", "AAFake"} {
+	for _, secret := range []string{testutil.BotToken, "123456789", "AAFake"} {
 		if strings.Contains(with, secret) {
 			t.Errorf("String prints %q: %s", secret, with)
 		}

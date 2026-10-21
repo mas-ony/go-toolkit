@@ -2,10 +2,10 @@ package xlsx
 
 // Tests for workbook.go, against a real workbook written with excelize: the
 // layout resolution, caption folding and matching through merges and the
-// group row, the header check, row selection, cell bounds, and both
-// hyperlink storage forms. What depends on the epoch property, a number
-// format, cached formula results, the working directory or contention is
-// in workbook_integration_test.go.
+// group row, the header check, row selection, cell bounds and the reading
+// of a column letter, and both hyperlink storage forms. What depends on the
+// epoch property, a number format, cached formula results, the working
+// directory or contention is in workbook_integration_test.go.
 
 import (
 	"bytes"
@@ -19,11 +19,32 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/mas-ony/go-toolkit/internal/testutil/xlsxtest"
 	"github.com/xuri/excelize/v2"
 )
 
-// fixtureSheet is the sheet excelize puts in a new file.
-const fixtureSheet = "Sheet1"
+// openWorkbook opens path with layout and closes it when the test ends.
+func openWorkbook(t *testing.T, path string, layout Layout) *File {
+	t.Helper()
+	w, err := Open(path, layout)
+	if err != nil {
+		t.Fatalf("Open %s: %v", path, err)
+	}
+	t.Cleanup(func() { _ = w.Close() })
+	return w
+}
+
+// openBytes opens book, a workbook in memory, with layout and closes it
+// when the test ends.
+func openBytes(t *testing.T, book []byte, layout Layout) *File {
+	t.Helper()
+	w, err := OpenBytes(book, layout)
+	if err != nil {
+		t.Fatalf("OpenBytes: %v", err)
+	}
+	t.Cleanup(func() { _ = w.Close() })
+	return w
+}
 
 // fixtureLayout is the geometry every test but the header ones uses.
 func fixtureLayout() Layout {
@@ -63,20 +84,21 @@ func fixtureColumns() []Column {
 // both merged and on the group row (G).
 func writeFixture(t *testing.T) string {
 	t.Helper()
+	return xlsxtest.WriteWorkbook(t, "fixture.xlsx", fillFixture)
+}
 
-	f := excelize.NewFile()
-	t.Cleanup(func() { _ = f.Close() })
+// fillFixture writes the layout writeFixture draws into f.
+func fillFixture(t *testing.T, f *excelize.File) {
+	t.Helper()
 
 	set := func(cell, value string) {
 		t.Helper()
-		if err := f.SetCellValue(fixtureSheet, cell, value); err != nil {
-			t.Fatalf("SetCellValue %s: %v", cell, err)
-		}
+		xlsxtest.SetCell(t, f, cell, value)
 	}
 	merge := func(from, to, value string) {
 		t.Helper()
 		set(from, value)
-		if err := f.MergeCell(fixtureSheet, from, to); err != nil {
+		if err := f.MergeCell(xlsxtest.Sheet, from, to); err != nil {
 			t.Fatalf("MergeCell %s:%s: %v", from, to, err)
 		}
 	}
@@ -99,7 +121,7 @@ func writeFixture(t *testing.T) string {
 	set("D9", "7")
 	set("E9", "1")
 	err := f.SetCellHyperLink(
-		fixtureSheet, "E9", "documents/1.pdf", "External")
+		xlsxtest.Sheet, "E9", "documents/1.pdf", "External")
 	if err != nil {
 		t.Fatalf("SetCellHyperLink: %v", err)
 	}
@@ -108,7 +130,7 @@ func writeFixture(t *testing.T) string {
 	set("C10", "25")
 	set("D10", "8")
 	err = f.SetCellFormula(
-		fixtureSheet, "E10", `HYPERLINK("documents/2.pdf","1")`)
+		xlsxtest.Sheet, "E10", `HYPERLINK("documents/2.pdf","1")`)
 	if err != nil {
 		t.Fatalf("SetCellFormula: %v", err)
 	}
@@ -119,25 +141,13 @@ func writeFixture(t *testing.T) string {
 	set("C12", "26")
 	set("D12", "9")
 	set("E12", "2")
-
-	path := filepath.Join(t.TempDir(), "fixture.xlsx")
-	if err := f.SaveAs(path); err != nil {
-		t.Fatalf("SaveAs: %v", err)
-	}
-	return path
 }
 
 // openFixture writes the fixture and opens it under layout, closing it when
 // the test ends.
 func openFixture(t *testing.T, layout Layout) *File {
 	t.Helper()
-
-	wb, err := Open(writeFixture(t), layout)
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
-	t.Cleanup(func() { _ = wb.Close() })
-	return wb
+	return openWorkbook(t, writeFixture(t), layout)
 }
 
 // An empty Layout.Sheet reads the first sheet, and the File reports that
@@ -145,8 +155,8 @@ func openFixture(t *testing.T, layout Layout) *File {
 func TestOpenDefaultsToTheFirstSheet(t *testing.T) {
 	wb := openFixture(t, fixtureLayout())
 
-	if got := wb.SheetName(); got != fixtureSheet {
-		t.Errorf("SheetName = %q, want %q", got, fixtureSheet)
+	if got := wb.SheetName(); got != xlsxtest.Sheet {
+		t.Errorf("SheetName = %q, want %q", got, xlsxtest.Sheet)
 	}
 	if got := wb.RowCount(); got < 12 {
 		t.Errorf("RowCount = %d, want at least 12", got)
@@ -205,9 +215,9 @@ func TestVerifyHeadersReportsEveryMismatch(t *testing.T) {
 	if got, want := len(le.Problems), len(fixtureColumns()); got != want {
 		t.Errorf("reported %d mismatches, want all %d", got, want)
 	}
-	if le.Sheet != fixtureSheet || le.HeaderRow != 7 {
+	if le.Sheet != xlsxtest.Sheet || le.HeaderRow != 7 {
 		t.Errorf("error names sheet %q row %d, want %q row 7",
-			le.Sheet, le.HeaderRow, fixtureSheet)
+			le.Sheet, le.HeaderRow, xlsxtest.Sheet)
 	}
 }
 
@@ -262,28 +272,18 @@ func TestGroupRowCanBeNamed(t *testing.T) {
 // holds nothing for that column, nor does the group row above it, and
 // the caption is read through the block all the same.
 func TestCaptionResolvesThroughAMergeDownTheHeader(t *testing.T) {
-	f := excelize.NewFile()
-	t.Cleanup(func() { _ = f.Close() })
-	for cell, value := range map[string]string{
-		"A1": "Kode", "B3": "Lemari", "A4": "K-1",
-	} {
-		if err := f.SetCellValue(fixtureSheet, cell, value); err != nil {
+	book := xlsxtest.WorkbookBytes(t, func(t *testing.T, f *excelize.File) {
+		for cell, value := range map[string]string{
+			"A1": "Kode", "B3": "Lemari", "A4": "K-1",
+		} {
+			xlsxtest.SetCell(t, f, cell, value)
+		}
+		if err := f.MergeCell(xlsxtest.Sheet, "A1", "A3"); err != nil {
 			t.Fatal(err)
 		}
-	}
-	if err := f.MergeCell(fixtureSheet, "A1", "A3"); err != nil {
-		t.Fatal(err)
-	}
-	buf, err := f.WriteToBuffer()
-	if err != nil {
-		t.Fatal(err)
-	}
+	})
 
-	wb, err := OpenBytes(buf.Bytes(), Layout{HeaderRow: 3, FirstRow: 4})
-	if err != nil {
-		t.Fatalf("OpenBytes: %v", err)
-	}
-	t.Cleanup(func() { _ = wb.Close() })
+	wb := openBytes(t, book, Layout{HeaderRow: 3, FirstRow: 4})
 	if got := wb.Caption("A"); got != "Kode" {
 		t.Errorf("Caption(\"A\") = %q, want Kode from the top of its "+
 			"block", got)
@@ -337,28 +337,16 @@ func TestDataRowsSkipsRowsWithNothingMapped(t *testing.T) {
 // non-breaking space is one more of them. A row holding nothing else in
 // the columns the caller reads is blank, though the grid holds it.
 func TestARowOfSpacesIsBlank(t *testing.T) {
-	f, err := excelize.OpenFile(writeFixture(t))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = f.Close() })
-	for cell, value := range map[string]string{
-		"B14": "   ", "C14": "\u00a0",
-	} {
-		if err := f.SetCellValue(fixtureSheet, cell, value); err != nil {
-			t.Fatal(err)
+	book := xlsxtest.WorkbookBytes(t, func(t *testing.T, f *excelize.File) {
+		fillFixture(t, f)
+		for cell, value := range map[string]string{
+			"B14": "   ", "C14": "\u00a0",
+		} {
+			xlsxtest.SetCell(t, f, cell, value)
 		}
-	}
-	buf, err := f.WriteToBuffer()
-	if err != nil {
-		t.Fatal(err)
-	}
+	})
 
-	wb, err := OpenBytes(buf.Bytes(), fixtureLayout())
-	if err != nil {
-		t.Fatalf("OpenBytes: %v", err)
-	}
-	t.Cleanup(func() { _ = wb.Close() })
+	wb := openBytes(t, book, fixtureLayout())
 	if wb.RowCount() != 14 || wb.Cell(14, "B") != "   " {
 		t.Fatalf("the grid ends at row %d with %q in B14; the premise "+
 			"of this test is row 14 and three spaces",
@@ -378,35 +366,24 @@ func TestARowOfSpacesIsBlank(t *testing.T) {
 // declares, and the reading reaches it, so the sheet is not cut short.
 // The grid still ends with the last row that holds anything.
 func TestARowHoldingNothingIsNoTruncation(t *testing.T) {
-	f, err := excelize.OpenFile(writeFixture(t))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = f.Close() })
-	if err := f.SetRowHeight(fixtureSheet, 20, 30); err != nil {
-		t.Fatal(err)
-	}
-	buf, err := f.WriteToBuffer()
-	if err != nil {
-		t.Fatal(err)
-	}
-	book := buf.Bytes()
+	book := xlsxtest.WorkbookBytes(t, func(t *testing.T, f *excelize.File) {
+		fillFixture(t, f)
+		if err := f.SetRowHeight(xlsxtest.Sheet, 20, 30); err != nil {
+			t.Fatal(err)
+		}
+	})
 
 	// The premise: row 20 is the last row of the XML.
 	arc, err := inspect(bytes.NewReader(book), int64(len(book)))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if last, _, err := arc.scan(fixtureSheet); err != nil || last != 20 {
+	if last, _, err := arc.scan(xlsxtest.Sheet); err != nil || last != 20 {
 		t.Fatalf("the sheet's XML ends with row %d (%v), want 20",
 			last, err)
 	}
 
-	wb, err := OpenBytes(book, fixtureLayout())
-	if err != nil {
-		t.Fatalf("OpenBytes: %v", err)
-	}
-	t.Cleanup(func() { _ = wb.Close() })
+	wb := openBytes(t, book, fixtureLayout())
 	if got := wb.RowCount(); got != 12 {
 		t.Errorf("RowCount = %d, want the 12 rows that hold something",
 			got)
@@ -458,6 +435,34 @@ func TestCellOutsideTheSheetIsEmpty(t *testing.T) {
 	}
 	if got := wb.Cell(9, "B"); got != "B-2" {
 		t.Errorf("Cell(9, \"B\") = %q, want B-2", got)
+	}
+}
+
+// ColumnIndex reads a letter in either case up to XFD, and refuses what
+// names no column: no letters, other characters, a column past XFD, and
+// a run long enough to overflow excelize's sum, which it reports as a
+// negative number with no error.
+func TestColumnIndex(t *testing.T) {
+	t.Parallel()
+	for _, c := range []struct {
+		col  string
+		want int
+	}{
+		{"A", 1},
+		{"c", 3},
+		{"AZ", 52},
+		{"XFD", 16384},
+	} {
+		if got, ok := ColumnIndex(c.col); !ok || got != c.want {
+			t.Errorf("ColumnIndex(%q) = %d, %t, want %d", c.col, got, ok,
+				c.want)
+		}
+	}
+	for _, col := range []string{"", "A1", " A", "XFE", "AAAA",
+		strings.Repeat("A", 15)} {
+		if got, ok := ColumnIndex(col); ok {
+			t.Errorf("ColumnIndex(%q) = %d, accepted", col, got)
+		}
 	}
 }
 
@@ -580,11 +585,7 @@ func TestMatchesAcceptsEverySpelling(t *testing.T) {
 // memory having none.
 func TestOpenBytesReadsWhatOpenReads(t *testing.T) {
 	fromFile := openFixture(t, fixtureLayout())
-	fromMemory, err := OpenBytes(fixtureBytes(t), fixtureLayout())
-	if err != nil {
-		t.Fatalf("OpenBytes: %v", err)
-	}
-	t.Cleanup(func() { _ = fromMemory.Close() })
+	fromMemory := openBytes(t, fixtureBytes(t), fixtureLayout())
 
 	if fromMemory.SheetName() != fromFile.SheetName() ||
 		fromMemory.RowCount() != fromFile.RowCount() {
@@ -624,11 +625,7 @@ func TestOpenBytesReadsWhatOpenReads(t *testing.T) {
 // A workbook in memory has no directory to resolve a relative link
 // against, so the link stays as the workbook stores it.
 func TestLinkFromMemoryStaysRelative(t *testing.T) {
-	wb, err := OpenBytes(fixtureBytes(t), fixtureLayout())
-	if err != nil {
-		t.Fatalf("OpenBytes: %v", err)
-	}
-	t.Cleanup(func() { _ = wb.Close() })
+	wb := openBytes(t, fixtureBytes(t), fixtureLayout())
 
 	lt, err := wb.Link(9, "E")
 	if err != nil {
@@ -729,20 +726,11 @@ func TestHasMacros(t *testing.T) {
 		keep := func(_, content string) string { return content }
 		return rebuild(t, plain, keep, name)
 	}
-	renamed := rebuild(t, plain, func(name, content string) string {
-		if name != "xl/_rels/workbook.xml.rels" {
-			return content
-		}
-		const end = "</Relationships>"
-		if strings.Count(content, end) != 1 {
-			t.Fatalf("the relationships do not end in %s:\n%s",
-				end, content)
-		}
-		return strings.Replace(content, end, `<Relationship `+
-			`Id="rId99" Target="macros/project.bin" Type="http://`+
-			`schemas.microsoft.com/office/2006/relationships/`+
-			`vbaProject"/>`+end, 1)
-	}, "xl/macros/project.bin")
+	const end = "</Relationships>"
+	renamed := replaced(t, plain, relsXML, end, `<Relationship `+
+		`Id="rId99" Target="macros/project.bin" Type="http://`+
+		`schemas.microsoft.com/office/2006/relationships/`+
+		`vbaProject"/>`+end, "xl/macros/project.bin")
 	for name, c := range map[string]struct {
 		book []byte
 		want bool
@@ -813,27 +801,15 @@ func TestColumnsFromA(t *testing.T) {
 // held here: excelize hands each shared string over as text of its own,
 // so without it the two cells below are equal and apart.
 func TestRepeatedTextIsShared(t *testing.T) {
-	f := excelize.NewFile()
-	t.Cleanup(func() { _ = f.Close() })
-	for _, cell := range []string{"A1", "A2", "A3"} {
-		if err := f.SetCellValue(fixtureSheet, cell,
-			strings.Repeat("Dinas Pendidikan ", 4)); err != nil {
-			t.Fatal(err)
+	book := xlsxtest.WorkbookBytes(t, func(t *testing.T, f *excelize.File) {
+		for _, cell := range []string{"A1", "A2", "A3"} {
+			xlsxtest.SetCell(t, f, cell,
+				strings.Repeat("Dinas Pendidikan ", 4))
 		}
-	}
-	if err := f.SetCellValue(fixtureSheet, "A4", "lain"); err != nil {
-		t.Fatal(err)
-	}
-	buf, err := f.WriteToBuffer()
-	if err != nil {
-		t.Fatal(err)
-	}
+		xlsxtest.SetCell(t, f, "A4", "lain")
+	})
 
-	wb, err := OpenBytes(buf.Bytes(), Layout{HeaderRow: 1, FirstRow: 2})
-	if err != nil {
-		t.Fatalf("OpenBytes: %v", err)
-	}
-	t.Cleanup(func() { _ = wb.Close() })
+	wb := openBytes(t, book, Layout{HeaderRow: 1, FirstRow: 2})
 	first, second, third := wb.Cell(1, "A"), wb.Cell(2, "A"),
 		wb.Cell(3, "A")
 	if first != second || second != third {

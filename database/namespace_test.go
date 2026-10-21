@@ -11,12 +11,13 @@ package database
 import (
 	"strings"
 	"testing"
+
+	"github.com/mas-ony/go-toolkit/internal/testutil"
 )
 
 // Configure stores exactly the prefix it is given, the empty one included.
 func TestConfigure(t *testing.T) {
-	prev := DefaultNamespace
-	t.Cleanup(func() { DefaultNamespace = prev })
+	testutil.Set(t, &DefaultNamespace, DefaultNamespace)
 
 	for _, ns := range []string{"app2026.dbo", "app2026", ""} {
 		Configure(ns)

@@ -47,9 +47,12 @@ import (
 	"errors"
 	"fmt"
 	"net/mail"
+	"slices"
 	"strings"
 	"time"
 
+	"github.com/mas-ony/go-toolkit/internal/strlist"
+	"github.com/mas-ony/go-toolkit/internal/upstream"
 	"github.com/spf13/viper"
 )
 
@@ -172,27 +175,15 @@ const (
 	EmailTLSNone = "none"
 )
 
-// validEmailTLS is the allowlist checked by EmailConfig.Validate. The
-// empty-struct value is the idiomatic set, the same shape validEnvs in
-// app_config.go uses.
-var validEmailTLS = map[string]struct{}{
-	EmailTLSStartTLS: {},
-	EmailTLSImplicit: {},
-	EmailTLSNone:     {},
-}
+// validEmailTLS is the allowlist checked by EmailConfig.Validate, in the
+// order its error names them.
+var validEmailTLS = []string{EmailTLSStartTLS, EmailTLSImplicit, EmailTLSNone}
 
-// loopbackHosts are the host spellings a credential may cross to in clear
-// text. They are the three net/smtp's PlainAuth accepts, and the email
-// package applies the same three when it logs in, so a configuration
-// Validate passes is one the send path will not refuse on this ground.
-//
-// Matched EXACTLY, as net/smtp matches them. "LOCALHOST" and "127.0.0.2"
-// both reach the loopback interface, yet credentials in clear text to
-// either are refused here, because the send path would refuse them too.
-var loopbackHosts = map[string]struct{}{
-	"localhost": {},
-	"127.0.0.1": {},
-	"::1":       {},
+// hasCredentials reports whether either half of the relay login is set.
+// Validate holds that against an unencrypted connection and String reports
+// it, so the two answer the same question by one rule.
+func (c *EmailConfig) hasCredentials() bool {
+	return c.Username != "" || c.Password != ""
 }
 
 // NewEmailConfig reads EmailConfig fields from the provided Viper instance.
@@ -211,10 +202,9 @@ var loopbackHosts = map[string]struct{}{
 // login failure this package caused.
 func NewEmailConfig(v *viper.Viper) *EmailConfig {
 	return &EmailConfig{
-		Host: strings.TrimSpace(v.GetString("notification.email.host")),
-		Port: v.GetInt("notification.email.port"),
-		TLS: strings.ToLower(
-			strings.TrimSpace(v.GetString("notification.email.tls"))),
+		Host:     strings.TrimSpace(v.GetString("notification.email.host")),
+		Port:     v.GetInt("notification.email.port"),
+		TLS:      strlist.Normalise(v.GetString("notification.email.tls")),
 		Insecure: v.GetBool("notification.email.insecure"),
 		Username: v.GetString("notification.email.username"),
 		Password: v.GetString("notification.email.password"),
@@ -223,6 +213,16 @@ func NewEmailConfig(v *viper.Viper) *EmailConfig {
 		Async:    v.GetBool("notification.email.async"),
 	}
 }
+
+// Configured reports whether any notification.email.* setting reached
+// this section. A nil receiver reports false.
+//
+// It is the question email.New asks first, and the rule is the one
+// DatabaseConfig.Configured applies: a section nothing supplied holds no
+// relay to send through, and is refused as not configured rather than
+// with an error for every key it lacks. It asks whether ANY field is set,
+// not whether the section is usable; that is Validate's question.
+func (c *EmailConfig) Configured() bool { return configured(c) }
 
 // Validate returns a joined error for every invalid or missing EmailConfig
 // field.
@@ -241,9 +241,8 @@ func NewEmailConfig(v *viper.Viper) *EmailConfig {
 //   - Async, for the same reason. NotificationConfig says what each
 //     setting costs.
 //
-// Host and TLS are normalised again here, for the same reason kind() in
-// database_config.go re-lowercases the driver: an EmailConfig built as a
-// struct literal never passed through NewEmailConfig.
+// Host and TLS are normalised again here, because an EmailConfig built as
+// a struct literal never passed through NewEmailConfig.
 //
 // Every check appends rather than returning early, so one restart surfaces
 // every notification.email.* problem at once.
@@ -257,32 +256,30 @@ func (c *EmailConfig) Validate() error {
 	}
 
 	host := strings.TrimSpace(c.Host)
-	mode := strings.ToLower(strings.TrimSpace(c.TLS))
+	mode := strlist.Normalise(c.TLS)
 
 	if host == "" {
 		errs = append(errs, errors.New(
 			"notification.email.host is required"))
 	}
-	if c.Port == 0 {
-		errs = append(errs, errors.New(
-			"notification.email.port is required"))
-	} else if c.Port < 0 || c.Port > 65535 {
-		errs = append(errs, fmt.Errorf("notification.email.port must be "+
-			"between 1 and 65535 (got %d)",
-			c.Port))
+	err := upstream.CheckPort("notification.email.port", c.Port)
+	if err != nil {
+		errs = append(errs, err)
 	}
 
-	_, known := validEmailTLS[mode]
+	known := slices.Contains(validEmailTLS, mode)
 	switch {
 	case mode == "":
-		errs = append(errs, errors.New(`notification.email.tls is `+
-			`required: use "starttls" (port 587), "implicit" (port 465) `+
-			`or "none". It has no default, because a relay on any other `+
-			`port implies nothing and a guess would be a mode nobody chose`))
+		errs = append(errs, fmt.Errorf("notification.email.tls is "+
+			"required: use %q (port 587), %q (port 465) or %q. It has no "+
+			"default, because a relay on any other port implies nothing "+
+			"and a guess would be a mode nobody chose",
+			EmailTLSStartTLS,
+			EmailTLSImplicit,
+			EmailTLSNone))
 	case !known:
-		errs = append(errs, fmt.Errorf("notification.email.tls must be one "+
-			"of: starttls, implicit, none (got %q)",
-			c.TLS))
+		errs = append(errs, notOneOf("notification.email.tls", c.TLS,
+			validEmailTLS))
 	}
 
 	// The two ports whose convention is fixed are held to it, and only
@@ -320,7 +317,6 @@ func (c *EmailConfig) Validate() error {
 	// The pair is checked on its own terms first: one half without the
 	// other is a login that cannot succeed, and it would otherwise surface
 	// as an authentication failure on the first send.
-	creds := c.Username != "" || c.Password != ""
 	if (c.Username == "") != (c.Password == "") {
 		errs = append(errs, errors.New("notification.email.username and "+
 			"notification.email.password are set together or not at all"))
@@ -328,9 +324,10 @@ func (c *EmailConfig) Validate() error {
 	// Credentials over a connection that is never encrypted are refused
 	// here rather than left to the send path, which refuses them too —
 	// but only on the first send, possibly hours after startup, and in a
-	// goroutine whose error nobody is waiting for.
-	_, local := loopbackHosts[host]
-	if creds && mode == EmailTLSNone && !local {
+	// goroutine whose error nobody is waiting for. Both ask
+	// upstream.IsLoopback, so they draw the line in the same place.
+	if c.hasCredentials() && mode == EmailTLSNone &&
+		!upstream.IsLoopback(host) {
 		errs = append(errs, fmt.Errorf("notification.email.tls is none, "+
 			"so the credentials would cross to %s in clear text, which the "+
 			"send path refuses: use starttls or implicit, or a relay on "+
@@ -338,17 +335,10 @@ func (c *EmailConfig) Validate() error {
 			host))
 	}
 
-	if c.Timeout == 0 {
-		errs = append(errs, errors.New("notification.email.timeout is "+
-			"required: it is the only bound a send has once it runs "+
-			"detached from a request, and without one a relay that stops "+
-			"answering holds that send open indefinitely"))
-	} else if c.Timeout < time.Second {
-		errs = append(errs, fmt.Errorf("notification.email.timeout must be "+
-			"at least 1s (got %s): no SMTP conversation completes in less, "+
-			"and if this was meant as seconds, write the unit — a bare "+
-			"number is nanoseconds",
-			c.Timeout))
+	err = checkSendTimeout("notification.email.timeout", c.Timeout,
+		"a relay", "SMTP conversation")
+	if err != nil {
+		errs = append(errs, err)
 	}
 
 	return errors.Join(errs...)
@@ -369,10 +359,7 @@ func (c *EmailConfig) String() string {
 		return "<nil EmailConfig>"
 	}
 
-	auth := "(none)"
-	if c.Username != "" || c.Password != "" {
-		auth = "(set)"
-	}
+	auth := setOrNone(c.hasCredentials())
 
 	return fmt.Sprintf("Host=%s "+
 		"Port=%d "+

@@ -22,17 +22,13 @@ var clientBase = map[string]any{
 	"fiber.client.retries":  2,
 }
 
-// buildClient adapts NewClientConfig to the constructor shape runRules
-// takes.
-func buildClient(v *viper.Viper) SectionConfig { return NewClientConfig(v) }
-
 // TestClientValidate holds the section's rules. An absent base URL is a
 // setting — the section is optional — while a stated one has to be usable;
 // retries cannot be negative; and every no-retry entry has to be a method
 // the client could send.
 func TestClientValidate(t *testing.T) {
 	t.Parallel()
-	runRules(t, clientBase, buildClient, []ruleCase{
+	runRules(t, clientBase, asSection(NewClientConfig), []ruleCase{
 		{"no base URL is allowed", map[string]any{
 			"fiber.client.base_url": nil}, ""},
 		{"not a URL", map[string]any{

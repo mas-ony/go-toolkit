@@ -11,10 +11,12 @@ package importer
 
 import (
 	"errors"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/mas-ony/go-toolkit/datetime"
+	"github.com/mas-ony/go-toolkit/xlsx"
 	"github.com/shopspring/decimal"
 )
 
@@ -36,6 +38,17 @@ type row struct {
 	Target string
 }
 
+// The destinations the constructors write into, one per field of row, in
+// the shape each constructor takes.
+var (
+	dstName   = func(r *row) **string { return &r.Name }
+	dstCount  = func(r *row) **int { return &r.Count }
+	dstAmount = func(r *row) **decimal.Decimal { return &r.Amount }
+	dstWhen   = func(r *row) **datetime.Datetime { return &r.When }
+	dstPlain  = func(r *row) *string { return &r.Plain }
+	dstTarget = func(r *row) *string { return &r.Target }
+)
+
 // newGrid returns an empty grid on the 1900 epoch.
 func newGrid() *grid {
 	return &grid{
@@ -44,22 +57,9 @@ func newGrid() *grid {
 	}
 }
 
-// itoa formats a non-negative n in decimal.
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	var b []byte
-	for n > 0 {
-		b = append([]byte{byte('0' + n%10)}, b...)
-		n /= 10
-	}
-	return string(b)
-}
-
 // key is the map key a cell is stored under.
 func key(row int, col string) string {
-	return col + ":" + itoa(row)
+	return col + ":" + strconv.Itoa(row)
 }
 
 // set stores a cell's text and returns the grid, so fixtures chain.
@@ -94,8 +94,7 @@ func (g *grid) Date1904() bool { return g.date1904 }
 // one of them.
 func TestColumnsIncludesFieldsWithNoSetter(t *testing.T) {
 	tbl := Table[row]{
-		Text("A", "name", 50, func(r *row) **string { return &r.Name },
-			"Name"),
+		Text("A", "name", 50, dstName, "Name"),
 		Expect[row]("B", "unused", "Notes"),
 	}
 
@@ -116,10 +115,10 @@ func TestColumnsIncludesFieldsWithNoSetter(t *testing.T) {
 // validates.
 func TestValidateAcceptsAWellFormedTable(t *testing.T) {
 	tbl := Table[row]{
-		Text("A", "name", 50, func(r *row) **string { return &r.Name },
-			"Name"),
-		Int("B", "count", func(r *row) **int { return &r.Count }, "Qty"),
+		Text("A", "name", 50, dstName, "Name"),
+		Int("B", "count", dstCount, "Qty"),
 		Expect[row]("AZ", "spacer", "—"),
+		Expect[row]("XFD", "last column", "End"),
 	}
 	if err := tbl.Validate(); err != nil {
 		t.Errorf("Validate: %v", err)
@@ -139,21 +138,24 @@ func TestValidateReportsEveryProblem(t *testing.T) {
 			// Reads as an empty cell on every row.
 			name: "not a column letter",
 			table: Table[row]{
-				Raw("A1", "bad", func(r *row) *string {
-					return &r.Plain
-				}, "X"),
+				Raw("A1", "bad", dstPlain, "X"),
+			},
+			want: "is not a column letter",
+		},
+		{
+			// Letters, but past XFD, the last column a sheet has, so the
+			// workbook's lookups read it as empty too.
+			name: "past the last column",
+			table: Table[row]{
+				Raw("XFE", "too far", dstPlain, "X"),
 			},
 			want: "is not a column letter",
 		},
 		{
 			name: "letter mapped twice",
 			table: Table[row]{
-				Raw("C", "first", func(r *row) *string {
-					return &r.Plain
-				}, "X"),
-				Raw("C", "second", func(r *row) *string {
-					return &r.Target
-				}, "Y"),
+				Raw("C", "first", dstPlain, "X"),
+				Raw("C", "second", dstTarget, "Y"),
 			},
 			want: "mapped more than once",
 		},
@@ -161,9 +163,7 @@ func TestValidateReportsEveryProblem(t *testing.T) {
 			// The header check can never pass for it.
 			name: "no accepted caption",
 			table: Table[row]{
-				Raw("D", "nameless", func(r *row) *string {
-					return &r.Plain
-				}),
+				Raw("D", "nameless", dstPlain),
 			},
 			want: "accepts no caption",
 		},
@@ -173,10 +173,10 @@ func TestValidateReportsEveryProblem(t *testing.T) {
 			// which is exactly how a dataset opts into the check.
 			name: "two columns writing the same value",
 			table: Table[row]{
-				{Col: "E", Captions: []string{"X"}, Key: "code",
-					Purpose: "first"},
-				{Col: "F", Captions: []string{"Y"}, Key: "code",
-					Purpose: "second"},
+				{Column: xlsx.Column{Col: "E", Captions: []string{"X"},
+					Purpose: "first"}, Key: "code"},
+				{Column: xlsx.Column{Col: "F", Captions: []string{"Y"},
+					Purpose: "second"}, Key: "code"},
 			},
 			want: "both write",
 		},
@@ -200,14 +200,10 @@ func TestValidateReportsEveryProblem(t *testing.T) {
 // several and fixing them one start-up at a time is the slow way.
 func TestValidateReportsAllProblemsTogether(t *testing.T) {
 	tbl := Table[row]{
-		Raw("A1", "bad letter", func(r *row) *string {
-			return &r.Plain
-		}, "X"),
-		Raw("C", "first", func(r *row) *string { return &r.Plain }, "Y"),
-		Raw("C", "duplicate", func(r *row) *string {
-			return &r.Target
-		}, "Z"),
-		Raw("D", "no caption", func(r *row) *string { return &r.Plain }),
+		Raw("A1", "bad letter", dstPlain, "X"),
+		Raw("C", "first", dstPlain, "Y"),
+		Raw("C", "duplicate", dstTarget, "Z"),
+		Raw("D", "no caption", dstPlain),
 	}
 
 	err := tbl.Validate()
@@ -230,7 +226,7 @@ func TestValidateReportsAllProblemsTogether(t *testing.T) {
 // being a trap that passes the check and then reads nothing.
 func TestValidateAcceptsLowercaseColumnLetters(t *testing.T) {
 	tbl := Table[row]{
-		Raw("c", "lower", func(r *row) *string { return &r.Plain }, "X"),
+		Raw("c", "lower", dstPlain, "X"),
 	}
 	if err := tbl.Validate(); err != nil {
 		t.Errorf("Validate: %v", err)
@@ -252,10 +248,8 @@ func TestValidateAcceptsLowercaseColumnLetters(t *testing.T) {
 // worth importing with its other columns intact.
 func TestApplyReportsACoercionFailureAsAWarning(t *testing.T) {
 	tbl := Table[row]{
-		Text("A", "name", 50, func(r *row) **string {
-			return &r.Name
-		}, "Name"),
-		Int("B", "count", func(r *row) **int { return &r.Count }, "Qty"),
+		Text("A", "name", 50, dstName, "Name"),
+		Int("B", "count", dstCount, "Qty"),
 	}
 	g := newGrid().set(3, "A", "Widget").set(3, "B", "see note")
 
@@ -288,10 +282,8 @@ func TestApplyReportsACoercionFailureAsAWarning(t *testing.T) {
 // without.
 func TestApplyMustTurnsAFailureIntoTheRowsError(t *testing.T) {
 	tbl := Table[row]{
-		Must(Int("B", "count", func(r *row) **int {
-			return &r.Count
-		}, "Qty")),
-		Raw("C", "note", func(r *row) *string { return &r.Plain }, "N"),
+		Must(Int("B", "count", dstCount, "Qty")),
+		Raw("C", "note", dstPlain, "N"),
 	}
 	g := newGrid().set(4, "B", "not a number").set(4, "C", "later")
 
@@ -319,7 +311,7 @@ func TestApplyMustTurnsAFailureIntoTheRowsError(t *testing.T) {
 func TestApplySkipsFieldsWithNoSetter(t *testing.T) {
 	tbl := Table[row]{
 		Expect[row]("A", "pinned only", "Name"),
-		Raw("B", "read", func(r *row) *string { return &r.Plain }, "N"),
+		Raw("B", "read", dstPlain, "N"),
 	}
 	g := newGrid().set(5, "A", "ignored").set(5, "B", "kept")
 
@@ -372,15 +364,13 @@ func TestApplyResolvesHyperlinksOnlyWhenAsked(t *testing.T) {
 // the file to ask.
 func TestApplyCarriesTheEpochOntoEveryCell(t *testing.T) {
 	var seen []bool
+	record := func(_ *row, c Cell) error {
+		seen = append(seen, c.Date1904)
+		return nil
+	}
 	tbl := Table[row]{
-		Custom("A", "one", func(_ *row, c Cell) error {
-			seen = append(seen, c.Date1904)
-			return nil
-		}, "A"),
-		Custom("B", "two", func(_ *row, c Cell) error {
-			seen = append(seen, c.Date1904)
-			return nil
-		}, "B"),
+		Custom("A", "one", record, "A"),
+		Custom("B", "two", record, "B"),
 	}
 
 	g := newGrid()
@@ -427,9 +417,7 @@ func TestApplyCarriesTheCellAddress(t *testing.T) {
 // zero value, which is why the destinations are pointers to pointers.
 func TestConstructorCoercions(t *testing.T) {
 	t.Run("Text keeps an empty cell NULL", func(t *testing.T) {
-		tbl := Table[row]{Text("A", "name", 10, func(r *row) **string {
-			return &r.Name
-		}, "N")}
+		tbl := Table[row]{Text("A", "name", 10, dstName, "N")}
 
 		var dst row
 		if _, err := tbl.Apply(newGrid().set(1, "A", ""), 1,
@@ -453,9 +441,7 @@ func TestConstructorCoercions(t *testing.T) {
 	t.Run("Text refuses an over-long value", func(t *testing.T) {
 		// An error rather than a truncation, so the cell gets looked
 		// at instead of being silently shortened by the driver.
-		tbl := Table[row]{Text("A", "name", 5, func(r *row) **string {
-			return &r.Name
-		}, "N")}
+		tbl := Table[row]{Text("A", "name", 5, dstName, "N")}
 
 		var dst row
 		warns, err := tbl.Apply(newGrid().set(1, "A", "far too long"),
@@ -472,9 +458,7 @@ func TestConstructorCoercions(t *testing.T) {
 	})
 
 	t.Run("Int", func(t *testing.T) {
-		tbl := Table[row]{Int("A", "count", func(r *row) **int {
-			return &r.Count
-		}, "N")}
+		tbl := Table[row]{Int("A", "count", dstCount, "N")}
 
 		var dst row
 		if _, err := tbl.Apply(newGrid().set(1, "A", "42"), 1,
@@ -497,8 +481,7 @@ func TestConstructorCoercions(t *testing.T) {
 	})
 
 	t.Run("Decimal", func(t *testing.T) {
-		tbl := Table[row]{Decimal("A", "amount",
-			func(r *row) **decimal.Decimal { return &r.Amount }, "N")}
+		tbl := Table[row]{Decimal("A", "amount", dstAmount, "N")}
 
 		var dst row
 		if _, err := tbl.Apply(newGrid().set(1, "A", "1.234"), 1,
@@ -514,8 +497,7 @@ func TestConstructorCoercions(t *testing.T) {
 	})
 
 	t.Run("Date reads a serial under the carried epoch", func(t *testing.T) {
-		tbl := Table[row]{Date("A", "when",
-			func(r *row) **datetime.Datetime { return &r.When }, "N")}
+		tbl := Table[row]{Date("A", "when", dstWhen, "N")}
 
 		g := newGrid().set(1, "A", "35000")
 		var dst row
@@ -545,9 +527,7 @@ func TestConstructorCoercions(t *testing.T) {
 	})
 
 	t.Run("Raw trims and writes a plain string", func(t *testing.T) {
-		tbl := Table[row]{Raw("A", "plain", func(r *row) *string {
-			return &r.Plain
-		}, "N")}
+		tbl := Table[row]{Raw("A", "plain", dstPlain, "N")}
 
 		var dst row
 		if _, err := tbl.Apply(newGrid().set(1, "A", "  spaced  "), 1,
@@ -565,9 +545,7 @@ func TestConstructorCoercions(t *testing.T) {
 		// The two are routinely unrelated: a column captioned "Link"
 		// may display a status while the document reference lives in
 		// the hyperlink underneath it.
-		tbl := Table[row]{Link("A", "scan", func(r *row) *string {
-			return &r.Target
-		}, "Link")}
+		tbl := Table[row]{Link("A", "scan", dstTarget, "Link")}
 
 		g := newGrid().set(1, "A", "OK").link(1, "A", "scans/7.pdf")
 		var dst row
@@ -584,9 +562,7 @@ func TestConstructorCoercions(t *testing.T) {
 // Must and WithLink are modifiers, so they have to leave everything else
 // on the field alone.
 func TestModifiersOnlyChangeTheirOwnFlag(t *testing.T) {
-	base := Text("A", "name", 50, func(r *row) **string {
-		return &r.Name
-	}, "Name", "Title")
+	base := Text("A", "name", 50, dstName, "Name", "Title")
 
 	must := Must(base)
 	if !must.Required {

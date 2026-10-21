@@ -13,8 +13,8 @@ package datetime
 // engine's run: the MySQL half needs a MySQL or MariaDB DSN, and the SQL
 // Server half a SQL Server one.
 //
-// The DSN variables and the build tag are the database package's, so one
-// scratch server serves both suites:
+// The DSN variables, the build tag and the loop over them are the ones the
+// database suite runs on, from dbtest, so one scratch server serves both:
 //
 //	DB_TEST_MYSQL_DSN
 //		user:pass@tcp(host:3306)/scratch?parseTime=true&loc=Asia%2FJakarta
@@ -33,25 +33,19 @@ package datetime
 // database, never at one that holds data.
 
 import (
-	"fmt"
-	"os"
-	"sync/atomic"
 	"testing"
 	"time"
 
-	_ "github.com/go-sql-driver/mysql"
 	"github.com/jmoiron/sqlx"
-	_ "github.com/microsoft/go-mssqldb"
+	"github.com/mas-ony/go-toolkit/internal/dbdriver"
+	"github.com/mas-ony/go-toolkit/internal/testutil/dbtest"
 )
 
-// engine names one server and the column types it spells differently.
-type engine struct {
-	name     string
-	driver   string
-	dsnEnv   string
-	dateCol  string
-	stampCol string
-	quote    func(string) string
+// stampTypes names the timestamp type each engine spells differently, by
+// the driver dbtest opens it with. Both spell a date DATE.
+var stampTypes = map[string]string{
+	dbdriver.MySQL:     "DATETIME(0)",
+	dbdriver.SQLServer: "DATETIME2(0)",
 }
 
 // row is one row of the scratch table, both columns scanned through Scan.
@@ -59,30 +53,6 @@ type row struct {
 	D  *Datetime `db:"d"`
 	TS *Datetime `db:"ts"`
 }
-
-// engines lists both servers this suite can run against; forEachEngine
-// runs each one whose DSN is set.
-var engines = []engine{
-	{
-		name:     "mysql",
-		driver:   "mysql",
-		dsnEnv:   "DB_TEST_MYSQL_DSN",
-		dateCol:  "DATE",
-		stampCol: "DATETIME(0)",
-		quote:    func(s string) string { return "`" + s + "`" },
-	},
-	{
-		name:     "sqlserver",
-		driver:   "sqlserver",
-		dsnEnv:   "DB_TEST_SQLSERVER_DSN",
-		dateCol:  "DATE",
-		stampCol: "DATETIME2(0)",
-		quote:    func(s string) string { return "[" + s + "]" },
-	},
-}
-
-// tableSeq keeps scratch table names unique within one run.
-var tableSeq atomic.Int64
 
 // zoneOffsetAt reports time.Local's offset on the given date, which is not
 // today's offset wherever the zone observes DST.
@@ -92,43 +62,12 @@ func zoneOffsetAt(year int, month time.Month, day int) int {
 }
 
 // scratchTable creates a two-column table and drops it when the test ends.
-func scratchTable(t *testing.T, e engine, db *sqlx.DB) string {
+// The name needs no quoting on either engine.
+func scratchTable(t *testing.T, e dbtest.Engine, db *sqlx.DB) string {
 	t.Helper()
-	name := e.quote(fmt.Sprintf("datetime_it_%d_%d",
-		time.Now().UnixNano()%1e9, tableSeq.Add(1)))
-	ddl := fmt.Sprintf(
-		"CREATE TABLE %s (id INT NOT NULL PRIMARY KEY, d %s NULL, "+
-			"ts %s NULL)", name, e.dateCol, e.stampCol)
-	if _, err := db.Exec(ddl); err != nil {
-		t.Fatalf("%v\n%s", err, ddl)
-	}
-	t.Cleanup(func() { _, _ = db.Exec("DROP TABLE " + name) })
-	return name
-}
-
-// forEachEngine runs fn once per engine whose DSN is set.
-func forEachEngine(t *testing.T, fn func(t *testing.T, e engine,
-	db *sqlx.DB)) {
-	t.Helper()
-	ran := false
-	for _, e := range engines {
-		dsn := os.Getenv(e.dsnEnv)
-		if dsn == "" {
-			continue
-		}
-		ran = true
-		t.Run(e.name, func(t *testing.T) {
-			db, err := sqlx.Connect(e.driver, dsn)
-			if err != nil {
-				t.Fatalf("connect: %v", err)
-			}
-			t.Cleanup(func() { _ = db.Close() })
-			fn(t, e, db)
-		})
-	}
-	if !ran {
-		t.Skip("no DB_TEST_*_DSN variable is set")
-	}
+	return dbtest.ScratchTable(t, db, dbtest.Unique("datetime_it_"),
+		"CREATE TABLE %s (id INT NOT NULL PRIMARY KEY, d DATE NULL, "+
+			"ts "+stampTypes[e.Driver]+" NULL)")
 }
 
 // read returns the row with the given id, scanned through Scan.
@@ -186,18 +125,14 @@ func TestIntegrationOffsetBearingInputKeepsItsLocalDate(t *testing.T) {
 		t.Skip("time.Local is at UTC, where this cannot go wrong")
 	}
 
-	forEachEngine(t, func(t *testing.T, e engine, db *sqlx.DB) {
+	dbtest.ForEach(t, func(t *testing.T, e dbtest.Engine, db *sqlx.DB) {
 		table := scratchTable(t, e, db)
 
 		// 2024-03-15T20:00:00Z is legal RFC 3339 and parse keeps it in
 		// UTC. In a zone ahead of UTC the same instant is already the
 		// 16th locally, and that local date is what every read path in
 		// this package will call it.
-		var d Datetime
-		if err := d.UnmarshalJSON(
-			[]byte(`"2024-03-15T20:00:00Z"`)); err != nil {
-			t.Fatalf("UnmarshalJSON: %v", err)
-		}
+		d := decoded(t, `"2024-03-15T20:00:00Z"`)
 		wantLocal := d.Time.In(time.Local)
 
 		insert(t, db, table, 1, &d, &d)
@@ -225,17 +160,11 @@ func TestIntegrationOffsetBearingInputKeepsItsLocalDate(t *testing.T) {
 // failure of the test above can be read as a ZONE problem rather than as
 // the table being broken.
 func TestIntegrationNaiveInputRoundTrips(t *testing.T) {
-	forEachEngine(t, func(t *testing.T, e engine, db *sqlx.DB) {
+	dbtest.ForEach(t, func(t *testing.T, e dbtest.Engine, db *sqlx.DB) {
 		table := scratchTable(t, e, db)
 
-		var d, ts Datetime
-		if err := d.UnmarshalJSON([]byte(`"2024-03-15"`)); err != nil {
-			t.Fatalf("UnmarshalJSON date: %v", err)
-		}
-		if err := ts.UnmarshalJSON(
-			[]byte(`"2024-03-15T14:30:00"`)); err != nil {
-			t.Fatalf("UnmarshalJSON stamp: %v", err)
-		}
+		d := decoded(t, `"2024-03-15"`)
+		ts := decoded(t, `"2024-03-15T14:30:00"`)
 
 		insert(t, db, table, 1, &d, &ts)
 		got := read(t, db, table, 1)
@@ -272,7 +201,7 @@ func TestIntegrationNaiveInputRoundTrips(t *testing.T) {
 // a NULL column scans back to a zero Datetime. Both halves are claims in
 // doc.go, and only a real column can close the loop.
 func TestIntegrationZeroValueRoundTripsThroughNull(t *testing.T) {
-	forEachEngine(t, func(t *testing.T, e engine, db *sqlx.DB) {
+	dbtest.ForEach(t, func(t *testing.T, e dbtest.Engine, db *sqlx.DB) {
 		table := scratchTable(t, e, db)
 
 		insert(t, db, table, 1, &Datetime{}, &Datetime{})
@@ -304,18 +233,14 @@ func TestIntegrationZeroValueRoundTripsThroughNull(t *testing.T) {
 // DSN settings this package assumes. A CAST is what reaches them, so the
 // fallbacks are exercised rather than merely believed.
 func TestIntegrationScanFromAStringifiedColumn(t *testing.T) {
-	forEachEngine(t, func(t *testing.T, e engine, db *sqlx.DB) {
+	dbtest.ForEach(t, func(t *testing.T, e dbtest.Engine, db *sqlx.DB) {
 		table := scratchTable(t, e, db)
 
-		var ts Datetime
-		if err := ts.UnmarshalJSON(
-			[]byte(`"2024-03-15T14:30:00"`)); err != nil {
-			t.Fatalf("UnmarshalJSON: %v", err)
-		}
+		ts := decoded(t, `"2024-03-15T14:30:00"`)
 		insert(t, db, table, 1, &ts, &ts)
 
 		cast := "CAST(ts AS CHAR(19))"
-		if e.name == "sqlserver" {
+		if e.Driver == dbdriver.SQLServer {
 			cast = "CONVERT(VARCHAR(19), ts, 120)"
 		}
 

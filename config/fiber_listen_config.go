@@ -36,9 +36,11 @@ package config
 // NewViper; see the package documentation.
 
 import (
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"strconv"
 	"time"
 
@@ -56,25 +58,6 @@ type ListenConfig struct {
 	// panics on field access rather than at the method call.
 	*fiber.ListenConfig
 }
-
-// TLS version constants for fiber.listen.tls_min_version.
-//
-// Spelled as untyped decimal rather than tls.VersionTLS12 so this package does
-// not import crypto/tls for two numbers, and so the constant names sit next to
-// the spelling config.yaml actually uses.
-//
-// Decimal is a CONVENTION here, not a constraint. Both readers parse at base
-// 0, so hex arrives intact from either source: go-yaml resolves 0x0303 to 771
-// before Viper sees a string, and spf13/cast's ParseUint(s, 0, 0) accepts
-// FIBER_LISTEN_TLS_MIN_VERSION=0x0303 for the same reason it accepts a leading
-// zero as octal in unix_socket_file_mode below. The convention is worth
-// keeping anyway: the validation error prints %d, so a deployment that writes
-// hex reads one number in config.yaml and a different one in the message
-// telling it what went wrong.
-const (
-	tlsVersion12 = 771 // 0x0303
-	tlsVersion13 = 772 // 0x0304
-)
 
 // maxUnixSocketFileMode is the largest value
 // fiber.listen.unix_socket_file_mode may take: the nine permission bits and
@@ -117,10 +100,12 @@ const maxUnixSocketFileMode = 0o777
 // that silently loses requests. That is the right way round for a guess.
 //
 // Pinning the dependency is what keeps it honest; go.mod holds fasthttp at
-// v1.74.0, where this is 5s. Re-read shutdownChildren on every bump.
+// v1.76.0, where this is 5s. Re-read shutdownChildren on every bump.
 const defaultPreforkShutdownGracePeriod = 5 * time.Second
 
-// validListenerNetworks is the allowlist checked by ListenConfig.Validate.
+// validListenerNetworks is the allowlist checked by ListenConfig.Validate,
+// in the order its error names them, spelled with Fiber's own network
+// constants so a rename upstream is a compile error here.
 //
 // Matched exactly, no case folding, because both consumers compare exactly.
 // An application branches on `== "unix"` to decide whether app.Host is a
@@ -131,13 +116,13 @@ const defaultPreforkShutdownGracePeriod = 5 * time.Second
 // this case to Validate here.
 //
 // The empty string is absent deliberately: Fiber normalises "" to NetworkTCP4
-// before use, so an unset key is valid and never reaches this map (see the
-// guard in Validate).
-var validListenerNetworks = map[string]struct{}{
-	"tcp":  {},
-	"tcp4": {},
-	"tcp6": {},
-	"unix": {},
+// before use, so an unset key is valid and never reaches this list (see
+// the guard in Validate).
+var validListenerNetworks = []string{
+	fiber.NetworkTCP,
+	fiber.NetworkTCP4,
+	fiber.NetworkTCP6,
+	fiber.NetworkUnix,
 }
 
 // octalIntent recovers the mode an operator meant when they wrote one without
@@ -237,8 +222,8 @@ func octalIntent(got uint32) (uint32, bool) {
 // what a deployment gets by touching neither key.
 //
 // TLSMinVersion is written as a plain decimal integer in config.yaml by
-// convention — see the tlsVersion12 constants for why, and for why hex would
-// in fact parse. Fiber v3 accepts ONLY two values:
+// convention — see the tls_min_version check in Validate for why, and for
+// why hex would in fact parse. Fiber v3 accepts ONLY two values:
 //
 //	771 = 0x0303 = tls.VersionTLS12  (Fiber's default)
 //	772 = 0x0304 = tls.VersionTLS13
@@ -591,18 +576,12 @@ func (c *ListenConfig) Validate() error {
 	// already passed when the drain starts, and a bare number is
 	// nanoseconds, so both drop every in-flight request. See the field
 	// comment in NewListenConfig.
-	switch {
-	case c.ShutdownTimeout == 0:
-		errs = append(errs, errors.New("fiber.listen.shutdown_timeout is "+
-			"required: 0 does not select Fiber's 10s default, it removes the "+
-			"drain deadline entirely and waits indefinitely for in-flight "+
-			"requests"))
-	case c.ShutdownTimeout < time.Second:
-		errs = append(errs, fmt.Errorf("fiber.listen.shutdown_timeout must "+
-			"be at least 1s (got %s): a shorter drain drops every request "+
-			"still in flight, and if this was meant as seconds, write the "+
-			"unit — a bare number is nanoseconds",
-			c.ShutdownTimeout))
+	err := checkDuration("fiber.listen.shutdown_timeout", c.ShutdownTimeout,
+		": 0 does not select Fiber's 10s default, it removes the drain "+
+			"deadline entirely and waits indefinitely for in-flight requests",
+		"a shorter drain drops every request still in flight")
+	if err != nil {
+		errs = append(errs, err)
 	}
 
 	// CertFile and CertKeyFile are a pair, and Fiber does not check that
@@ -620,18 +599,24 @@ func (c *ListenConfig) Validate() error {
 
 	// Empty is valid because Fiber normalises it to tcp4. So only a non-empty
 	// value is checked against the allowlist.
-	if c.ListenerNetwork != "" {
-		if _, ok := validListenerNetworks[c.ListenerNetwork]; !ok {
-			errs = append(errs, fmt.Errorf("fiber.listen.listener_network "+
-				"must be one of: tcp, tcp4, tcp6, unix (got %q)",
-				c.ListenerNetwork))
-		}
+	if c.ListenerNetwork != "" &&
+		!slices.Contains(validListenerNetworks, c.ListenerNetwork) {
+		errs = append(errs, notOneOf("fiber.listen.listener_network",
+			c.ListenerNetwork, validListenerNetworks))
 	}
 
 	// 0 is valid because Fiber normalises it to TLS 1.2. So only a non-zero
 	// value is checked against either 771 (TLS 1.2) or 772 (TLS 1.3).
+	//
+	// config.yaml writes the decimal spelling, which is a convention and
+	// not a constraint: both readers parse at base 0, so 0x0303 arrives as
+	// 771 from the file and from FIBER_LISTEN_TLS_MIN_VERSION alike. The
+	// convention is worth keeping anyway, because this error prints %d, so
+	// a deployment that writes hex reads one number in config.yaml and a
+	// different one in the message telling it what went wrong.
 	if c.TLSMinVersion != 0 &&
-		c.TLSMinVersion != tlsVersion12 && c.TLSMinVersion != tlsVersion13 {
+		c.TLSMinVersion != tls.VersionTLS12 &&
+		c.TLSMinVersion != tls.VersionTLS13 {
 		errs = append(errs, fmt.Errorf("fiber.listen.tls_min_version must be "+
 			"771 (TLS 1.2), 772 (TLS 1.3), or 0 to use Fiber's default of "+
 			"TLS 1.2 (got %d)",
@@ -642,7 +627,8 @@ func (c *ListenConfig) Validate() error {
 	// through SO_REUSEPORT, which fasthttp's reuseport package implements
 	// for tcp4 and tcp6 only.
 	if c.EnablePrefork && c.ListenerNetwork != "" &&
-		c.ListenerNetwork != "tcp4" && c.ListenerNetwork != "tcp6" {
+		c.ListenerNetwork != fiber.NetworkTCP4 &&
+		c.ListenerNetwork != fiber.NetworkTCP6 {
 		errs = append(errs, fmt.Errorf("fiber.listen.listener_network must "+
 			"be tcp4 or tcp6 when fiber.listen.enable_prefork is true "+
 			"(got %q): prefork binds through SO_REUSEPORT, which fasthttp "+
@@ -681,11 +667,11 @@ func (c *ListenConfig) Validate() error {
 	// negative value reaches fasthttp as a restart budget the crash count
 	// exceeds on the first crash.
 	if c.PreforkRecoverThreshold < 0 {
-		errs = append(errs, fmt.Errorf(
-			"fiber.listen.prefork_recover_threshold cannot be negative "+
-				"(got %d): use 0 for Fiber's default of "+
-				"max(1, GOMAXPROCS/2), or a positive restart count",
-			c.PreforkRecoverThreshold))
+		errs = append(errs, belowZero(
+			"fiber.listen.prefork_recover_threshold",
+			c.PreforkRecoverThreshold,
+			"use 0 for Fiber's default of max(1, GOMAXPROCS/2), or a "+
+				"positive restart count"))
 	}
 
 	// Both prefork durations reject a NEGATIVE value and accept 0, and the two
@@ -696,24 +682,24 @@ func (c *ListenConfig) Validate() error {
 	// pairing rule below: a deployment that enables prefork later should not
 	// inherit a number nobody ever validated.
 	if c.PreforkRecoverInterval < 0 {
-		errs = append(errs, fmt.Errorf(
-			"fiber.listen.prefork_recover_interval cannot be negative "+
-				"(got %s): fasthttp applies the backoff only when it is "+
-				"above zero, so a negative value reads as a setting and acts "+
-				"as none — use 0 to respawn a crashed child immediately, or "+
-				"a positive backoff",
-			c.PreforkRecoverInterval))
+		errs = append(errs, belowZero(
+			"fiber.listen.prefork_recover_interval",
+			c.PreforkRecoverInterval,
+			"fasthttp applies the backoff only when it is above zero, so a "+
+				"negative value reads as a setting and acts as none — use "+
+				"0 to respawn a crashed child immediately, or a positive "+
+				"backoff"))
 	}
 
 	if c.PreforkShutdownGracePeriod < 0 {
-		errs = append(errs, fmt.Errorf(
-			"fiber.listen.prefork_shutdown_grace_period cannot be negative "+
-				"(got %s): fasthttp replaces anything at or below zero "+
-				"with %s, so a negative value reads as \"kill children "+
-				"immediately\" and acts as that default — use 0 to take it "+
-				"deliberately, or a positive deadline",
+		errs = append(errs, belowZero(
+			"fiber.listen.prefork_shutdown_grace_period",
 			c.PreforkShutdownGracePeriod,
-			defaultPreforkShutdownGracePeriod))
+			"fasthttp replaces anything at or below zero with "+
+				defaultPreforkShutdownGracePeriod.String()+", so a "+
+				"negative value reads as \"kill children immediately\" "+
+				"and acts as that default — use 0 to take it "+
+				"deliberately, or a positive deadline"))
 	}
 
 	// The pairing rule. shutdown_timeout is the WORKER's drain deadline;

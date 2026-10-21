@@ -20,21 +20,26 @@ import (
 	"time"
 
 	"github.com/mas-ony/go-toolkit/config"
+	"github.com/mas-ony/go-toolkit/internal/upstream"
 	"github.com/mas-ony/go-toolkit/response"
 	"github.com/rs/zerolog"
 )
 
-// writeEnvelope answers in the shape this package decodes, so the tests
-// run against a real server and a real client rather than a mock of
-// either.
+// writeEnvelope answers with the envelope a handler built on the response
+// package writes, OK for a 2xx and Fail for anything else, so the tests
+// run a real client against what a real server sends rather than against
+// a copy of its shape. data travels on a success only, as Fail carries
+// none.
 func writeEnvelope(
 	w http.ResponseWriter, status int, msg string, data any,
 ) {
+	body := response.Fail(msg)
+	if upstream.IsSuccess(status) {
+		body = response.OK(msg, data)
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(map[string]any{
-		"success": status < 300, "message": msg, "data": data,
-	})
+	_ = json.NewEncoder(w).Encode(body)
 }
 
 // testClient starts a server running h, points cfg at it, and builds a
@@ -50,7 +55,14 @@ func testClient(
 
 	cfg.BaseURL = srv.URL
 	opt.Log = zerolog.New(io.Discard)
-	c, err := New(&cfg, opt)
+	return mustNew(t, &cfg, opt)
+}
+
+// mustNew builds a client from cfg and opt, failing the test rather than
+// returning an error nobody would check.
+func mustNew(t *testing.T, cfg *config.ClientConfig, opt Options) *Client {
+	t.Helper()
+	c, err := New(cfg, opt)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -407,10 +419,8 @@ func TestDecodesIntoTheCallersType(t *testing.T) {
 	mux.HandleFunc("/many", func(
 		w http.ResponseWriter, r *http.Request,
 	) {
-		writeEnvelope(w, http.StatusOK, "ok", map[string]any{
-			"items": []thing{{ID: 7}, {ID: 9}},
-			"total": 12, "page": 1, "limit": 2,
-		})
+		writeEnvelope(w, http.StatusOK, "ok", response.NewPaginated(
+			[]thing{{ID: 7}, {ID: 9}}, 12, 1, 2))
 	})
 
 	c := testClient(t, mux, config.ClientConfig{}, Options{})
@@ -515,8 +525,10 @@ func TestMessageFromFallsBackToTheBody(t *testing.T) {
 
 // A base carrying userinfo is refused by New and by WithBaseURL alike,
 // since every URL built on it would quote the credential in errors and
-// logs. No message quotes the password either, including the one for a
-// password url.Parse cannot read, whose own error copies the whole input.
+// logs. No message quotes the password either, including the ones for a
+// password url.Parse cannot read: its own error copies the whole input,
+// and a "/", "?" or "#" inside the password ends the authority early, so
+// the port url.Parse then fails on, and quotes, is the password itself.
 func TestBaseURLRefusesUserinfoWithoutQuotingIt(t *testing.T) {
 	c, err := New(&config.ClientConfig{BaseURL: "https://a.example.go.id"},
 		Options{})
@@ -526,6 +538,9 @@ func TestBaseURLRefusesUserinfoWithoutQuotingIt(t *testing.T) {
 	for _, raw := range []string{
 		"https://svc:hunter2@api.example.go.id",
 		"https://svc:hunter2 x@api.example.go.id",
+		"https://svc:hunter2/x@api.example",
+		"https://svc:hunter2?x@api.example",
+		"https://svc:hunter2#x@api.example",
 	} {
 		_, errNew := New(&config.ClientConfig{BaseURL: raw}, Options{})
 		_, errWith := c.WithBaseURL(raw)
@@ -559,26 +574,6 @@ func TestBackoffDoublesAndIsCapped(t *testing.T) {
 		if got := backoff(attempt); got <= 0 || got > maxBackoff {
 			t.Fatalf("backoff(%d) = %s, outside (0, %s]", attempt, got,
 				maxBackoff)
-		}
-	}
-}
-
-// A "/", "?" or "#" inside a password ends the authority early, so url.Parse
-// fails on what it takes for a port, and the cause it reports quotes that
-// port: the password itself. The message New returns must not carry it.
-func TestBaseURLParseErrorsDoNotQuoteThePassword(t *testing.T) {
-	for _, raw := range []string{
-		"https://svc:hunter2/x@api.example",
-		"https://svc:hunter2?x@api.example",
-		"https://svc:hunter2#x@api.example",
-	} {
-		_, err := New(&config.ClientConfig{BaseURL: raw}, Options{})
-		if err == nil {
-			t.Errorf("%q was accepted", raw)
-			continue
-		}
-		if strings.Contains(err.Error(), "hunter2") {
-			t.Errorf("the error quotes the password: %v", err)
 		}
 	}
 }

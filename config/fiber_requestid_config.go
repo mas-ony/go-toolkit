@@ -297,7 +297,7 @@ func (c *RequestIDConfig) String() string {
 
 	generator := "custom"
 	if c.Generator == nil {
-		generator = "utils.SecureToken (middleware default)"
+		generator = "utils.SecureToken " + middlewareDefaultLabel
 	}
 
 	return fmt.Sprintf("Header=%s "+

@@ -5,13 +5,12 @@ import (
 	"context"
 	"errors"
 	"go/ast"
-	"go/parser"
-	"go/token"
-	"os"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
 
+	"github.com/mas-ony/go-toolkit/internal/testutil"
 	"github.com/rs/zerolog"
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/types"
@@ -53,6 +52,11 @@ import (
 //   - Whether WhatsApp actually accepts a JID this package builds. The tests
 //     assert the string handed to whatsmeow, not the server's opinion of it.
 
+// testPhone is a recipient the package accepts, already in the bare-digits
+// form normalisePhone leaves. Tests about what normalisation does to a
+// number spell their numbers out instead.
+const testPhone = "628123456789"
+
 // safeBuffer is a zerolog sink that survives -race.
 //
 // Only Disconnect and the success paths log, and no test here reaches
@@ -65,36 +69,16 @@ type safeBuffer struct {
 	buf bytes.Buffer
 }
 
-// capturePanic runs fn and returns whatever it panicked with, or nil.
-func capturePanic(fn func()) (recovered any) {
-	defer func() { recovered = recover() }()
-	fn()
-	return nil
-}
-
 // packageSourceFiles lists the non-test .go files in the package directory.
 //
-// go test runs with the package directory as the working directory, so "." is
-// the source under test. Listing rather than naming whatsapp.go means
-// splitting the file does not quietly reduce what the meta-test above covers.
+// testutil.Glob lists the package's own files, since go test runs with the
+// package directory as the working directory. Listing rather than naming
+// whatsapp.go means splitting the file does not quietly reduce what the
+// meta-test above covers.
 func packageSourceFiles(t *testing.T) []string {
 	t.Helper()
-
-	entries, err := os.ReadDir(".")
-	if err != nil {
-		t.Fatalf("reading the package directory: %v", err)
-	}
-
-	var files []string
-	for _, e := range entries {
-		name := e.Name()
-		if e.IsDir() ||
-			!strings.HasSuffix(name, ".go") ||
-			strings.HasSuffix(name, "_test.go") {
-			continue
-		}
-		files = append(files, name)
-	}
+	files := slices.DeleteFunc(testutil.Glob(t, "*.go"),
+		func(name string) bool { return strings.HasSuffix(name, "_test.go") })
 	if len(files) == 0 {
 		t.Fatal("no source files found; the meta-test would pass vacuously")
 	}
@@ -138,8 +122,24 @@ func assertPhoneInError(t *testing.T, err error, prefix, wantPhone string) {
 	want := prefix + wantPhone + ": "
 	if !strings.HasPrefix(err.Error(), want) {
 		t.Errorf(
-			"error %q does not start with %q — the number was not normalised "+
-				"as documented", err, want)
+			"error %q does not start with %q — the step or the normalised "+
+				"number is not the one documented", err, want)
+	}
+}
+
+// assertNoOp checks the two signs that a send returned before reaching the
+// client: no error, which a nil client makes impossible on any path that
+// reaches it, and no log line.
+func assertNoOp(t *testing.T, err error, out *safeBuffer) {
+	t.Helper()
+
+	if err != nil {
+		t.Errorf(
+			"got %v, want nil — an empty input must be a silent no-op",
+			err)
+	}
+	if got := out.String(); got != "" {
+		t.Errorf("a no-op wrote a log line:\n%s", got)
 	}
 }
 
@@ -214,7 +214,7 @@ func TestNilClientIsTheTestingSeam(t *testing.T) {
 			name: "SendText",
 			call: func() error {
 				return svc.SendText(
-					"628123456789",
+					testPhone,
 					"hi")
 			},
 			wantErr:  true,
@@ -224,7 +224,7 @@ func TestNilClientIsTheTestingSeam(t *testing.T) {
 			name: "SendDocument",
 			call: func() error {
 				return svc.SendDocument(
-					"628123456789", []byte("x"),
+					testPhone, []byte("x"),
 					"a.pdf", "application/pdf", "")
 			},
 			wantErr:  true,
@@ -243,7 +243,8 @@ func TestNilClientIsTheTestingSeam(t *testing.T) {
 			t.Parallel()
 
 			var err error
-			if p := capturePanic(func() { err = tc.call() }); p != nil {
+			p := testutil.CapturePanic(func() { err = tc.call() })
+			if p != nil {
 				t.Fatalf(
 					"panicked with %#v — the nil guard in %s is gone, and "+
 						"every test in this file depends on it",
@@ -287,7 +288,7 @@ func TestSendTextNoOpsOnEmptyInput(t *testing.T) {
 		message string
 	}{
 		{"no phone number on the user record", "", "new message"},
-		{"nothing to say", "628123456789", ""},
+		{"nothing to say", testPhone, ""},
 		{"neither", "", ""},
 	}
 
@@ -296,15 +297,7 @@ func TestSendTextNoOpsOnEmptyInput(t *testing.T) {
 			t.Parallel()
 
 			svc, out := newTestService(t)
-			if err := svc.SendText(tc.phone, tc.message); err != nil {
-				t.Errorf(
-					"got %v, want nil — an empty input must be a silent "+
-						"no-op",
-					err)
-			}
-			if got := out.String(); got != "" {
-				t.Errorf("a no-op wrote a log line:\n%s", got)
-			}
+			assertNoOp(t, svc.SendText(tc.phone, tc.message), out)
 		})
 	}
 }
@@ -324,8 +317,8 @@ func TestSendDocumentNoOpsOnEmptyInput(t *testing.T) {
 		data  []byte
 	}{
 		{"no phone number on the user record", "", []byte("%PDF-1.4")},
-		{"nil data", "628123456789", nil},
-		{"empty but non-nil data", "628123456789", []byte{}},
+		{"nil data", testPhone, nil},
+		{"empty but non-nil data", testPhone, []byte{}},
 	}
 
 	for _, tc := range tests {
@@ -339,15 +332,7 @@ func TestSendDocumentNoOpsOnEmptyInput(t *testing.T) {
 				"Incoming Letter 042.pdf",
 				"application/pdf",
 				"caption")
-			if err != nil {
-				t.Errorf(
-					"got %v, want nil — an empty input must be a silent "+
-						"no-op",
-					err)
-			}
-			if got := out.String(); got != "" {
-				t.Errorf("a no-op wrote a log line:\n%s", got)
-			}
+			assertNoOp(t, err, out)
 		})
 	}
 }
@@ -386,7 +371,7 @@ func TestSendDocumentDoesNotGuardFilenameOrMimetype(t *testing.T) {
 
 			svc, _ := newTestService(t)
 			err := svc.SendDocument(
-				"628123456789",
+				testPhone,
 				[]byte("%PDF-1.4"),
 				tc.filename,
 				tc.mimetype,
@@ -480,10 +465,11 @@ func TestPhoneNormalisationRunsBeforeTheEmptyGuard(t *testing.T) {
 // exists: the prefixes asserted here are load-bearing for this test, not just
 // for an operator reading a log.
 //
-// Both methods are exercised with the same table on purpose. They share one
-// normalisePhone helper, and running the table twice is what proves the
-// sharing is real rather than asserted in a comment. It is also what would
-// catch one method growing its own pre-processing step before the call.
+// Both methods are exercised with the same table on purpose. They resolve
+// the number through one recipient helper, and running the table twice is
+// what proves the sharing is real rather than asserted in a comment. It is
+// also what would catch one method growing its own pre-processing step
+// before the call.
 func TestPhoneNormalisation(t *testing.T) {
 	t.Parallel()
 
@@ -623,13 +609,65 @@ func TestJIDRenderingContract(t *testing.T) {
 	}
 }
 
-// TestSourceBuildsUserJIDsOnly reads this package's own source, because the
-// behaviour it protects is invisible from outside.
+// TestRecipient holds the one place a send's address is decided to the
+// rule SendText and SendDocument document: the user JID for the number as
+// normalised, nothing to send when the number or the payload is empty, and
+// ErrInvalidPhone for a number that is present and still not digits.
 //
-// The JID is constructed and consumed within a single statement — built on one
-// line, passed to a client call on the next — so it never becomes an argument
-// any test can inspect. Swapping types.DefaultUserServer for types.GroupServer
-// in either method passes every other test in this file.
+// The JID is read here directly, since recipient hands it back. The empty
+// cases come before the number's characters, so a send with nothing in it
+// stays silent even to a malformed number.
+func TestRecipient(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		phone string
+		empty bool
+		ok    bool
+		err   error
+	}{
+		{"bare digits", testPhone, false, true, nil},
+		{"punctuation normalisePhone strips", "+62 812-3456789", false,
+			true, nil},
+		{"no number", "", false, false, nil},
+		{"a number that normalises to nothing", " + - ", false, false, nil},
+		{"nothing to send", testPhone, true, false, nil},
+		{"nothing to send to a malformed number", "62.812", true, false,
+			nil},
+		{"a malformed number", "62.812.3456789", false, false,
+			ErrInvalidPhone},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			jid, ok, err := recipient(tc.phone, tc.empty)
+			if ok != tc.ok || !errors.Is(err, tc.err) {
+				t.Fatalf("recipient(%q, %t) = %t, %v, want %t, %v",
+					tc.phone, tc.empty, ok, err, tc.ok, tc.err)
+			}
+			if !ok {
+				return
+			}
+			if jid.User != testPhone ||
+				jid.Server != types.DefaultUserServer {
+				t.Errorf("recipient(%q) = %s, want %s@%s", tc.phone, jid,
+					testPhone, types.DefaultUserServer)
+			}
+		})
+	}
+}
+
+// TestSourceBuildsUserJIDsOnly reads this package's own source, because the
+// property it protects is one no call can show.
+//
+// recipient builds the JID every send addresses, and TestRecipient reads the
+// server it carries. What a call cannot show is a second place building one:
+// a send path that called types.NewJID itself, with types.GroupServer, would
+// pass every other test in this file, since the JID it built would go
+// straight into a client call no test can inspect.
 //
 // Parsing the source is the right tool because the property is structural, so
 // a structural test is the one that can see it. The alternative is an
@@ -637,8 +675,9 @@ func TestJIDRenderingContract(t *testing.T) {
 // and a bigger change than a test file should assume.
 //
 // Two things are asserted. Every types.NewJID call uses the user server, and
-// there are exactly two of them — so a third send path added later has to come
-// here and add itself to the tables above rather than inheriting silence.
+// there is exactly one of them, recipient's — so a send path added later has
+// to resolve its number there, or come here and justify an address of its
+// own, rather than inheriting silence.
 func TestSourceBuildsUserJIDsOnly(t *testing.T) {
 	t.Parallel()
 
@@ -651,11 +690,7 @@ func TestSourceBuildsUserJIDsOnly(t *testing.T) {
 	var sites []site
 
 	for _, name := range files {
-		fset := token.NewFileSet()
-		parsed, err := parser.ParseFile(fset, name, nil, 0)
-		if err != nil {
-			t.Fatalf("parsing %s: %v", name, err)
-		}
+		parsed, fset := testutil.ParseFile(t, name)
 		ast.Inspect(parsed, func(n ast.Node) bool {
 			call, ok := n.(*ast.CallExpr)
 			if !ok {
@@ -684,10 +719,10 @@ func TestSourceBuildsUserJIDsOnly(t *testing.T) {
 		})
 	}
 
-	if len(sites) != 2 {
+	if len(sites) != 1 {
 		t.Fatalf(
-			"found %d types.NewJID calls, want 2 (SendText and "+
-				"SendDocument): %+v",
+			"found %d types.NewJID calls, want 1 (recipient, which "+
+				"SendText and SendDocument both resolve through): %+v",
 			len(sites),
 			sites)
 	}
@@ -718,20 +753,12 @@ func TestSourceBuildsUserJIDsOnly(t *testing.T) {
 func TestErrorMessagesIdentifyWhichStepFailed(t *testing.T) {
 	t.Parallel()
 
-	const phone = "628123456789"
-
 	t.Run("SendText names the recipient and the step", func(t *testing.T) {
 		t.Parallel()
 
 		svc, _ := newTestService(t)
-		err := svc.SendText(phone, "new message")
-		if err == nil {
-			t.Fatal("got nil, want an error")
-		}
-		want := "whatsapp: send to " + phone + ": "
-		if !strings.HasPrefix(err.Error(), want) {
-			t.Errorf("error %q does not start with %q", err, want)
-		}
+		err := svc.SendText(testPhone, "new message")
+		assertPhoneInError(t, err, "whatsapp: send to ", testPhone)
 	})
 
 	t.Run("SendDocument distinguishes upload from send", func(t *testing.T) {
@@ -739,14 +766,9 @@ func TestErrorMessagesIdentifyWhichStepFailed(t *testing.T) {
 
 		svc, _ := newTestService(t)
 		err := svc.SendDocument(
-			phone, []byte("%PDF-1.4"), "a.pdf", "application/pdf", "")
-		if err == nil {
-			t.Fatal("got nil, want an error")
-		}
-		want := "whatsapp: upload document for " + phone + ": "
-		if !strings.HasPrefix(err.Error(), want) {
-			t.Errorf("error %q does not start with %q", err, want)
-		}
+			testPhone, []byte("%PDF-1.4"), "a.pdf", "application/pdf", "")
+		assertPhoneInError(t, err, "whatsapp: upload document for ",
+			testPhone)
 	})
 }
 
@@ -761,13 +783,13 @@ func TestErrorsWrapRatherThanReplace(t *testing.T) {
 
 	svc, _ := newTestService(t)
 
-	textErr := svc.SendText("628123456789", "new message")
+	textErr := svc.SendText(testPhone, "new message")
 	if !errors.Is(textErr, whatsmeow.ErrClientIsNil) {
 		t.Errorf("SendText: %v does not wrap the cause", textErr)
 	}
 
 	docErr := svc.SendDocument(
-		"628123456789", []byte("%PDF-1.4"), "a.pdf", "application/pdf", "")
+		testPhone, []byte("%PDF-1.4"), "a.pdf", "application/pdf", "")
 	if !errors.Is(docErr, whatsmeow.ErrClientIsNil) {
 		t.Errorf("SendDocument: %v does not wrap the cause", docErr)
 	}
@@ -785,14 +807,13 @@ func TestErrorsWrapRatherThanReplace(t *testing.T) {
 func TestErrorsEmbedTheRecipientsPhoneNumber(t *testing.T) {
 	t.Parallel()
 
-	const phone = "628123456789"
 	svc, _ := newTestService(t)
 
-	err := svc.SendText(phone, "new message")
+	err := svc.SendText(testPhone, "new message")
 	if err == nil {
 		t.Fatal("got nil, want an error")
 	}
-	if !strings.Contains(err.Error(), phone) {
+	if !strings.Contains(err.Error(), testPhone) {
 		t.Errorf("error %q no longer carries the number. If that was "+
 			"deliberate, delete this test and re-read the callers that "+
 			"log it; if it was not, the message just lost the field that "+
@@ -813,9 +834,9 @@ func TestFailedSendsAreSilent(t *testing.T) {
 
 	svc, out := newTestService(t)
 
-	_ = svc.SendText("628123456789", "new message")
+	_ = svc.SendText(testPhone, "new message")
 	_ = svc.SendDocument(
-		"628123456789", []byte("%PDF-1.4"), "a.pdf", "application/pdf", "")
+		testPhone, []byte("%PDF-1.4"), "a.pdf", "application/pdf", "")
 
 	if got := out.String(); got != "" {
 		t.Errorf(
@@ -836,7 +857,7 @@ func TestDisconnectIsSafeAndAnnouncesItself(t *testing.T) {
 
 	svc, out := newTestService(t)
 
-	if p := capturePanic(svc.Disconnect); p != nil {
+	if p := testutil.CapturePanic(svc.Disconnect); p != nil {
 		t.Fatalf("Disconnect panicked with %#v", p)
 	}
 
@@ -907,7 +928,8 @@ func TestANilServiceIsNotSafe(t *testing.T) {
 	t.Run("the empty-input guard survives a nil receiver", func(t *testing.T) {
 		t.Parallel()
 
-		if p := capturePanic(func() { _ = svc.SendText("", "") }); p != nil {
+		p := testutil.CapturePanic(func() { _ = svc.SendText("", "") })
+		if p != nil {
 			t.Errorf(
 				"panicked with %#v; the guard reads no fields and should be "+
 					"reachable",
@@ -918,8 +940,8 @@ func TestANilServiceIsNotSafe(t *testing.T) {
 	t.Run("a real send does not", func(t *testing.T) {
 		t.Parallel()
 
-		p := capturePanic(func() {
-			_ = svc.SendText("628123456789", "new message")
+		p := testutil.CapturePanic(func() {
+			_ = svc.SendText(testPhone, "new message")
 		})
 		if p == nil {
 			t.Error(
@@ -1027,11 +1049,11 @@ func TestNoOpsAreDecidedBeforeTheContext(t *testing.T) {
 	if err := svc.SendTextContext(ctx, "", "a message"); err != nil {
 		t.Errorf("SendTextContext with no recipient: %v, want nil", err)
 	}
-	if err := svc.SendTextContext(ctx, "628123456789", ""); err != nil {
+	if err := svc.SendTextContext(ctx, testPhone, ""); err != nil {
 		t.Errorf("SendTextContext with no message: %v, want nil", err)
 	}
 	if err := svc.SendDocumentContext(
-		ctx, "628123456789", nil, "a.pdf", "application/pdf", ""); err != nil {
+		ctx, testPhone, nil, "a.pdf", "application/pdf", ""); err != nil {
 		t.Errorf("SendDocumentContext with no data: %v, want nil", err)
 	}
 	if got := out.String(); got != "" {
@@ -1077,9 +1099,9 @@ func TestShortcutsMatchTheirContextForms(t *testing.T) {
 		for _, c := range []struct{ phone, message string }{
 			{"", "m"},
 			{" + - ", "m"},
-			{"628123456789", ""},
+			{testPhone, ""},
 			{bad, "m"},
-			{"628123456789", "m"},
+			{testPhone, "m"},
 		} {
 			short := svc.SendText(c.phone, c.message)
 			long := svc.SendTextContext(ctx, c.phone, c.message)
@@ -1099,9 +1121,9 @@ func TestShortcutsMatchTheirContextForms(t *testing.T) {
 			data  []byte
 		}{
 			{"", pdf},
-			{"628123456789", nil},
+			{testPhone, nil},
 			{bad, pdf},
-			{"628123456789", pdf},
+			{testPhone, pdf},
 		} {
 			short := svc.SendDocument(
 				c.phone, c.data, "a.pdf", "application/pdf", "")

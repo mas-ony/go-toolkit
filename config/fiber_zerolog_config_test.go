@@ -28,10 +28,6 @@ var zerologBase = map[string]any{
 	"fiber.zerolog.fields": "status,method,latency",
 }
 
-// buildZerolog adapts NewZerologConfig to the constructor shape runRules
-// takes.
-func buildZerolog(v *viper.Viper) SectionConfig { return NewZerologConfig(v) }
-
 // fatal and panic are refused by name, because zerolog's Fatal exits and
 // Panic panics — as a REQUEST log level, either would end the process on
 // the first response in its class.
@@ -60,7 +56,7 @@ func TestParseLevel(t *testing.T) {
 // leave a class with the middleware's default and nobody the wiser.
 func TestZerologValidate(t *testing.T) {
 	t.Parallel()
-	runRules(t, zerologBase, buildZerolog, []ruleCase{
+	runRules(t, zerologBase, asSection(NewZerologConfig), []ruleCase{
 		// An empty list is not the middleware's default list; it is a
 		// request log with no fields at all.
 		{"no fields", map[string]any{

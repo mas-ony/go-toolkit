@@ -9,15 +9,7 @@ package config
 import (
 	"strings"
 	"testing"
-
-	"github.com/spf13/viper"
 )
-
-// buildRequestID adapts NewRequestIDConfig to the constructor shape
-// runRules takes.
-func buildRequestID(v *viper.Viper) SectionConfig {
-	return NewRequestIDConfig(v)
-}
 
 // Every RFC 9110 token character is accepted and nothing else is: a space,
 // a colon, a control byte or a non-ASCII rune would each split or end the
@@ -45,7 +37,7 @@ func TestIsHTTPFieldName(t *testing.T) {
 func TestRequestIDValidate(t *testing.T) {
 	t.Parallel()
 	runRules(t, map[string]any{"fiber.requestid.header": "X-Request-ID"},
-		buildRequestID, []ruleCase{
+		asSection(NewRequestIDConfig), []ruleCase{
 			{"no header", map[string]any{
 				"fiber.requestid.header": nil}, "fiber.requestid.header"},
 			{"a space in the name", map[string]any{

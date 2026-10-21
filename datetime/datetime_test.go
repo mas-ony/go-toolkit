@@ -62,6 +62,48 @@ func local(year int, month time.Month, day, hour, min, sec int) time.Time {
 	return time.Date(year, month, day, hour, min, sec, 0, testZone)
 }
 
+// decoded is the Datetime UnmarshalJSON makes of input, for a test that
+// needs the input accepted before it can assert anything else.
+func decoded(t *testing.T, input string) Datetime {
+	t.Helper()
+	var d Datetime
+	if err := d.UnmarshalJSON([]byte(input)); err != nil {
+		t.Fatalf("UnmarshalJSON(%s): %v", input, err)
+	}
+	return d
+}
+
+// layouts holds an input in every shape parseLayouts reads, written as the
+// bare string a query parameter carries, beside the instant each has to
+// mean.
+//
+// Each case is a format some real producer emits — a browser input
+// element, a JSON client, a driver that stringified a column — and the
+// expected value is written as an explicit instant rather than a re-parse
+// of the same string, so a broken layout cannot agree with a broken
+// expectation. The JSON and the text tests both read it: a date that
+// works in a request body and fails in a query string is the bug, and one
+// table is what keeps the two from drifting apart.
+var layouts = []struct {
+	name  string
+	input string
+	want  time.Time
+}{
+	{"RFC3339 UTC", "2024-03-15T10:00:00Z",
+		time.Date(2024, 3, 15, 10, 0, 0, 0, time.UTC)},
+	{"RFC3339 with offset", "2024-03-15T10:00:00+07:00",
+		local(2024, 3, 15, 10, 0, 0)},
+	{"RFC3339 nano", "2024-03-15T10:00:00.123456789Z",
+		time.Date(2024, 3, 15, 10, 0, 0, 123456789, time.UTC)},
+	{"datetime-local with seconds", "2024-03-15T10:30:45",
+		local(2024, 3, 15, 10, 30, 45)},
+	{"datetime-local without seconds", "2024-03-15T10:30",
+		local(2024, 3, 15, 10, 30, 0)},
+	{"SQL text timestamp", "2024-03-15 10:30:45",
+		local(2024, 3, 15, 10, 30, 45)},
+	{"date only", "2024-03-15", local(2024, 3, 15, 0, 0, 0)},
+}
+
 // TestMain pins time.Local before any test runs.
 //
 // This mirrors what a process is expected to do once at startup, and it is
@@ -79,46 +121,16 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
-// TestUnmarshalJSONAcceptsEveryLayout walks parseLayouts entry by entry.
-//
-// Each case is a format some real producer emits — a browser input element,
-// a JSON client, a driver that stringified a column — and the expected
-// value is written as an explicit instant rather than a re-parse of the
-// same string, so a broken layout cannot agree with a broken expectation.
+// TestUnmarshalJSONAcceptsEveryLayout walks parseLayouts entry by entry,
+// each input of layouts sent as a JSON string.
 func TestUnmarshalJSONAcceptsEveryLayout(t *testing.T) {
 	t.Parallel()
 
-	utc := func(h, m, s, ns int) time.Time {
-		return time.Date(2024, 3, 15, h, m, s, ns, time.UTC)
-	}
-
-	tests := []struct {
-		name  string
-		input string
-		want  time.Time
-	}{
-		{"RFC3339 UTC", `"2024-03-15T10:00:00Z"`, utc(10, 0, 0, 0)},
-		{"RFC3339 with offset", `"2024-03-15T10:00:00+07:00"`,
-			local(2024, 3, 15, 10, 0, 0)},
-		{"RFC3339 nano", `"2024-03-15T10:00:00.123456789Z"`,
-			utc(10, 0, 0, 123456789)},
-		{"datetime-local with seconds", `"2024-03-15T10:30:45"`,
-			local(2024, 3, 15, 10, 30, 45)},
-		{"datetime-local without seconds", `"2024-03-15T10:30"`,
-			local(2024, 3, 15, 10, 30, 0)},
-		{"SQL text timestamp", `"2024-03-15 10:30:45"`,
-			local(2024, 3, 15, 10, 30, 45)},
-		{"date only", `"2024-03-15"`, local(2024, 3, 15, 0, 0, 0)},
-	}
-
-	for _, tc := range tests {
+	for _, tc := range layouts {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			var d Datetime
-			if err := d.UnmarshalJSON([]byte(tc.input)); err != nil {
-				t.Fatalf("UnmarshalJSON(%s): %v", tc.input, err)
-			}
+			d := decoded(t, `"`+tc.input+`"`)
 			if !d.Time.Equal(tc.want) {
 				t.Errorf(
 					"instant: got %s, want %s",
@@ -140,10 +152,7 @@ func TestUnmarshalJSONAcceptsEveryLayout(t *testing.T) {
 func TestNaiveInputResolvesInLocalNotUTC(t *testing.T) {
 	t.Parallel()
 
-	var d Datetime
-	if err := d.UnmarshalJSON([]byte(`"2024-03-15"`)); err != nil {
-		t.Fatalf("UnmarshalJSON: %v", err)
-	}
+	d := decoded(t, `"2024-03-15"`)
 
 	// Midnight local.
 	want := time.Date(2024, 3, 14, 17, 0, 0, 0, time.UTC)
@@ -166,10 +175,7 @@ func TestNaiveInputResolvesInLocalNotUTC(t *testing.T) {
 func TestOffsetBearingInputKeepsItsOffset(t *testing.T) {
 	t.Parallel()
 
-	var d Datetime
-	if err := d.UnmarshalJSON([]byte(`"2024-03-15T10:00:00Z"`)); err != nil {
-		t.Fatalf("UnmarshalJSON: %v", err)
-	}
+	d := decoded(t, `"2024-03-15T10:00:00Z"`)
 
 	want := time.Date(2024, 3, 15, 10, 0, 0, 0, time.UTC)
 	if !d.Time.Equal(want) {
@@ -202,10 +208,7 @@ func TestShorterLayoutDoesNotSwallowLongerInput(t *testing.T) {
 			"parseLayouts' ordering rationale no longer holds")
 	}
 
-	var d Datetime
-	if err := d.UnmarshalJSON([]byte(`"2024-03-15T10:30:45"`)); err != nil {
-		t.Fatalf("UnmarshalJSON: %v", err)
-	}
+	d := decoded(t, `"2024-03-15T10:30:45"`)
 	if d.Time.Hour() != 10 || d.Time.Minute() != 30 || d.Time.Second() != 45 {
 		t.Errorf(
 			"got %s, want the full time preserved",
@@ -301,10 +304,7 @@ func TestParseTolerantOfSurroundingNoise(t *testing.T) {
 		t.Run(input, func(t *testing.T) {
 			t.Parallel()
 
-			var d Datetime
-			if err := d.UnmarshalJSON([]byte(input)); err != nil {
-				t.Fatalf("UnmarshalJSON(%s): %v", input, err)
-			}
+			d := decoded(t, input)
 			if !d.Time.Equal(local(2024, 3, 15, 0, 0, 0)) {
 				t.Errorf(
 					"got %s, want local midnight",
@@ -367,11 +367,7 @@ func TestMarshalJSON(t *testing.T) {
 func TestMarshalJSONDropsFractionalSeconds(t *testing.T) {
 	t.Parallel()
 
-	var d Datetime
-	err := d.UnmarshalJSON([]byte(`"2024-03-15T10:00:00.123456789Z"`))
-	if err != nil {
-		t.Fatalf("UnmarshalJSON: %v", err)
-	}
+	d := decoded(t, `"2024-03-15T10:00:00.123456789Z"`)
 	if d.Time.Nanosecond() != 123456789 {
 		t.Errorf(
 			"nanoseconds: got %d, want them preserved in memory",
@@ -410,19 +406,13 @@ func TestRoundTripIsStableAfterOnePass(t *testing.T) {
 		t.Run(in, func(t *testing.T) {
 			t.Parallel()
 
-			var first Datetime
-			if err := first.UnmarshalJSON([]byte(in)); err != nil {
-				t.Fatalf("UnmarshalJSON(%s): %v", in, err)
-			}
+			first := decoded(t, in)
 			once, err := first.MarshalJSON()
 			if err != nil {
 				t.Fatalf("MarshalJSON: %v", err)
 			}
 
-			var second Datetime
-			if err := second.UnmarshalJSON(once); err != nil {
-				t.Fatalf("re-unmarshalling %s: %v", once, err)
-			}
+			second := decoded(t, string(once))
 			twice, err := second.MarshalJSON()
 			if err != nil {
 				t.Fatalf("MarshalJSON: %v", err)
@@ -759,9 +749,9 @@ func TestValue(t *testing.T) {
 	})
 }
 
-// TestValueDoesNotShiftTheStoredDate is the regression test for the
-// off-by-one day, and it asserts against the value the DRIVER will act on
-// rather than against Value's return type.
+// TestValueDoesNotShiftTheStoredDate guards against an off-by-one day, and
+// it asserts against the value the DRIVER will act on rather than against
+// Value's return type.
 //
 // go-mssqldb sends a time.Time as DATETIMEOFFSET(7) built from the value's
 // own zone offset, and SQL Server's implicit conversion into DATETIME2 or
@@ -803,10 +793,7 @@ func TestValueDoesNotShiftTheStoredDate(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			var d Datetime
-			if err := d.UnmarshalJSON([]byte(tc.input)); err != nil {
-				t.Fatalf("UnmarshalJSON(%s): %v", tc.input, err)
-			}
+			d := decoded(t, tc.input)
 			if got := storedWallClock(d); got != tc.want {
 				t.Errorf(
 					"%s would be stored as %q, want %q",
@@ -839,10 +826,7 @@ func TestValueAgreesWithMarshalJSON(t *testing.T) {
 		t.Run(in, func(t *testing.T) {
 			t.Parallel()
 
-			var d Datetime
-			if err := d.UnmarshalJSON([]byte(in)); err != nil {
-				t.Fatalf("UnmarshalJSON(%s): %v", in, err)
-			}
+			d := decoded(t, in)
 
 			v, err := d.Value()
 			if err != nil {
@@ -947,29 +931,12 @@ func TestScanValueRoundTrip(t *testing.T) {
 // and the only way to see it is to push a non-RFC-3339 layout through the
 // text path and check it lands.
 //
-// The layouts are the same list UnmarshalJSON accepts, deliberately: a date
-// that works in a request body and fails in a query string is the bug, and
-// one shared table is what keeps the two from drifting apart.
+// The inputs are layouts, the table UnmarshalJSON is held to as well, for
+// the reason given on it.
 func TestUnmarshalTextAcceptsEveryLayout(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
-		name  string
-		input string
-		want  time.Time
-	}{
-		{"RFC3339 UTC", "2024-03-15T10:00:00Z",
-			time.Date(2024, 3, 15, 10, 0, 0, 0, time.UTC)},
-		{"datetime-local with seconds", "2024-03-15T10:30:45",
-			local(2024, 3, 15, 10, 30, 45)},
-		{"datetime-local without seconds", "2024-03-15T10:30",
-			local(2024, 3, 15, 10, 30, 0)},
-		{"SQL text timestamp", "2024-03-15 10:30:45",
-			local(2024, 3, 15, 10, 30, 45)},
-		{"date only", "2024-03-15", local(2024, 3, 15, 0, 0, 0)},
-	}
-
-	for _, tc := range tests {
+	for _, tc := range layouts {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
@@ -1018,18 +985,16 @@ func TestTextIsStricterOnABareTimeTime(t *testing.T) {
 // body or a query parameter.
 //
 // Asserting agreement rather than two separate expected values is what makes
-// this survive a change to the layout list — add a layout to parseLayouts and
-// this keeps holding without being edited, which is the point.
+// this survive a change to the layout list — a layout added to parseLayouts
+// and to layouts is checked here without this test being edited, which is
+// the point. The empty string is the one input beside them: both paths have
+// to read it as no value.
 func TestUnmarshalTextAndJSONAgree(t *testing.T) {
 	t.Parallel()
 
-	inputs := []string{
-		"2024-03-15T10:00:00Z",
-		"2024-03-15T10:30:45",
-		"2024-03-15T10:30",
-		"2024-03-15 10:30:45",
-		"2024-03-15",
-		"",
+	inputs := []string{""}
+	for _, l := range layouts {
+		inputs = append(inputs, l.input)
 	}
 
 	for _, in := range inputs {

@@ -16,6 +16,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/mas-ony/go-toolkit/config"
+	"github.com/mas-ony/go-toolkit/internal/upstream"
 	"github.com/rs/zerolog"
 )
 
@@ -53,10 +54,6 @@ const (
 // defaultFileName is what a document with a blank name is sent as. The
 // Bot API needs a name to treat a part of the request as a file at all.
 const defaultFileName = "document"
-
-// maxAnswerBytes caps how much of an answer is read. A real one is a few
-// hundred bytes, so a server that sends more is not the Bot API.
-const maxAnswerBytes = 1 << 20
 
 // formType is the content type of a text message's request.
 const formType = "application/x-www-form-urlencoded"
@@ -147,20 +144,18 @@ type answer struct {
 // outage would stop a service whose main job is something else.
 //
 // ErrNotConfigured means there is nothing to send with: cfg is nil or holds
-// no setting at all, which is what a deployment without
-// notification.telegram.* produces. Call New only when notification.channels
-// includes telegram, and treat that error as fatal there. Any other problem
-// is Validate's joined error, so a section filled in halfway fails loudly
-// instead of quietly switching the channel off.
+// no setting at all, as config.TelegramConfig.Configured reports, which is
+// what a deployment without notification.telegram.* produces. Call New only
+// when notification.channels includes telegram, and treat that error as
+// fatal there. Any other problem is Validate's joined error, so a section
+// filled in halfway fails loudly instead of quietly switching the channel
+// off. upstream.CheckSection draws that line, as it does for email.New.
 func New(cfg *config.TelegramConfig, log zerolog.Logger) (*Service, error) {
-	if cfg == nil || *cfg == (config.TelegramConfig{}) {
-		return nil, ErrNotConfigured
-	}
-	if err := cfg.Validate(); err != nil {
+	if err := upstream.CheckSection(cfg, ErrNotConfigured); err != nil {
 		return nil, err
 	}
 
-	base := strings.TrimRight(strings.TrimSpace(cfg.APIURL), "/")
+	base := upstream.TrimBase(cfg.APIURL)
 	if base == "" {
 		base = config.DefaultTelegramAPIURL
 	}
@@ -180,39 +175,48 @@ func New(cfg *config.TelegramConfig, log zerolog.Logger) (*Service, error) {
 	}, nil
 }
 
-// cause returns what a request failed on, without the *url.Error that
-// net/http wraps it in. That wrapper carries the whole URL, which here is
-// the token.
-func cause(err error) error {
-	var ue *url.Error
-	if errors.As(err, &ue) {
-		return ue.Err
+// checkSend resolves the chat a send goes to, chatID trimmed, and refuses
+// a send that is present but malformed, before any request is built.
+//
+// ok is false when there is nothing to send: the chat is empty once
+// trimmed, or the payload is, which empty reports. Both are decided before
+// anything is checked, so a send with nothing in it is a silent no-op
+// whatever the chat or the caption holds. Otherwise the chat has to be a
+// number or an @username, and value, the text or the caption as field
+// names it, has to fit the Bot API's limit for it. SendText and
+// SendDocument differ in what an empty send is and agree on the rest.
+func checkSend(
+	chatID string,
+	empty bool,
+	field, value string,
+	limit int,
+) (chat string, ok bool, err error) {
+	chat = strings.TrimSpace(chatID)
+	if chat == "" || empty {
+		return "", false, nil
 	}
-	return err
-}
-
-// stepErr names the step of the exchange err ended. When ctx has ended too
-// and err does not already say so, its error is wrapped alongside, so a
-// caller tests for context.DeadlineExceeded whichever layer noticed first.
-func stepErr(ctx context.Context, step string, err error) error {
-	err = cause(err)
-	if cerr := ctx.Err(); cerr != nil && !errors.Is(err, cerr) {
-		return fmt.Errorf("%s: %w: %w", step, cerr, err)
+	if !chatPattern.MatchString(chat) {
+		return "", false, fmt.Errorf("%w: %q", ErrInvalidChatID, chatID)
 	}
-	return fmt.Errorf("%s: %w", step, err)
+	if n := utf8.RuneCountInString(value); n > limit {
+		return "", false, fmt.Errorf("%w: the %s is %d characters "+
+			"against a limit of %d", ErrTooLong, field, n, limit)
+	}
+	return chat, true, nil
 }
 
 // scrub returns err unchanged unless its text carries the token. That can
 // happen only if something between here and the API put the request URL
-// into an answer or an error, and then the token is masked out of the text.
-// The chain under it is dropped, because nothing in it can be trusted to be
-// clean either.
+// into an answer or an error, and then the token is masked out of the
+// text with upstream.Masked, the mark every other credential is replaced
+// with. The chain under it is dropped, because nothing in it can be
+// trusted to be clean either.
 func (s *Service) scrub(err error) error {
 	msg := err.Error()
 	if !strings.Contains(msg, s.token) {
 		return err
 	}
-	return errors.New(strings.ReplaceAll(msg, s.token, "***"))
+	return errors.New(strings.ReplaceAll(msg, s.token, upstream.Masked))
 }
 
 // decode turns one answer into the message id it carries or the refusal it
@@ -234,7 +238,7 @@ func decode(status int, raw []byte) (int64, error) {
 
 	var a answer
 	if err := json.Unmarshal(raw, &a); err != nil {
-		if status/100 != 2 {
+		if !upstream.IsSuccess(status) {
 			return 0, &APIError{
 				Code:        status,
 				Description: http.StatusText(status),
@@ -260,7 +264,7 @@ func decode(status int, raw []byte) (int64, error) {
 			RetryAfter: time.Duration(a.Parameters.RetryAfter) *
 				time.Second,
 		}
-	case status/100 != 2:
+	case !upstream.IsSuccess(status):
 		return 0, &APIError{Code: status, Description: http.StatusText(status)}
 	}
 
@@ -289,19 +293,23 @@ func (s *Service) roundTrip(
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
 		s.base+"/bot"+s.token+"/"+method, bytes.NewReader(body))
 	if err != nil {
-		return 0, stepErr(ctx, "request", err)
+		return 0, upstream.StepErr(ctx, "request", err)
 	}
 	req.Header.Set("Content-Type", contentType)
 
 	resp, err := s.client.Do(req)
 	if err != nil {
-		return 0, stepErr(ctx, "request", err)
+		return 0, upstream.StepErr(ctx, "request", err)
 	}
 	defer resp.Body.Close()
 
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxAnswerBytes))
+	// No more of the answer is read than upstream.MaxAnswerBytes. A real
+	// one is a few hundred bytes, so a server that sends more is not the
+	// Bot API.
+	raw, err := io.ReadAll(io.LimitReader(resp.Body,
+		upstream.MaxAnswerBytes))
 	if err != nil {
-		return 0, stepErr(ctx, "answer", err)
+		return 0, upstream.StepErr(ctx, "answer", err)
 	}
 	return decode(resp.StatusCode, raw)
 }
@@ -372,16 +380,10 @@ func (s *Service) SendText(ctx context.Context, chatID, text string) error {
 	if s == nil {
 		return ErrNotConfigured
 	}
-	chat := strings.TrimSpace(chatID)
-	if chat == "" || strings.TrimSpace(text) == "" {
-		return nil
-	}
-	if !chatPattern.MatchString(chat) {
-		return fmt.Errorf("%w: %q", ErrInvalidChatID, chatID)
-	}
-	if n := utf8.RuneCountInString(text); n > MaxTextRunes {
-		return fmt.Errorf("%w: the text is %d characters against a limit "+
-			"of %d", ErrTooLong, n, MaxTextRunes)
+	chat, ok, err := checkSend(chatID, strings.TrimSpace(text) == "",
+		"text", text, MaxTextRunes)
+	if err != nil || !ok {
+		return err
 	}
 
 	form := url.Values{"chat_id": {chat}, "text": {text}}
@@ -427,16 +429,10 @@ func (s *Service) SendDocument(
 	if s == nil {
 		return ErrNotConfigured
 	}
-	chat := strings.TrimSpace(chatID)
-	if chat == "" || len(data) == 0 {
-		return nil
-	}
-	if !chatPattern.MatchString(chat) {
-		return fmt.Errorf("%w: %q", ErrInvalidChatID, chatID)
-	}
-	if n := utf8.RuneCountInString(caption); n > MaxCaptionRunes {
-		return fmt.Errorf("%w: the caption is %d characters against a "+
-			"limit of %d", ErrTooLong, n, MaxCaptionRunes)
+	chat, ok, err := checkSend(chatID, len(data) == 0,
+		"caption", caption, MaxCaptionRunes)
+	if err != nil || !ok {
+		return err
 	}
 
 	name := strings.TrimSpace(filename)

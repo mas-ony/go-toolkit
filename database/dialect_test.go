@@ -19,10 +19,15 @@ import (
 	"testing"
 
 	"github.com/jmoiron/sqlx"
+	"github.com/mas-ony/go-toolkit/internal/testutil"
 )
 
 // dialects lists every grammar, for tests that assert something of both.
 var dialects = []Dialect{DialectMySQL, DialectSQLServer}
+
+// nonGrammars are Dialect values that name no grammar: the zero value, a
+// negative one, and the first past the last constant.
+var nonGrammars = []Dialect{0, -1, DialectSQLServer + 1}
 
 // dialectHelpers pairs each package-level helper with the method it wraps,
 // as two closures producing the same string from the same arguments.
@@ -76,24 +81,22 @@ var dialectHelpers = []struct {
 	},
 }
 
-// mustPanic reports an error unless f panics.
+// mustPanic reports an error unless f panics. testutil.CapturePanic does
+// the recovering.
 func mustPanic(t *testing.T, name string, f func()) {
 	t.Helper()
-	defer func() {
-		if recover() == nil {
-			t.Errorf("%s did not panic", name)
-		}
-	}()
-	f()
+	if testutil.CapturePanic(f) == nil {
+		t.Errorf("%s did not panic", name)
+	}
 }
 
 // withDialect selects d until the test ends and then restores the previous
 // selection, including no selection. The selection is package-wide, so a
-// test that calls it must not run in parallel.
+// test that calls it must not run in parallel. withoutDialect arranges the
+// restore, and SetDialect then replaces the cleared selection with d.
 func withDialect(t *testing.T, d Dialect) {
 	t.Helper()
-	prev := selectedDialect.Load()
-	t.Cleanup(func() { selectedDialect.Store(prev) })
+	withoutDialect(t)
 	SetDialect(d)
 }
 
@@ -174,7 +177,7 @@ func TestHelpersPanicWithoutDialect(t *testing.T) {
 // it does.
 func TestSetDialectRejectsInvalidValues(t *testing.T) {
 	withoutDialect(t)
-	for _, d := range []Dialect{0, -1, DialectSQLServer + 1} {
+	for _, d := range nonGrammars {
 		mustPanic(t, "SetDialect("+d.String()+")", func() { SetDialect(d) })
 	}
 	if got := selectedDialect.Load(); got != 0 {
@@ -451,7 +454,7 @@ func TestDialectMethodsNeedNoSelection(t *testing.T) {
 // RECEIVER — which is why a dialect is selected first here.
 func TestDialectMethodsPanicOnANonGrammar(t *testing.T) {
 	withDialect(t, DialectMySQL)
-	for _, d := range []Dialect{0, -1, DialectSQLServer + 1} {
+	for _, d := range nonGrammars {
 		for _, h := range dialectHelpers {
 			mustPanic(t, h.name+" on "+d.String(),
 				func() { _ = h.method(d) })

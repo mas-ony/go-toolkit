@@ -155,8 +155,8 @@ func uses1904(f *excelize.File) bool {
 // mergedValue returns the value of the merged block covering a cell, or
 // "" when the cell is not part of one.
 func (w *File) mergedValue(row int, col string) string {
-	idx, err := excelize.ColumnNameToNumber(col)
-	if err != nil {
+	idx, ok := ColumnIndex(col)
+	if !ok {
 		return ""
 	}
 	for _, m := range w.merges {
@@ -288,8 +288,9 @@ func mergedRanges(refs []string, rows [][]string) []mergedRange {
 	return out
 }
 
-// closeFailed closes what excelize returned beside an error, which can
-// be a workbook with temporary files of its own.
+// closeFailed closes a workbook that is not going to be handed out: what
+// excelize returned beside an error, which can be a workbook with
+// temporary files of its own, or one load read and then refused.
 func closeFailed(f *excelize.File) {
 	if f != nil {
 		_ = f.Close()
@@ -352,6 +353,36 @@ func readRows(f *excelize.File, sheet string) ([][]string, int, error) {
 	return rows[:last], reached, nil
 }
 
+// openPath is Open without the path its errors lead with, which Open puts
+// in front of every one of them, so no return here can leave it out.
+func openPath(path string, layout Layout) (*File, error) {
+	src, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = src.Close() }()
+
+	info, err := src.Stat()
+	if err != nil {
+		return nil, err
+	}
+	arc, err := inspect(src, info.Size())
+	if err != nil {
+		return nil, err
+	}
+	f, err := excelize.OpenFile(path)
+	if err != nil {
+		closeFailed(f)
+		return nil, err
+	}
+
+	dir, err := filepath.Abs(filepath.Dir(path))
+	if err != nil {
+		dir = filepath.Dir(path)
+	}
+	return load(f, arc, layout, dir)
+}
+
 // load reads the sheet the layout names out of an opened workbook, and
 // holds the reading against what the archive says of that sheet. It
 // closes f when it fails.
@@ -361,25 +392,24 @@ func load(
 	if layout.Sheet == "" {
 		names := f.GetSheetList()
 		if len(names) == 0 {
-			_ = f.Close()
-			return nil, fmt.Errorf("%w: it holds no sheet",
-				ErrNotWorkbook)
+			closeFailed(f)
+			return nil, errNoSheet
 		}
 		layout.Sheet = names[0]
 	}
 
 	rows, reached, err := readRows(f, layout.Sheet)
 	if err != nil {
-		_ = f.Close()
+		closeFailed(f)
 		return nil, fmt.Errorf("reading sheet %q: %w", layout.Sheet, err)
 	}
 	last, merges, err := arc.scan(layout.Sheet)
 	if err != nil {
-		_ = f.Close()
+		closeFailed(f)
 		return nil, fmt.Errorf("reading sheet %q: %w", layout.Sheet, err)
 	}
 	if last > reached {
-		_ = f.Close()
+		closeFailed(f)
 		return nil, &TruncatedError{
 			Sheet: layout.Sheet, Read: reached, Last: last}
 	}
@@ -441,11 +471,28 @@ func (w *File) SheetName() string { return w.layout.Sheet }
 // genuinely has thirteen entries and asking for Y must yield "" rather
 // than panic.
 func (w *File) Cell(row int, col string) string {
-	idx, err := excelize.ColumnNameToNumber(col)
-	if err != nil {
+	idx, ok := ColumnIndex(col)
+	if !ok {
 		return ""
 	}
 	return cellAt(w.rows, row, idx)
+}
+
+// ColumnIndex returns the 1-based number of a column letter, "A" being 1,
+// in either letter case, and false for text that names no column a sheet
+// can have: anything but letters, or a column past XFD.
+//
+// It is the one reading of a letter in this package. Cell and Caption
+// look a column up through it, so a letter it refuses reads as an empty
+// cell on every row, and importer's Table.Validate holds a column table
+// to it for exactly that reason.
+//
+// The index is checked as well as the error. excelize's parser does not
+// bound the length of the letters it sums, so a long enough run overflows
+// int and can come back negative with no error, which names no column.
+func ColumnIndex(col string) (int, bool) {
+	idx, err := excelize.ColumnNameToNumber(col)
+	return idx, err == nil && idx >= 1
 }
 
 // Error renders every mismatch, one per line.
@@ -658,31 +705,7 @@ func ColumnsFromA(captions ...string) []Column {
 // whoever sent the workbook is the error errors.Is or errors.As finds
 // inside, and not the message around it.
 func Open(path string, layout Layout) (*File, error) {
-	src, err := os.Open(path)
-	if err != nil {
-		return nil, fmt.Errorf("opening %s: %w", path, err)
-	}
-	defer func() { _ = src.Close() }()
-
-	info, err := src.Stat()
-	if err != nil {
-		return nil, fmt.Errorf("opening %s: %w", path, err)
-	}
-	arc, err := inspect(src, info.Size())
-	if err != nil {
-		return nil, fmt.Errorf("opening %s: %w", path, err)
-	}
-	f, err := excelize.OpenFile(path)
-	if err != nil {
-		closeFailed(f)
-		return nil, fmt.Errorf("opening %s: %w", path, err)
-	}
-
-	dir, err := filepath.Abs(filepath.Dir(path))
-	if err != nil {
-		dir = filepath.Dir(path)
-	}
-	w, err := load(f, arc, layout, dir)
+	w, err := openPath(path, layout)
 	if err != nil {
 		return nil, fmt.Errorf("opening %s: %w", path, err)
 	}

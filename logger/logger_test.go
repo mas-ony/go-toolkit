@@ -226,7 +226,8 @@ func TestNonDevelopmentEmitsStructuredJSON(t *testing.T) {
 
 // TestLevelFloorPerEnvironment states the two levels directly, which is both
 // the clearest form of the assertion and the one that still holds if the
-// output format ever changes.
+// output format ever changes. Level is held to the same table, since a
+// check that asks it is only right while it answers what New applies.
 func TestLevelFloorPerEnvironment(t *testing.T) {
 	t.Parallel()
 
@@ -247,6 +248,9 @@ func TestLevelFloorPerEnvironment(t *testing.T) {
 				tc.env,
 				got,
 				tc.want)
+		}
+		if got := Level(tc.env); got != tc.want {
+			t.Errorf("Level(%q): got %v, want %v", tc.env, got, tc.want)
 		}
 	}
 }

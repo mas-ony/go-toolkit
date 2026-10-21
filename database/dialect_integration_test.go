@@ -2,20 +2,21 @@
 
 package database
 
-// The shared harness for every *_integration_test.go file in this package,
+// The harness every *_integration_test.go file in this package builds on,
 // plus the integration tests for dialect.go.
 //
 // Each test runs once per engine whose DSN is set and skips when neither
-// is:
+// is. The variables, and the loop that reads them, are dbtest's, which the
+// datetime suite runs on as well; what this file adds is the grammar each
+// engine selects and a scratch table whose name has to be quoted:
 //
 //	DB_TEST_MYSQL_DSN
 //		user:pass@tcp(host:3306)/scratch?parseTime=true&loc=Asia%2FJakarta
 //	DB_TEST_SQLSERVER_DSN
 //		sqlserver://user:pass@host?database=scratch&timezone=Asia%2FJakarta
 //
-// The zone parameters are for the datetime package, which reads the same
-// variables and needs them; this suite passes with or without them. See
-// the package documentation.
+// The zone parameters are for the datetime package, which needs them; this
+// suite passes with or without them. See the package documentation.
 //
 //	go test -tags integration -run Integration ./database
 //
@@ -33,16 +34,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"reflect"
 	"sort"
-	"sync/atomic"
 	"testing"
-	"time"
 
-	_ "github.com/go-sql-driver/mysql"
 	"github.com/jmoiron/sqlx"
-	_ "github.com/microsoft/go-mssqldb"
+	"github.com/mas-ony/go-toolkit/internal/testutil/dbtest"
 )
 
 // labelRow is one row of the identity fixture, scanned by column name.
@@ -51,17 +48,30 @@ type labelRow struct {
 	Label string `db:"label"`
 }
 
-// tableSeq keeps scratch table names unique within one run.
-var tableSeq atomic.Int64
+// selectDialect selects the grammar e's driver maps to until the test
+// ends.
+func selectDialect(t *testing.T, e dbtest.Engine) {
+	t.Helper()
+	d, err := ParseDialect(e.Driver)
+	if err != nil {
+		t.Fatal(err)
+	}
+	withDialect(t, d)
+}
 
-// integrationEngines maps each grammar to its driver name and DSN variable.
-var integrationEngines = []struct {
-	dialect Dialect
-	driver  string
-	dsnEnv  string
-}{
-	{DialectMySQL, "mysql", "DB_TEST_MYSQL_DSN"},
-	{DialectSQLServer, "sqlserver", "DB_TEST_SQLSERVER_DSN"},
+// eachEngine runs fn as a subtest for every engine whose DSN variable is
+// set, with that engine's grammar selected, and skips t when none is.
+// forEachEngine and forEachEngineConfig are this with what each hands its
+// own fn: an open connection, or a config pair to open one from.
+func eachEngine(
+	t *testing.T,
+	fn func(t *testing.T, e dbtest.Engine, dsn string),
+) {
+	t.Helper()
+	dbtest.Each(t, func(t *testing.T, e dbtest.Engine, dsn string) {
+		selectDialect(t, e)
+		fn(t, e, dsn)
+	})
 }
 
 // mustExec runs each statement and stops the test at the first error.
@@ -87,36 +97,18 @@ func onEngine(mysql, sqlserver string) string {
 // it doubles as a check that a quoted identifier works in DDL and DML.
 func scratchTable(t *testing.T, db *sqlx.DB, base, ddl string) string {
 	t.Helper()
-	name := QuoteIdent(fmt.Sprintf("dialect %s`] %d_%d",
-		base, time.Now().UnixNano()%1e9, tableSeq.Add(1)))
-	mustExec(t, db, fmt.Sprintf(ddl, name))
-	t.Cleanup(func() { _, _ = db.Exec("DROP TABLE " + name) })
-	return name
+	name := QuoteIdent(dbtest.Unique("dialect " + base + "`] "))
+	return dbtest.ScratchTable(t, db, name, ddl)
 }
 
 // forEachEngine runs fn as a subtest for every engine with a DSN, with that
 // engine's grammar selected and a connection open.
 func forEachEngine(t *testing.T, fn func(t *testing.T, db *sqlx.DB)) {
-	ran := false
-	for _, e := range integrationEngines {
-		dsn := os.Getenv(e.dsnEnv)
-		if dsn == "" {
-			continue
-		}
-		ran = true
-		t.Run(e.dialect.String(), func(t *testing.T) {
-			db, err := sqlx.Connect(e.driver, dsn)
-			if err != nil {
-				t.Fatalf("connect: %v", err)
-			}
-			t.Cleanup(func() { _ = db.Close() })
-			withDialect(t, e.dialect)
-			fn(t, db)
-		})
-	}
-	if !ran {
-		t.Skip("no DB_TEST_*_DSN variable is set")
-	}
+	t.Helper()
+	dbtest.ForEach(t, func(t *testing.T, e dbtest.Engine, db *sqlx.DB) {
+		selectDialect(t, e)
+		fn(t, db)
+	})
 }
 
 // InsertReturningID returns each generated key on both engines, including
@@ -139,8 +131,7 @@ func TestIntegrationInsertReturningID(t *testing.T) {
 			// OUTPUT without INTO, so the insert has to work with one.
 			// MySQL has no such rule, and creating a trigger there needs
 			// SUPER when binary logging is on, so it is skipped.
-			trigger := QuoteIdent(fmt.Sprintf("dialect_trg_%d",
-				time.Now().UnixNano()%1e9))
+			trigger := QuoteIdent(dbtest.Unique("dialect_trg_"))
 			mustExec(t, db, "CREATE TRIGGER "+trigger+" ON "+table+
 				" AFTER INSERT AS SET NOCOUNT ON;")
 		}

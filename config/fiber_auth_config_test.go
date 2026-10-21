@@ -13,9 +13,6 @@ import (
 	"github.com/spf13/viper"
 )
 
-// buildAuth adapts NewAuthConfig to the constructor shape runRules takes.
-func buildAuth(v *viper.Viper) SectionConfig { return NewAuthConfig(v) }
-
 // The key is optional. An absent one reads as an empty Mode, which selects
 // no authentication rather than either mechanism, and validates clean.
 func TestAuthModeIsOptional(t *testing.T) {
@@ -66,8 +63,8 @@ func TestAuthBranches(t *testing.T) {
 // the key out, and the error says so.
 func TestAuthValidate(t *testing.T) {
 	t.Parallel()
-	runRules(t, map[string]any{"fiber.auth.mode": "session"}, buildAuth,
-		[]ruleCase{
+	runRules(t, map[string]any{"fiber.auth.mode": "session"},
+		asSection(NewAuthConfig), []ruleCase{
 			{"jwt", map[string]any{"fiber.auth.mode": "jwt"}, ""},
 			{"absent", map[string]any{"fiber.auth.mode": nil}, ""},
 			{"empty", map[string]any{"fiber.auth.mode": ""}, ""},

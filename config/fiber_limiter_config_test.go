@@ -10,8 +10,6 @@ package config
 import (
 	"testing"
 	"time"
-
-	"github.com/spf13/viper"
 )
 
 // limiterBase is a configuration the limiter section accepts, which each
@@ -22,16 +20,12 @@ var limiterBase = map[string]any{
 	"fiber.limiter.strategy":   StrategyFixed,
 }
 
-// buildLimiter adapts NewLimiterConfig to the constructor shape runRules
-// takes.
-func buildLimiter(v *viper.Viper) SectionConfig { return NewLimiterConfig(v) }
-
 // TestLimiterValidate holds the section's rules. Each one exists because the
 // middleware would otherwise substitute a value of its own — a 1m window, a
 // max of 5, a fixed strategy — that neither config.yaml nor the log shows.
 func TestLimiterValidate(t *testing.T) {
 	t.Parallel()
-	runRules(t, limiterBase, buildLimiter, []ruleCase{
+	runRules(t, limiterBase, asSection(NewLimiterConfig), []ruleCase{
 		{"no expiration", map[string]any{
 			"fiber.limiter.expiration": nil}, "fiber.limiter.expiration"},
 		// Below a second the window truncates to zero whole seconds, and

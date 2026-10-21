@@ -30,13 +30,14 @@ package request
 import (
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/gofiber/fiber/v3"
+	"github.com/mas-ony/go-toolkit/internal/testutil"
+	"github.com/mas-ony/go-toolkit/internal/testutil/fibertest"
 )
 
 // harness is one application on a real port, plus a client that reuses
@@ -59,28 +60,6 @@ type capture struct {
 // appears once a buffer is handed to a SECOND request.
 const requests = 200
 
-// waitReady covers the gap between Listen returning and the serving
-// goroutine being scheduled.
-func (h *harness) waitReady(t *testing.T) {
-	t.Helper()
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		resp, err := h.client.Get(h.base + "/ready")
-		if err == nil {
-			_, _ = io.Copy(io.Discard, resp.Body)
-			_ = resp.Body.Close()
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatal("the application never became reachable")
-}
-
-// ready registers the endpoint waitReady polls.
-func ready(app *fiber.App) {
-	app.Get("/ready", func(c fiber.Ctx) error { return c.SendString("ok") })
-}
-
 // serve starts app on a loopback port and returns a harness for it.
 //
 // Keep-alive is left on, since it is what makes the framework reuse a
@@ -88,27 +67,17 @@ func ready(app *fiber.App) {
 // early rather than after hundreds of requests.
 func serve(t *testing.T, app *fiber.App) *harness {
 	t.Helper()
-
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	go func() { _ = app.Listener(ln) }()
-
 	h := &harness{
-		base: "http://" + ln.Addr().String(),
+		base: fibertest.Serve(t, app),
 		app:  app,
 		client: &http.Client{
 			Timeout:   5 * time.Second,
 			Transport: &http.Transport{MaxIdleConnsPerHost: 4},
 		},
 	}
-	t.Cleanup(func() {
-		h.client.CloseIdleConnections()
-		_ = app.Shutdown()
-	})
-
-	h.waitReady(t)
+	// Cleanups run last first, so the idle connections close before the
+	// shutdown Serve registered.
+	t.Cleanup(h.client.CloseIdleConnections)
 	return h
 }
 
@@ -166,7 +135,6 @@ func TestIntegrationStringPtrSurvivesBufferReuse(t *testing.T) {
 	var held capture
 
 	app := fiber.New()
-	ready(app)
 	app.Get("/c", func(c fiber.Ctx) error {
 		if p := StringPtr(c, "code"); p != nil {
 			held.add(*p)
@@ -192,7 +160,6 @@ func TestIntegrationColsSurviveBufferReuse(t *testing.T) {
 	var held capture
 
 	app := fiber.New()
-	ready(app)
 	app.Get("/c", func(c fiber.Ctx) error {
 		cols := Cols(c)
 		if len(cols) == 0 {
@@ -221,7 +188,6 @@ func TestIntegrationSortColumnsSurviveBufferReuse(t *testing.T) {
 	var held capture
 
 	app := fiber.New()
-	ready(app)
 	app.Get("/c", func(c fiber.Ctx) error {
 		fields := Sort(c)
 		if len(fields) == 0 {
@@ -257,7 +223,6 @@ func TestIntegrationValueHelpersNeedNoClone(t *testing.T) {
 	var held []snap
 
 	app := fiber.New()
-	ready(app)
 	app.Get("/c", func(c fiber.Ctx) error {
 		s := snap{
 			ids:  IDs(c, "ids"),
@@ -308,14 +273,13 @@ func TestIntegrationMaxLimitAppliesAcrossRequests(t *testing.T) {
 	// Not parallel, and restored on the way out: these are the
 	// process-wide variables doc.go warns about, and leaving them changed
 	// would quietly rewrite what every later test expects.
-	oldMax, oldDefault := MaxLimit, DefaultLimit
-	t.Cleanup(func() { MaxLimit, DefaultLimit = oldMax, oldDefault })
+	testutil.Set(t, &MaxLimit, MaxLimit)
+	testutil.Set(t, &DefaultLimit, DefaultLimit)
 
 	var mu sync.Mutex
 	var limit int
 
 	app := fiber.New()
-	ready(app)
 	app.Get("/p", func(c fiber.Ctx) error {
 		mu.Lock()
 		_, limit = Page(c)

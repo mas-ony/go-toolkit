@@ -31,9 +31,14 @@
 //
 // Machinery no single section owns lives in section.go, and two helpers
 // live beside it: splitlist.go, the one reader every list-valued key goes
-// through, and redact.go, which fiber.client uses to quote its base URL
-// without the credential it may carry. Each is a file of its own so that
-// no section file holds anything but its own section.
+// through, and checks.go, the rules several sections apply to keys of
+// their own — a duration of at least a second, a send timeout, a secret
+// shown only as set or not. Each is a file of its own so that no section
+// file holds anything but its own section. A URL key is checked and
+// quoted by internal/upstream instead, the code httpclient checks a base
+// URL with at run time, so the two cannot disagree about what a usable
+// base URL is. A port key is held to upstream.CheckPort for the same
+// reason: database.New refuses database.port by the same range.
 //
 // # How a key's environment spelling is derived
 //
@@ -45,6 +50,9 @@
 //	app.port                    APP_PORT
 //	database.max_open_conns     DATABASE_MAX_OPEN_CONNS
 //	fiber.limiter.max           FIBER_LIMITER_MAX
+//
+// EnvName returns that spelling for any key, so code that has to name a
+// variable asks for it rather than spelling the rule out again.
 //
 // That only holds if the Viper instance was built with an underscore key
 // replacer and AutomaticEnv, which NewViper does and nothing else in this

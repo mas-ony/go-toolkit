@@ -10,8 +10,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/spf13/viper"
 )
 
 // jwtSecret is a 64-character hex string, the shape "openssl rand -hex 32"
@@ -26,15 +24,12 @@ var jwtBase = map[string]any{
 	"fiber.jwt.expiry": "15m",
 }
 
-// buildJWT adapts NewJWTConfig to the constructor shape runRules takes.
-func buildJWT(v *viper.Viper) SectionConfig { return NewJWTConfig(v) }
-
 // TestJWTValidate holds the section's rules: both keys required, the
 // secret at least 32 bytes, and the expiry at least a second, which is
 // where a bare number and a negative value both land.
 func TestJWTValidate(t *testing.T) {
 	t.Parallel()
-	runRules(t, jwtBase, buildJWT, []ruleCase{
+	runRules(t, jwtBase, asSection(NewJWTConfig), []ruleCase{
 		{"no secret", map[string]any{
 			"fiber.jwt.secret": nil}, "fiber.jwt.secret"},
 		{"a 31-byte secret", map[string]any{

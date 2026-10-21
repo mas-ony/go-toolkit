@@ -21,8 +21,9 @@ import (
 	"github.com/mas-ony/go-toolkit/database"
 )
 
-// probe sends one GET through an app whose only route calls fn with the
-// request context, and returns the response.
+// probe sends one GET through an app whose two routes, /items and
+// /items/:id, both call fn with the request context, and returns the
+// response.
 func probe(t *testing.T, target string, fn func(c fiber.Ctx)) *http.Response {
 	t.Helper()
 	app := fiber.New()
@@ -41,7 +42,7 @@ func probe(t *testing.T, target string, fn func(c fiber.Ctx)) *http.Response {
 	return resp
 }
 
-// badRequest reports the code and message of a *fiber.Error, or ("", 0) for
+// badRequest reports the code and message of a *fiber.Error, or (0, "") for
 // anything else.
 func badRequest(err error) (int, string) {
 	var fe *fiber.Error
@@ -251,23 +252,6 @@ func TestCols(t *testing.T) {
 				t.Errorf("%s: Cols = %v, want %v", target, got, want)
 			}
 		})
-	}
-}
-
-// splitList trims each piece and drops the empty ones.
-func TestSplitList(t *testing.T) {
-	cases := map[string][]string{
-		"":         nil,
-		"   ":      nil,
-		"a":        {"a"},
-		" a , b ":  {"a", "b"},
-		",a,,b,":   {"a", "b"},
-		"a:desc,b": {"a:desc", "b"},
-	}
-	for raw, want := range cases {
-		if got := splitList(raw); !reflect.DeepEqual(got, want) {
-			t.Errorf("splitList(%q) = %v, want %v", raw, got, want)
-		}
 	}
 }
 

@@ -41,62 +41,23 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/mas-ony/go-toolkit/internal/testutil"
 )
-
-// requireUnprivileged skips when permission bits will not bite.
-func requireUnprivileged(t *testing.T) {
-	t.Helper()
-	if os.Geteuid() == 0 {
-		t.Skip("running as root: a mode-000 directory is still readable")
-	}
-}
-
-// caseSensitiveDir reports whether dir distinguishes two names that differ
-// only in case, by asking the filesystem rather than by guessing from
-// runtime.GOOS — a Linux box can mount a case-insensitive volume and a Mac
-// can format a case-sensitive one.
-func caseSensitiveDir(t *testing.T, dir string) bool {
-	t.Helper()
-	probe := filepath.Join(dir, ".case-probe")
-	if err := os.WriteFile(probe, []byte("x"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = os.Remove(probe) }()
-
-	_, err := os.Stat(filepath.Join(dir, ".CASE-PROBE"))
-	return err != nil
-}
-
-// writeFile creates dir/rel with some content and returns its full path.
-func writeFile(t *testing.T, dir, rel string) string {
-	t.Helper()
-	path := filepath.Join(dir, rel)
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	err := os.WriteFile(path, []byte("content of "+rel), 0o644)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return path
-}
 
 // The premise of the whole package: a directory carrying the same stem in
 // two cases holds two files, and Lookup must refuse to choose between
 // them rather than returning whichever the walk reached first.
 func TestIntegrationCaseVariantsAreTwoFiles(t *testing.T) {
 	dir := t.TempDir()
-	if !caseSensitiveDir(t, dir) {
+	if !testutil.CaseSensitiveDir(t, dir) {
 		t.Skip("this filesystem folds case; both spellings are one file")
 	}
 
-	writeFile(t, dir, "1.pdf")
-	writeFile(t, dir, "1.PDF")
+	write(t, dir, "1.pdf")
+	write(t, dir, "1.PDF")
 
-	idx, err := NewIndex(dir, false)
-	if err != nil {
-		t.Fatalf("NewIndex: %v", err)
-	}
+	idx := indexOf(t, dir, false)
 	if got := idx.Count(); got != 2 {
 		t.Fatalf("Count = %d, want 2", got)
 	}
@@ -119,17 +80,14 @@ func TestIntegrationCaseVariantsAreTwoFiles(t *testing.T) {
 // macOS developer actually runs, and it must not error.
 func TestIntegrationCaseFoldingFilesystemResolves(t *testing.T) {
 	dir := t.TempDir()
-	if caseSensitiveDir(t, dir) {
+	if testutil.CaseSensitiveDir(t, dir) {
 		t.Skip("this filesystem distinguishes case")
 	}
 
-	writeFile(t, dir, "1.pdf")
-	writeFile(t, dir, "1.PDF") // the same file, rewritten
+	write(t, dir, "1.pdf")
+	write(t, dir, "1.PDF") // the same file, rewritten
 
-	idx, err := NewIndex(dir, false)
-	if err != nil {
-		t.Fatalf("NewIndex: %v", err)
-	}
+	idx := indexOf(t, dir, false)
 	if got := idx.Count(); got != 1 {
 		t.Fatalf("Count = %d, want 1 on a case-folding filesystem", got)
 	}
@@ -144,19 +102,13 @@ func TestIntegrationCaseFoldingFilesystemResolves(t *testing.T) {
 // only the references it would have served, so the walk continues and the
 // rest of the archive still indexes.
 func TestIntegrationUnreadableSubdirectoryIsSkipped(t *testing.T) {
-	requireUnprivileged(t)
+	testutil.RequireUnprivileged(t)
 
 	dir := t.TempDir()
-	writeFile(t, dir, "visible.pdf")
-	writeFile(t, dir, "locked/hidden.pdf")
+	write(t, dir, "visible.pdf")
+	write(t, dir, "locked/hidden.pdf")
 
-	locked := filepath.Join(dir, "locked")
-	if err := os.Chmod(locked, 0o000); err != nil {
-		t.Fatalf("chmod: %v", err)
-	}
-	// Restore before TempDir's own cleanup, which cannot remove a
-	// directory it is not allowed to read.
-	t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
+	testutil.Chmod(t, filepath.Join(dir, "locked"), 0o000)
 
 	idx, err := NewIndex(dir, true)
 	if err != nil {
@@ -184,15 +136,12 @@ func TestIntegrationUnreadableSubdirectoryIsSkipped(t *testing.T) {
 // NewIndex's opening check — it is the walk callback's path == dir branch
 // that catches it, and this is the only test that reaches that branch.
 func TestIntegrationUnreadableRootFailsTheCall(t *testing.T) {
-	requireUnprivileged(t)
+	testutil.RequireUnprivileged(t)
 
 	parent := t.TempDir()
 	root := filepath.Join(parent, "archive")
-	writeFile(t, root, "1.pdf")
-	if err := os.Chmod(root, 0o000); err != nil {
-		t.Fatalf("chmod: %v", err)
-	}
-	t.Cleanup(func() { _ = os.Chmod(root, 0o755) })
+	write(t, root, "1.pdf")
+	testutil.Chmod(t, root, 0o000)
 
 	idx, err := NewIndex(root, false)
 	if err == nil {
@@ -212,16 +161,14 @@ func TestIntegrationSymlinkNamedLikeADocumentIsIndexed(t *testing.T) {
 	dir := t.TempDir()
 	outside := t.TempDir()
 
-	target := writeFile(t, outside, "real.pdf")
+	target := testutil.WriteFile(t, filepath.Join(outside, "real.pdf"),
+		[]byte("content of real.pdf"))
 	link := filepath.Join(dir, "1.pdf")
 	if err := os.Symlink(target, link); err != nil {
 		t.Skipf("symlinks unavailable here: %v", err)
 	}
 
-	idx, err := NewIndex(dir, false)
-	if err != nil {
-		t.Fatalf("NewIndex: %v", err)
-	}
+	idx := indexOf(t, dir, false)
 	if got := idx.Count(); got != 1 {
 		t.Fatalf("Count = %d, want 1", got)
 	}
@@ -247,17 +194,14 @@ func TestIntegrationSymlinkNamedLikeADocumentIsIndexed(t *testing.T) {
 func TestIntegrationSymlinkedDirectoryIsNotDescended(t *testing.T) {
 	dir := t.TempDir()
 	outside := t.TempDir()
-	writeFile(t, outside, "2.pdf")
+	write(t, outside, "2.pdf")
 
 	if err := os.Symlink(outside, filepath.Join(dir, "linked")); err != nil {
 		t.Skipf("symlinks unavailable here: %v", err)
 	}
-	writeFile(t, dir, "1.pdf")
+	write(t, dir, "1.pdf")
 
-	idx, err := NewIndex(dir, true)
-	if err != nil {
-		t.Fatalf("NewIndex: %v", err)
-	}
+	idx := indexOf(t, dir, true)
 	if got := idx.Count(); got != 1 {
 		t.Errorf("Count = %d, want 1 — the linked directory was "+
 			"descended", got)
@@ -273,17 +217,14 @@ func TestIntegrationSymlinkedDirectoryIsNotDescended(t *testing.T) {
 // change after the walk.
 func TestIntegrationIndexIsASnapshot(t *testing.T) {
 	dir := t.TempDir()
-	removed := writeFile(t, dir, "gone.pdf")
-	writeFile(t, dir, "stays.pdf")
+	removed := write(t, dir, "gone.pdf")
+	write(t, dir, "stays.pdf")
 
-	idx, err := NewIndex(dir, false)
-	if err != nil {
-		t.Fatalf("NewIndex: %v", err)
-	}
+	idx := indexOf(t, dir, false)
 
 	// Added after the walk: invisible, with nothing saying the index is
 	// stale.
-	writeFile(t, dir, "new.pdf")
+	write(t, dir, "new.pdf")
 	if _, err := idx.Lookup("new"); !errors.Is(err, ErrNotFound) {
 		t.Errorf("Lookup(new) = %v, want ErrNotFound", err)
 	}
@@ -298,7 +239,7 @@ func TestIntegrationIndexIsASnapshot(t *testing.T) {
 	if _, err := idx.Lookup("gone"); err != nil {
 		t.Errorf("Lookup(gone) = %v, want it to still resolve", err)
 	}
-	_, _, err = idx.Load("gone")
+	_, _, err := idx.Load("gone")
 	if err == nil {
 		t.Fatal("Load(gone) succeeded after the file was removed")
 	}

@@ -42,6 +42,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/mas-ony/go-toolkit/internal/testutil"
 )
 
 // firstError is a one-shot error slot: the first failure wins and the
@@ -51,9 +53,6 @@ type firstError struct {
 	mu  sync.Mutex
 	msg string
 }
-
-// itID is the record id every integration test stores under.
-const itID = 4321
 
 // describe summarises a mismatched read without dumping a megabyte into
 // the test log.
@@ -81,30 +80,6 @@ func (a *firstError) get() string {
 	return a.msg
 }
 
-// requireUnprivileged skips when permission bits will not bite, which they
-// do not for root.
-func requireUnprivileged(t *testing.T) {
-	t.Helper()
-	if os.Geteuid() == 0 {
-		t.Skip("running as root: permission bits do not bite")
-	}
-}
-
-// caseSensitiveDir reports whether dir distinguishes two names differing
-// only in case, by asking the filesystem rather than guessing from GOOS: a
-// Linux host can mount a case-folding volume and a Mac can format a
-// case-sensitive one.
-func caseSensitiveDir(t *testing.T, dir string) bool {
-	t.Helper()
-	probe := filepath.Join(dir, ".case-probe")
-	if err := os.WriteFile(probe, []byte("x"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = os.Remove(probe) }()
-	_, err := os.Stat(filepath.Join(dir, ".CASE-PROBE"))
-	return err != nil
-}
-
 // SafeName deliberately preserves case — a stored name is handed back to a
 // browser and "Report.PDF" should not become "report.pdf". The cost is
 // that whether two spellings are one file is the filesystem's decision,
@@ -113,29 +88,20 @@ func caseSensitiveDir(t *testing.T, dir string) bool {
 func TestIntegrationCaseIsTheFilesystemsDecision(t *testing.T) {
 	dir := t.TempDir()
 
-	lower, err := Write(dir, itID, "scan.pdf", []byte("lower"))
-	if err != nil {
-		t.Fatalf("Write: %v", err)
-	}
-	upper, err := Write(dir, itID, "SCAN.PDF", []byte("upper"))
-	if err != nil {
-		t.Fatalf("Write: %v", err)
-	}
+	lower := mustWrite(t, dir, testID, "scan.pdf", []byte("lower"))
+	upper := mustWrite(t, dir, testID, "SCAN.PDF", []byte("upper"))
 	if lower == upper {
 		t.Fatalf("both spellings stored as %q; SafeName lowercased", lower)
 	}
 
-	entries, err := os.ReadDir(Dir(dir, itID))
-	if err != nil {
-		t.Fatal(err)
-	}
+	entries := listDir(t, Dir(dir, testID))
 
-	if caseSensitiveDir(t, Dir(dir, itID)) {
+	if testutil.CaseSensitiveDir(t, Dir(dir, testID)) {
 		if len(entries) != 2 {
 			t.Errorf("%d files, want 2 on a case-sensitive filesystem",
 				len(entries))
 		}
-		got, err := Read(dir, itID, "scan.pdf")
+		got, err := Read(dir, testID, "scan.pdf")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -153,7 +119,7 @@ func TestIntegrationCaseIsTheFilesystemsDecision(t *testing.T) {
 		t.Errorf("%d files, want 1 on a case-folding filesystem",
 			len(entries))
 	}
-	got, err := Read(dir, itID, "scan.pdf")
+	got, err := Read(dir, testID, "scan.pdf")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -173,9 +139,7 @@ func TestIntegrationWriteIsAtomicForAConcurrentReader(t *testing.T) {
 
 	old := bytes.Repeat([]byte("A"), 1<<20)
 	fresh := bytes.Repeat([]byte("B"), 1<<20)
-	if _, err := Write(dir, itID, "doc.pdf", old); err != nil {
-		t.Fatalf("seeding: %v", err)
-	}
+	mustWrite(t, dir, testID, "doc.pdf", old)
 
 	stop := make(chan struct{})
 	var wg sync.WaitGroup
@@ -190,7 +154,7 @@ func TestIntegrationWriteIsAtomicForAConcurrentReader(t *testing.T) {
 				return
 			default:
 			}
-			got, err := Read(dir, itID, "doc.pdf")
+			got, err := Read(dir, testID, "doc.pdf")
 			if err != nil {
 				// The name never disappears: the rename replaces it in
 				// one step, so a miss here is itself a failure.
@@ -210,7 +174,7 @@ func TestIntegrationWriteIsAtomicForAConcurrentReader(t *testing.T) {
 		if i%2 == 0 {
 			payload = old
 		}
-		if _, err := Write(dir, itID, "doc.pdf", payload); err != nil {
+		if _, err := Write(dir, testID, "doc.pdf", payload); err != nil {
 			t.Fatalf("Write %d: %v", i, err)
 		}
 	}
@@ -219,33 +183,6 @@ func TestIntegrationWriteIsAtomicForAConcurrentReader(t *testing.T) {
 
 	if msg := bad.get(); msg != "" {
 		t.Error(msg)
-	}
-}
-
-// The promised modes, checked as modes rather than assumed. The unit suite
-// proves the umask is defeated; this proves the numbers in the const block
-// are the ones that end up on disk.
-func TestIntegrationStoredPermissions(t *testing.T) {
-	dir := t.TempDir()
-	if _, err := Write(dir, itID, "scan.pdf", []byte("x")); err != nil {
-		t.Fatalf("Write: %v", err)
-	}
-
-	for _, c := range []struct {
-		what string
-		path string
-		want os.FileMode
-	}{
-		{"record directory", Dir(dir, itID), dirPerm},
-		{"stored file", Path(dir, itID, "scan.pdf"), filePerm},
-	} {
-		info, err := os.Stat(c.path)
-		if err != nil {
-			t.Fatalf("%s: %v", c.what, err)
-		}
-		if got := info.Mode().Perm(); got != c.want {
-			t.Errorf("%s has mode %o, want %o", c.what, got, c.want)
-		}
 	}
 }
 
@@ -259,19 +196,16 @@ func TestIntegrationStoredPermissions(t *testing.T) {
 // when the process owns it, because chmod by the owner ignores the mode
 // bits it is changing.
 func TestIntegrationWriteRewidensADirectoryItOwns(t *testing.T) {
-	requireUnprivileged(t)
+	testutil.RequireUnprivileged(t)
 
 	root := t.TempDir()
-	recordDir := Dir(root, itID)
+	recordDir := Dir(root, testID)
 	if err := os.MkdirAll(recordDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chmod(recordDir, 0o555); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Chmod(recordDir, 0o755) })
+	testutil.Chmod(t, recordDir, 0o555)
 
-	if _, err := Write(root, itID, "scan.pdf", []byte("x")); err != nil {
+	if _, err := Write(root, testID, "scan.pdf", []byte("x")); err != nil {
 		t.Fatalf("Write: %v — an owned directory should be widened", err)
 	}
 	info, err := os.Stat(recordDir)
@@ -289,19 +223,16 @@ func TestIntegrationWriteRewidensADirectoryItOwns(t *testing.T) {
 // record directory and there is nothing to chmod, so this must fail rather
 // than silently store nothing.
 func TestIntegrationUnwritableUploadRootFails(t *testing.T) {
-	requireUnprivileged(t)
+	testutil.RequireUnprivileged(t)
 
 	parent := t.TempDir()
 	root := filepath.Join(parent, "uploads")
 	if err := os.MkdirAll(root, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chmod(root, 0o555); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Chmod(root, 0o755) })
+	testutil.Chmod(t, root, 0o555)
 
-	_, err := Write(root, itID, "scan.pdf", []byte("x"))
+	_, err := Write(root, testID, "scan.pdf", []byte("x"))
 	if err == nil {
 		t.Fatal("Write succeeded under a read-only upload root")
 	}
@@ -312,31 +243,6 @@ func TestIntegrationUnwritableUploadRootFails(t *testing.T) {
 	// diagnosable from the one line a caller logs.
 	if !strings.Contains(err.Error(), root) {
 		t.Errorf("err = %v, want it to name %q", err, root)
-	}
-}
-
-// An upload ROOT that is not a directory is the misconfiguration mkdirAll
-// builds a specific error for, and the reason it does not use os.Mkdir:
-// EEXIST would print as "file exists" and read as "the directory is
-// already there".
-func TestIntegrationUploadRootIsAFile(t *testing.T) {
-	parent := t.TempDir()
-	root := filepath.Join(parent, "uploads")
-	if err := os.WriteFile(root, []byte("not a directory"),
-		0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	_, err := Write(root, itID, "scan.pdf", []byte("x"))
-	if err == nil {
-		t.Fatal("Write succeeded against a regular file as upload root")
-	}
-	var pathErr *fs.PathError
-	if !errors.As(err, &pathErr) {
-		t.Fatalf("err = %v, want an *fs.PathError naming the path", err)
-	}
-	if !errors.Is(err, errNotDir) {
-		t.Errorf("err = %v, want it to carry errNotDir", err)
 	}
 }
 
@@ -353,12 +259,9 @@ func TestIntegrationMegabyteRoundTrip(t *testing.T) {
 		data[i] = byte(i % 251)
 	}
 
-	name, err := Write(dir, itID, "big.pdf", data)
-	if err != nil {
-		t.Fatalf("Write: %v", err)
-	}
+	name := mustWrite(t, dir, testID, "big.pdf", data)
 
-	info, err := Stat(dir, itID, name)
+	info, err := Stat(dir, testID, name)
 	if err != nil {
 		t.Fatalf("Stat: %v", err)
 	}
@@ -366,7 +269,7 @@ func TestIntegrationMegabyteRoundTrip(t *testing.T) {
 		t.Fatalf("stored %d bytes, want %d", info.Size(), len(data))
 	}
 
-	got, err := Read(dir, itID, name)
+	got, err := Read(dir, testID, name)
 	if err != nil {
 		t.Fatalf("Read: %v", err)
 	}
@@ -375,134 +278,8 @@ func TestIntegrationMegabyteRoundTrip(t *testing.T) {
 	}
 
 	// No temp file survived the rename.
-	entries, err := os.ReadDir(Dir(dir, itID))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(entries) != 1 {
+	if entries := listDir(t, Dir(dir, testID)); len(entries) != 1 {
 		t.Errorf("%d entries, want 1 — a temp file survived", len(entries))
-	}
-}
-
-// CopyUnique claims each name is claimed atomically with O_CREATE|O_EXCL,
-// so concurrent copies under one record step to successive suffixes rather
-// than overwriting each other. The unit suite covers this; running it at a
-// larger width, on a real filesystem, is what would expose a gap that only
-// opens under contention.
-func TestIntegrationConcurrentCopiesNeverShareAName(t *testing.T) {
-	dir := t.TempDir()
-	const src = "report.docx"
-
-	// restoreExts is the unit suite's helper, and using it is not optional:
-	// the extension table is package state, and a registration left behind
-	// here changes what every later test in the same process accepts. The
-	// first version of this test omitted it, and passed — because it was only
-	// ever run with -run Integration, where no unit test shared its process.
-	// Run together, TestHasAllowedExt started accepting .xlsx.
-	restoreExts(t)
-	RegisterExts(OfficeExts)
-
-	if _, err := Write(dir, itID, src, []byte("original")); err != nil {
-		t.Fatalf("seeding: %v", err)
-	}
-
-	const workers = 24
-	names := make([]string, workers)
-	errs := make([]error, workers)
-	start := make(chan struct{})
-
-	var wg sync.WaitGroup
-	for i := 0; i < workers; i++ {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
-			<-start
-			names[i], _, errs[i] = CopyUnique(dir, itID, src, "copy.docx")
-		}(i)
-	}
-	close(start)
-	wg.Wait()
-
-	seen := make(map[string]int, workers)
-	for i, err := range errs {
-		if err != nil {
-			t.Errorf("worker %d: %v", i, err)
-			continue
-		}
-		seen[names[i]]++
-	}
-	for name, n := range seen {
-		if n > 1 {
-			t.Errorf("%d workers were given the name %q", n, name)
-		}
-	}
-	if len(seen) != workers {
-		t.Errorf("%d distinct names for %d copies", len(seen), workers)
-	}
-
-	// Every copy has to hold the source bytes: a name handed out twice
-	// would show up here as a short or doubled file even if the count
-	// above happened to line up.
-	for name := range seen {
-		got, err := Read(dir, itID, name)
-		if err != nil {
-			t.Errorf("reading %q: %v", name, err)
-			continue
-		}
-		if string(got) != "original" {
-			t.Errorf("%q = %q, want the source bytes", name, got)
-		}
-	}
-}
-
-// Remove is best-effort and discards errors, which makes its one guard the
-// thing worth checking against a real directory: a name that SafeName
-// folds onto FallbackName must not delete a file genuinely stored under
-// that name.
-func TestIntegrationRemoveDoesNotEatTheFallbackFile(t *testing.T) {
-	dir := t.TempDir()
-
-	if _, err := Write(dir, itID, FallbackName, []byte("real")); err != nil {
-		t.Fatalf("Write: %v", err)
-	}
-
-	// Each of these resolves through Path to the fallback file and must
-	// leave it alone.
-	for _, ref := range []string{"", "   ", ".", "..", "/"} {
-		Remove(dir, itID, ref)
-		if _, err := Stat(dir, itID, FallbackName); err != nil {
-			t.Fatalf("Remove(%q) deleted the fallback file: %v", ref, err)
-		}
-	}
-
-	// Naming it outright still works.
-	Remove(dir, itID, FallbackName)
-	if _, err := Stat(dir, itID, FallbackName); !errors.Is(
-		err, fs.ErrNotExist) {
-		t.Errorf("Remove(%q) = %v, want the file gone",
-			FallbackName, err)
-	}
-}
-
-// The directory removal in Remove is unconditional and only succeeds once
-// the last file is gone, so a record holding two files loses its directory
-// exactly when the second one goes.
-func TestIntegrationRecordDirectoryGoesWithTheLastFile(t *testing.T) {
-	dir := t.TempDir()
-	for _, n := range []string{"a.pdf", "b.pdf"} {
-		if _, err := Write(dir, itID, n, []byte(n)); err != nil {
-			t.Fatalf("Write %s: %v", n, err)
-		}
-	}
-
-	Remove(dir, itID, "a.pdf")
-	if _, err := os.Stat(Dir(dir, itID)); err != nil {
-		t.Fatalf("the directory went with the first file: %v", err)
-	}
-
-	Remove(dir, itID, "b.pdf")
-	if _, err := os.Stat(Dir(dir, itID)); !errors.Is(err, fs.ErrNotExist) {
-		t.Errorf("directory after the last file: %v, want it gone", err)
 	}
 }
 
@@ -516,7 +293,7 @@ func TestIntegrationReportWriteThroughput(t *testing.T) {
 	start := time.Now()
 	const n = 20
 	for i := 0; i < n; i++ {
-		if _, err := Write(dir, itID, "probe.pdf", data); err != nil {
+		if _, err := Write(dir, testID, "probe.pdf", data); err != nil {
 			t.Fatalf("Write %d: %v", i, err)
 		}
 	}

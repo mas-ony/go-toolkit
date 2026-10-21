@@ -255,3 +255,24 @@ func TestNewViperReturnsIndependentInstances(t *testing.T) {
 		t.Error("a key set on one instance is visible on the other")
 	}
 }
+
+// EnvName spells a key the way NewViper's replacer and AutomaticEnv do:
+// upper-cased, every dot an underscore, and every underscore already in a
+// segment kept, so a variable name cannot say where a segment ended.
+//
+// That the variable it names is the one NewViper reads is asserted
+// against real variables in the integration suite.
+func TestEnvName(t *testing.T) {
+	t.Parallel()
+	for key, want := range map[string]string{
+		"app.port":                         "APP_PORT",
+		"database.max_open_conns":          "DATABASE_MAX_OPEN_CONNS",
+		"fiber.trust_proxy_config.proxies": "FIBER_TRUST_PROXY_CONFIG_PROXIES",
+		"Fiber.Limiter":                    "FIBER_LIMITER",
+		"":                                 "",
+	} {
+		if got := EnvName(key); got != want {
+			t.Errorf("EnvName(%q) = %q, want %q", key, got, want)
+		}
+	}
+}

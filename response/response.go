@@ -1,6 +1,14 @@
 package response
 
-// Response is the top-level JSON envelope for every API response.
+// Envelope is the top-level JSON envelope for every API response: a
+// success flag, a message, and the data, whose type is T.
+//
+// One declaration serves both directions the envelope travels. A handler
+// ENCODES a Response, which is this with T left as any, and a client
+// DECODES into the type it expects — Envelope[Item], or
+// Envelope[Paginated[Item]] for a page — which is what httpclient.Envelope
+// names. The three fields and their tags are therefore written once, and
+// a field added here reaches the handler and the client together.
 //
 // Conventions:
 //   - A successful response always uses a 2xx HTTP status + Success: true.
@@ -11,10 +19,34 @@ package response
 //     failure. It must be a safe, user-facing string. Never include
 //     internal error text, stack traces, or database error messages — log
 //     those server-side instead.
-//   - Data should be nil when the operation has no return value (delete,
-//     logout). Use an empty slice, not nil, when the result is an empty
-//     collection so the client receives "data":[] rather than "data":null
-//     and can iterate safely.
+//
+// omitempty on Data reads by T, as encoding/json applies it: Data is
+// omitted when it is empty for its type — false, 0, "", a nil pointer or
+// interface, an empty slice or map — and a struct is never omitted.
+// Response's note says what that means on the handler's side, where T is
+// any. Decoding ignores omitempty entirely.
+//
+// The `example` struct tags follow swaggo (Swagger/OpenAPI) annotation
+// conventions. They have no effect at runtime: without a swag
+// code-generation step they are documentation only, and with one they
+// become example values in the generated API spec. Data carries none, and
+// neither does Paginated's Items. They usually hold an any or a struct,
+// swag can read no example as either, and it fails the whole definition
+// the field is in rather than skip the tag.
+type Envelope[T any] struct {
+	Success bool   `json:"success"           example:"true"`
+	Message string `json:"message,omitempty" example:"something went wrong"`
+	Data    T      `json:"data,omitempty"`
+}
+
+// Response is the Envelope a handler encodes: Data is typed any, so it
+// carries a struct, a slice, a Paginated value or nothing at all. OK,
+// OKList and Fail build one.
+//
+// Data should be nil when the operation has no return value (delete,
+// logout). Use an empty slice, not nil, when the result is an empty
+// collection so the client receives "data":[] rather than "data":null and
+// can iterate safely.
 //
 // omitempty behaviour:
 //   - Message: omitted from JSON when the string is empty (""). OK() called
@@ -32,15 +64,10 @@ package response
 // documentation for the three cases and the two constructors that avoid
 // it — NewPaginated for a page, OKList for a bare slice.
 //
-// The `example` struct tags follow swaggo (Swagger/OpenAPI) annotation
-// conventions. They have no effect at runtime: without a swag
-// code-generation step they are documentation only, and with one they
-// become example values in the generated API spec.
-type Response struct {
-	Success bool   `json:"success"           example:"true"`
-	Message string `json:"message,omitempty" example:"something went wrong"`
-	Data    any    `json:"data,omitempty"    example:"[]"`
-}
+// It is a type of its own rather than an alias of Envelope[any], so it
+// keeps its name wherever a type is reported by name: %T in a log line,
+// reflection, and the definition an API spec generator writes for it.
+type Response Envelope[any]
 
 // Paginated holds a single page of results alongside the metadata a client
 // needs to implement pagination controls (page number buttons, "X of Y"
@@ -56,15 +83,29 @@ type Response struct {
 // screen). Page is 1-based — the first page is page 1, not page 0.
 //
 // Generic over T so each endpoint's items keep their concrete type through
-// the envelope — no []any, no per-endpoint copy of this struct. The cost is
-// worth naming: swaggo's parser handles generic types poorly, so if the
-// `example` tags below ever drive live spec generation, this is the type
-// most likely to need a hand-written definition.
+// the envelope — no []any, no per-endpoint copy of this struct. swag
+// resolves each instantiation, Paginated[Item] say, into a definition of
+// its own, so a spec documents a page's items by their own type. Items
+// carries no example, for the reason Envelope gives.
 type Paginated[T any] struct {
-	Items []T `json:"items" example:"[]"`
+	Items []T `json:"items"`
 	Total int `json:"total" example:"1"` // matching rows, all pages
 	Page  int `json:"page"  example:"1"` // current page (1-based)
 	Limit int `json:"limit" example:"1"` // max items per page
+}
+
+// orEmpty returns items, or an empty slice in place of a nil one.
+//
+// It is the normalisation OKList and NewPaginated share, and the reason
+// list endpoints do not hit the interface-nil trap documented on Response:
+// a repository returning a nil slice for an empty page becomes "items":[]
+// or "data":[] rather than null, so the client can iterate without a
+// guard. OK does not call it, for the reason given there.
+func orEmpty[T any](items []T) []T {
+	if items == nil {
+		return []T{}
+	}
+	return items
 }
 
 // OK constructs a successful Response (Success: true).
@@ -118,14 +159,7 @@ func OK(msg string, data any) Response {
 //
 //	return c.JSON(response.OKList("", users))   // "data":[] when empty
 func OKList[T any](msg string, items []T) Response {
-	if items == nil {
-		items = []T{}
-	}
-	return Response{
-		Success: true,
-		Message: msg,
-		Data:    items,
-	}
+	return OK(msg, orEmpty(items))
 }
 
 // Fail constructs a failure Response (Success: false).
@@ -166,13 +200,10 @@ func Fail(msg string) Response {
 // zero Limit would make the client's ceil(Total/Limit) divide by zero), so
 // this constructor stays a plain value assembler.
 func NewPaginated[T any](items []T, total, page, limit int) Paginated[T] {
-	// The one normalisation in this package, and the reason list endpoints
-	// do not hit the interface-nil trap documented on Response: a
-	// repository returning a nil slice for an empty page becomes "items":[]
-	// here rather than "items":null, so the client can iterate without a
-	// guard.
-	if items == nil {
-		items = []T{}
+	return Paginated[T]{
+		Items: orEmpty(items),
+		Total: total,
+		Page:  page,
+		Limit: limit,
 	}
-	return Paginated[T]{Items: items, Total: total, Page: page, Limit: limit}
 }

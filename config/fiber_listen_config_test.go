@@ -12,8 +12,6 @@ package config
 import (
 	"strings"
 	"testing"
-
-	"github.com/spf13/viper"
 )
 
 // listenBase is a configuration the listen section accepts, which each
@@ -22,15 +20,11 @@ var listenBase = map[string]any{
 	"fiber.listen.shutdown_timeout": "10s",
 }
 
-// buildListen adapts NewListenConfig to the constructor shape runRules
-// takes.
-func buildListen(v *viper.Viper) SectionConfig { return NewListenConfig(v) }
-
 // TestListenValidate holds the section's rules, each beside the value that
 // satisfies it.
 func TestListenValidate(t *testing.T) {
 	t.Parallel()
-	runRules(t, listenBase, buildListen, []ruleCase{
+	runRules(t, listenBase, asSection(NewListenConfig), []ruleCase{
 		{"no shutdown timeout", map[string]any{
 			"fiber.listen.shutdown_timeout": nil},
 			"fiber.listen.shutdown_timeout"},

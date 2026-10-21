@@ -1,9 +1,11 @@
 package importer
 
 import (
+	"cmp"
 	"context"
 	"flag"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/mas-ony/go-toolkit/config"
@@ -297,15 +299,14 @@ func (c *Counters) touch(name string) {
 	}
 }
 
-// sortOutcomes orders the report by workbook row. Insertion sort because
-// the slice is already almost ordered — only the parse failures, which
-// Prepare returns up front, are out of place.
+// sortOutcomes orders the report by workbook row. The sort is stable, so
+// outcomes that share a row keep the order they were recorded in. The
+// slice is already almost ordered: only the parse failures, which Prepare
+// returns up front, are out of place.
 func sortOutcomes(out []Outcome) {
-	for i := 1; i < len(out); i++ {
-		for j := i; j > 0 && out[j].ExcelRow < out[j-1].ExcelRow; j-- {
-			out[j], out[j-1] = out[j-1], out[j]
-		}
-	}
+	slices.SortStableFunc(out, func(a, b Outcome) int {
+		return cmp.Compare(a.ExcelRow, b.ExcelRow)
+	})
 }
 
 // Note appends a line to the row's notes.

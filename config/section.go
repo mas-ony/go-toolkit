@@ -73,6 +73,13 @@ type Section struct {
 // configured, so such a value is validated in full.
 type Supplied map[string]bool
 
+// envKey turns the dots in a key into the underscores of its environment
+// spelling: database.max_open_conns becomes database_max_open_conns, and
+// upper-casing that gives the variable's name. NewViper hands it to Viper,
+// which upper-cases the result itself, and EnvName applies it the same
+// way, so the two cannot spell a variable differently.
+var envKey = strings.NewReplacer(".", "_")
+
 // sectionOf returns the section whose prefix is the longest one key begins
 // with. sep separates a prefix from the rest of a key: "." for a Viper key,
 // "_" for an environment variable name.
@@ -117,9 +124,23 @@ func sectionOf(prefixes map[string]string, key, sep string) string {
 // blank a value the file supplies; SuppliedSections relies on that too.
 func NewViper() *viper.Viper {
 	v := viper.New()
-	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
+	v.SetEnvKeyReplacer(envKey)
 	v.AutomaticEnv()
 	return v
+}
+
+// EnvName returns the environment variable that overrides key on a Viper
+// built by NewViper: the key upper-cased, with every dot an underscore, so
+// fiber.limiter.max is FIBER_LIMITER_MAX.
+//
+// It is the spelling NewViper wires and SuppliedSections routes a variable
+// by, exported for code that has to name the variable a key is read from:
+// a test that clears every section's variables, or a message telling an
+// operator what to export. Asking here keeps that code on this package's
+// own rule instead of a copy of it that goes stale the day the rule
+// changes.
+func EnvName(key string) string {
+	return strings.ToUpper(envKey.Replace(key))
 }
 
 // Configured reports whether some source supplied a key for the named
@@ -193,7 +214,7 @@ func SuppliedSections(v *viper.Viper, sections []Section) Supplied {
 	for _, s := range sections {
 		prefix := strings.ToLower(s.Prefix)
 		keys[s.Name] = prefix
-		envs[s.Name] = strings.ToUpper(strings.ReplaceAll(prefix, ".", "_"))
+		envs[s.Name] = EnvName(prefix)
 	}
 
 	supplied := make(Supplied, len(sections))

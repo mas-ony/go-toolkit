@@ -30,14 +30,9 @@ import (
 	_ "github.com/microsoft/go-mssqldb" // registers "sqlserver" + "mssql"
 
 	"github.com/mas-ony/go-toolkit/config"
+	"github.com/mas-ony/go-toolkit/internal/dbdriver"
+	"github.com/mas-ony/go-toolkit/internal/upstream"
 )
-
-// encryptMode holds one row of the translation from database.encrypt to each
-// driver's own TLS parameter. See encryptModes.
-type encryptMode struct {
-	mssql string // encrypt=  (go-mssqldb)
-	mysql string // tls=      (go-sql-driver/mysql)
-}
 
 // pingTimeout bounds the startup connectivity check in New.
 //
@@ -60,7 +55,7 @@ type encryptMode struct {
 // generous for the good case and short enough that a bad deploy fails while
 // someone is still looking at it. "disable" sends ENCRYPT_NOT_SUP in prelogin
 // and negotiates no TLS at all, which is the difference between it and
-// "false" — see the first note on encryptModes.
+// "false" — see the first note on dbdriver.EncryptionFor.
 //
 // One interaction to keep in mind: a verifying mode ("true", "strict") adds a
 // certificate exchange and validation to the handshake this deadline covers.
@@ -112,58 +107,6 @@ const pingTimeout = 5 * time.Second
 // for, and that is a separate change.
 const dialTimeout = 15 * time.Second
 
-// encryptModes translates the four values of database.encrypt into the TLS
-// parameter each driver understands:
-//
-//	database.encrypt   sqlserver encrypt=   mysql tls=
-//	disable            disable              false
-//	false              false                preferred
-//	true               true                 true
-//	strict             strict               true
-//
-// The vocabulary is SQL Server's because one of the two drivers already
-// spells it that way. Without this table the mysql branch would emit no TLS
-// parameter at all and connect on whatever the driver defaulted to —
-// unencrypted — while the configuration carried an "encrypt" setting that
-// read as if it applied. That is the gap this table closes, and it is why
-// the key is required for both drivers rather than only the one whose
-// vocabulary it uses.
-//
-// Three things the table does not say, all of which matter before trusting a
-// value:
-//
-//   - "false" means genuinely different things. On SQL Server it still
-//     encrypts the LOGIN PACKET, so credentials never cross the network in
-//     clear text; only the session after it does. On MySQL the equivalent is
-//     opportunistic and unverified: a server that offers no TLS gets a
-//     plaintext connection, and one that does gets an unauthenticated tunnel.
-//     Do not read "false" as "at least the password is safe" outside SQL
-//     Server.
-//
-//   - "true" and "strict" collapse into one setting on MySQL. It has no
-//     analogue of TDS 8.0, where TLS precedes the protocol handshake
-//     rather than being negotiated inside it, and it already verifies the
-//     certificate chain and the hostname at the "true" row. Keeping the two
-//     distinct in config means a deployment can change engines without
-//     editing this key, which is the entire point of the indirection.
-//
-//   - The verifying rows need a certificate the CLIENT trusts, and the trust
-//     store is not configurable from here. MySQL verifies against the system
-//     pool unless a tls.Config is registered with mysql.RegisterTLSConfig, and
-//     this package does not expose that — so a private CA or a self-signed
-//     server certificate fails at connect on "true" and "strict", the same
-//     wall as SQL Server without trustservercertificate, and the usual reason
-//     a deployment slides back to "disable". Adding a database.tls_root_cert
-//     key is the fix if that comes up; loosening the mapping to skip-verify is
-//     not, because it would make "true" mean "encrypted but unauthenticated"
-//     on one of the two engines and nothing in the config would say so.
-var encryptModes = map[string]encryptMode{
-	"disable": {mssql: "disable", mysql: "false"},
-	"false":   {mssql: "false", mysql: "preferred"},
-	"true":    {mssql: "true", mysql: "true"},
-	"strict":  {mssql: "strict", mysql: "true"},
-}
-
 // ErrUnsupportedDriver reports a driver name this package cannot use. New
 // returns it when cfg.Driver matches no known driver, and ParseDialect
 // wraps it when the same name maps to no Dialect.
@@ -172,6 +115,8 @@ var encryptModes = map[string]encryptMode{
 // the name to build a DSN and ParseDialect needs it to pick a grammar, and
 // a deployment whose driver fails either has misspelled the same key. Two
 // sentinels would make errors.Is depend on which of the two ran first.
+// Both build the error through unsupportedDriver, so it reads the same
+// from either.
 //
 // The two accept almost the same names. ParseDialect also takes
 // "azuresql", a driver name that New cannot open; whichever of the two
@@ -182,15 +127,15 @@ var encryptModes = map[string]encryptMode{
 var ErrUnsupportedDriver = errors.New("unsupported driver")
 
 // ErrUnsupportedEncryptMode is returned by New when cfg.Encrypt is not one of
-// the four values encryptModes translates. Exported for the same reason as
-// ErrUnsupportedDriver.
+// the four values dbdriver.EncryptionFor translates. Exported for the same
+// reason as ErrUnsupportedDriver.
 //
 // In the normal startup path this is unreachable:
-// config.DatabaseConfig.Validate checks the same allowlist and fails first,
-// naming the key. It exists because buildDSN cannot pass an unrecognised value
-// through to the driver and let the driver complain — on MySQL there is
-// nothing to pass it through TO, since the value has to be translated before
-// it means anything.
+// config.DatabaseConfig.Validate checks the value against the same table
+// and fails first, naming the key. It exists because buildDSN cannot pass
+// an unrecognised value through to the driver and let the driver complain
+// — on MySQL there is nothing to pass it through TO, since the value has
+// to be translated before it means anything.
 var ErrUnsupportedEncryptMode = errors.New("unsupported encrypt mode")
 
 // ErrInvalidCredential is returned by New when a credential contains a byte
@@ -243,30 +188,23 @@ func isHostName(host string) bool {
 	return true
 }
 
-// encryptFor resolves cfg.Encrypt to its per-driver spellings.
+// encryptFor resolves cfg.Encrypt to what it asks of each driver, through
+// the table config validates the key against, or returns
+// ErrUnsupportedEncryptMode naming the value and the four that would do.
 //
-// Lowercases and trims first, matching how the config constructor
-// normalises the value, so a DatabaseConfig built as a struct literal
-// behaves the same as one read from a config file.
-//
-// The allowlist is closed rather than forwarding the value to the driver,
-// because this function TRANSLATES it: an unrecognised value has no defined
-// meaning here and there is no driver left to hand it to. One practical
-// consequence: go-mssqldb lowercases the value and then accepts a wider
-// vocabulary than this table — "mandatory", "yes", "1" and "t" all mean the
-// same thing to it as "true", and "optional", "no", "0" and "f" the same as
-// "false" — so a configuration carrying "encrypt: 0" or "encrypt: yes"
-// fails at startup and needs the canonical spelling. That failure names the
-// key.
-//
-// Case and surrounding whitespace are NOT part of that: this function
-// lowercases and trims before the lookup, so "True" and " STRICT " still work.
-func encryptFor(encrypt string) (encryptMode, error) {
-	mode, ok := encryptModes[strings.ToLower(strings.TrimSpace(encrypt))]
+// The vocabulary is closed rather than forwarded to the driver, because
+// the value is TRANSLATED; dbdriver.EncryptionFor says what each value
+// means to each driver and why nothing outside the four is one. Case and
+// surrounding space are forgiven, so "True" and " STRICT " still work, and
+// a DatabaseConfig built as a struct literal behaves the same as one read
+// from a config file.
+func encryptFor(encrypt string) (dbdriver.Encryption, error) {
+	mode, ok := dbdriver.EncryptionFor(encrypt)
 	if !ok {
-		return encryptMode{}, fmt.Errorf(
-			`%w: %q (want "disable", "false", "true", or "strict")`,
-			ErrUnsupportedEncryptMode, encrypt)
+		return dbdriver.Encryption{}, fmt.Errorf("%w: %q (want one of %s)",
+			ErrUnsupportedEncryptMode,
+			encrypt,
+			strings.Join(dbdriver.EncryptModes(), ", "))
 	}
 	return mode, nil
 }
@@ -286,7 +224,9 @@ func encryptFor(encrypt string) (encryptMode, error) {
 // The config type's own validation leaves exactly these three to this
 // point: it requires the host and the location without checking their
 // shape, and it does not range-check database.port. Its reasons hold,
-// since this still runs before a single route is registered.
+// since this still runs before a single route is registered. The port is
+// held to upstream.CheckPort, the rule config holds app.port to, so a port
+// is refused in one wording wherever it is read.
 //
 // No message quotes a credential, so each is safe to log verbatim.
 func checkTarget(
@@ -304,10 +244,8 @@ func checkTarget(
 			"IP address (write an IPv6 address without brackets)",
 			cfg.Host)
 	}
-	if cfg.Port < 1 || cfg.Port > 65535 {
-		return nil, fmt.Errorf("database.port must be between 1 and 65535 "+
-			"(got %d)",
-			cfg.Port)
+	if err := upstream.CheckPort("database.port", cfg.Port); err != nil {
+		return nil, err
 	}
 	loc, err := time.LoadLocation(app.Location)
 	if err != nil {
@@ -378,12 +316,13 @@ func applyPoolSettings(db *sqlx.DB, cfg *config.DatabaseConfig) {
 // driver. The returned dsn embeds credentials and must never be logged or
 // included in error messages returned to the client.
 //
-// cfg.Driver is lowercased AND trimmed before matching, so configured
-// values are case-insensitive and tolerate surrounding whitespace ("MySQL",
-// "mysql", "MYSQL" and " mysql " all work) — the same normalisation
-// encryptFor applies to the encrypt key, for the same reason. The config
-// constructor already does it; this repeats the step because a
-// DatabaseConfig built as a struct literal never passed through it.
+// cfg.Driver is resolved through dbdriver.Engine, the table config
+// validates the key against, which lowercases AND trims before matching:
+// configured values are case-insensitive and tolerate surrounding
+// whitespace ("MySQL", "mysql", "MYSQL" and " mysql " all work), as the
+// encrypt key does through encryptFor. The config constructor already
+// normalises both; resolving again matters because a DatabaseConfig built
+// as a struct literal never passed through it.
 //
 // Each branch below carries the reasoning for its own parameters. What follows
 // here is only what spans both branches.
@@ -400,17 +339,17 @@ func applyPoolSettings(db *sqlx.DB, cfg *config.DatabaseConfig) {
 //	"mysql"      ->  QUESTION ->  ?               ✓
 //	"mssql"      ->  UNKNOWN  ->  Rebind is a NO-OP
 //
-// That last row is why the sqlserver/mssql branch returns "sqlserver" for
-// both config values even though go-mssqldb registers "mssql" too. The two
-// are separate registrations rather than aliases, and they differ in how
-// they treat query text: the "mssql" name rewrites ODBC-style placeholders,
-// while "sqlserver" passes the query through untouched and expects native
-// @p1 parameters. Returning the name the operator typed would look tidier
-// and would break every query built this way: Rebind would pass the ?
-// placeholders through unchanged, SQL Server would reject them as syntax
-// errors, and the failure would appear at query time rather than at startup
-// — with nothing in the message pointing back at the configured driver
-// name.
+// That last row is why the sqlserver/mssql branch returns "sqlserver",
+// dbdriver.SQLServer, for both config values even though go-mssqldb registers
+// "mssql" too. The two are separate registrations rather than aliases, and
+// they differ in how they treat query text: the "mssql" name rewrites
+// ODBC-style placeholders, while "sqlserver" passes the query through
+// untouched and expects native @p1 parameters. Returning the name the operator
+// typed would look tidier and would break every query built this way: Rebind
+// would pass the ? placeholders through unchanged, SQL Server would reject
+// them as syntax errors, and the failure would appear at query time rather
+// than at startup — with nothing in the message pointing back at the
+// configured driver name.
 //
 // The same trap applies to any driver added later. Check sqlx's bind table
 // before choosing what to return here; an unrecognised name degrades silently
@@ -493,9 +432,8 @@ func buildDSN(
 	// more fundamental of the two, and the encrypt vocabulary is only
 	// meaningful once the driver is known to be one this function can serve.
 
-	// Normalise to lowercase so config values are case-insensitive.
-	switch strings.ToLower(strings.TrimSpace(cfg.Driver)) {
-	case "sqlserver", "mssql":
+	switch dbdriver.Engine(cfg.Driver) {
+	case dbdriver.SQLServer:
 		mode, merr := encryptFor(cfg.Encrypt)
 		if merr != nil {
 			return "", "", merr
@@ -530,7 +468,7 @@ func buildDSN(
 		//     (sys.dm_exec_sessions.program_name), which aids troubleshooting
 		//     and auditing in shared environments.
 		//   - encrypt controls TLS negotiation. The four accepted values reach
-		//     the driver unchanged, travelling through encryptModes so the
+		//     the driver unchanged, travelling through encryptFor so the
 		//     mysql branch can be given an equivalent — which is why an
 		//     unrecognised value is rejected rather than forwarded.
 		//   - timezone is the location go-mssqldb uses to label values it
@@ -545,7 +483,7 @@ func buildDSN(
 		q := url.Values{}
 		q.Set("database", cfg.Database)
 		q.Set("app name", app.Name)
-		q.Set("encrypt", mode.mssql)
+		q.Set("encrypt", mode.SQLServer)
 		q.Set("timezone", app.Location)
 
 		// On timezone, at more length, because it defaults to time.UTC and
@@ -597,9 +535,9 @@ func buildDSN(
 			Host:     addr,
 			RawQuery: q.Encode(),
 		}
-		return "sqlserver", u.String(), nil
+		return dbdriver.SQLServer, u.String(), nil
 
-	case "mysql":
+	case dbdriver.MySQL:
 		mode, merr := encryptFor(cfg.Encrypt)
 		if merr != nil {
 			return "", "", merr
@@ -694,7 +632,7 @@ func buildDSN(
 
 		// TLSConfig takes either a built-in name ("true", "false",
 		// "skip-verify", "preferred") or a name handed to
-		// mysql.RegisterTLSConfig. encryptModes produces three of those
+		// mysql.RegisterTLSConfig. encryptFor produces three of those
 		// built-ins — "true", "false" and "preferred" — and never
 		// "skip-verify". ParseDSN can therefore always read back what
 		// FormatDSN writes here, which this package's tests check.
@@ -707,24 +645,24 @@ func buildDSN(
 		// required-and-unverified, and the mapping avoids the latter
 		// because nothing in the configuration would say that "false" had
 		// become mandatory TLS. Neither authenticates the server — the
-		// first note on encryptModes is the one to read before trusting the
-		// "false" row.
+		// first note on dbdriver.EncryptionFor is the one to read before
+		// trusting the "false" row.
 		//
 		// Note that "false" is emitted rather than omitted. The driver's
 		// default with no tls parameter is also no TLS, so this changes
 		// nothing at connect time; it makes the DSN state the choice instead
 		// of leaving it to be inferred, which is the same reason the config
 		// requires the key.
-		my.TLSConfig = mode.mysql
+		my.TLSConfig = mode.MySQL
 
 		// FormatDSN is the driver's own serialiser and the inverse of
 		// mysql.ParseDSN for everything except the username case guarded
 		// above. It also emits only non-default parameters, so the DSN stays
 		// short.
-		return "mysql", my.FormatDSN(), nil
+		return dbdriver.MySQL, my.FormatDSN(), nil
 
 	default:
-		return "", "", fmt.Errorf("%w: %q", ErrUnsupportedDriver, cfg.Driver)
+		return "", "", unsupportedDriver(cfg.Driver)
 	}
 }
 

@@ -13,26 +13,38 @@ import (
 	"fmt"
 	"io"
 	"math"
-	"os"
-	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
 
+	"github.com/mas-ony/go-toolkit/internal/testutil"
+	"github.com/mas-ony/go-toolkit/internal/testutil/xlsxtest"
 	"github.com/xuri/excelize/v2"
 )
 
-// sheetXML is where excelize writes a new file's one sheet.
-const sheetXML = "xl/worksheets/sheet1.xml"
+// sheetXML is where excelize writes a new file's one sheet, and relsXML
+// the relationships that say which part holds each sheet.
+const (
+	sheetXML = "xl/worksheets/sheet1.xml"
+	relsXML  = "xl/_rels/workbook.xml.rels"
+)
 
 // fixtureBytes is the fixture as an upload would hold it: in memory.
 func fixtureBytes(t *testing.T) []byte {
 	t.Helper()
-	data, err := os.ReadFile(writeFixture(t))
+	return xlsxtest.WorkbookBytes(t, fillFixture)
+}
+
+// writeEntry adds an entry named name, holding content, to zw.
+func writeEntry(t *testing.T, zw *zip.Writer, name, content string) {
+	t.Helper()
+	w, err := zw.Create(name)
+	if err == nil {
+		_, err = io.WriteString(w, content)
+	}
 	if err != nil {
 		t.Fatal(err)
 	}
-	return data
 }
 
 // rebuild returns book with every entry passed through edit, which is
@@ -49,15 +61,6 @@ func rebuild(
 	}
 	var buf bytes.Buffer
 	zw := zip.NewWriter(&buf)
-	write := func(name, content string) {
-		w, err := zw.Create(name)
-		if err == nil {
-			_, err = io.WriteString(w, content)
-		}
-		if err != nil {
-			t.Fatal(err)
-		}
-	}
 	for _, entry := range zr.File {
 		rc, err := entry.Open()
 		if err != nil {
@@ -68,10 +71,10 @@ func rebuild(
 		if err != nil {
 			t.Fatal(err)
 		}
-		write(entry.Name, edit(entry.Name, string(content)))
+		writeEntry(t, zw, entry.Name, edit(entry.Name, string(content)))
 	}
 	for _, name := range extra {
-		write(name, "not read")
+		writeEntry(t, zw, name, "not read")
 	}
 	if err := zw.Close(); err != nil {
 		t.Fatal(err)
@@ -79,20 +82,33 @@ func rebuild(
 	return buf.Bytes()
 }
 
+// replaced returns book with the one occurrence of old in its entry
+// named entry replaced by with, and each of extra added as an entry of
+// its own. It fails the test unless old occurs in that entry exactly
+// once, so a change to the fixture cannot quietly leave the edit undone.
+func replaced(
+	t *testing.T, book []byte,
+	entry, old, with string, extra ...string,
+) []byte {
+	t.Helper()
+	return rebuild(t, book, func(name, content string) string {
+		if name != entry {
+			return content
+		}
+		if n := strings.Count(content, old); n != 1 {
+			t.Fatalf("%s holds %q %d times, want once:\n%s",
+				entry, old, n, content)
+		}
+		return strings.Replace(content, old, with, 1)
+	}, extra...)
+}
+
 // faultAt returns book with a character XML does not allow put in front
 // of the start tag of the given row of its sheet.
 func faultAt(t *testing.T, book []byte, row int) []byte {
 	t.Helper()
 	tag := fmt.Sprintf(`<row r="%d"`, row)
-	return rebuild(t, book, func(name, content string) string {
-		if name != sheetXML {
-			return content
-		}
-		if strings.Count(content, tag) != 1 {
-			t.Fatalf("the sheet has no row %d:\n%s", row, content)
-		}
-		return strings.Replace(content, tag, "\x0b"+tag, 1)
-	})
+	return replaced(t, book, sheetXML, tag, "\x0b"+tag)
 }
 
 // listing is the two parts that say a workbook has a sheet, as declaring
@@ -118,13 +134,7 @@ func declaring(t *testing.T, sizes ...uint64) []byte {
 	var buf bytes.Buffer
 	zw := zip.NewWriter(&buf)
 	for name, content := range listing {
-		w, err := zw.Create(name)
-		if err == nil {
-			_, err = io.WriteString(w, content)
-		}
-		if err != nil {
-			t.Fatal(err)
-		}
+		writeEntry(t, zw, name, content)
 	}
 	for i, size := range sizes {
 		w, err := zw.CreateRaw(&zip.FileHeader{
@@ -196,11 +206,32 @@ func TestInspectHoldsTheDirectoryAgainstTheCap(t *testing.T) {
 					t.Errorf("refused: %v", err)
 				}
 			case !errors.Is(err, ErrTooLarge) ||
-				!strings.Contains(err.Error(), "1024 MiB"):
+				!strings.Contains(err.Error(), "more than 1 GiB"):
 				t.Errorf("answered %v, want ErrTooLarge naming the "+
-					"1024 MiB cap", err)
+					"1 GiB cap", err)
 			}
 		})
+	}
+}
+
+// The refusal names the cap as it is set, in the largest unit that
+// divides it, and in bytes when none does. A cap rounded to whole
+// mebibytes would name one under a mebibyte as 0 MiB, a limit nobody
+// set.
+func TestInspectNamesTheCapExactly(t *testing.T) {
+	for limit, want := range map[int64]string{
+		1500:     "more than 1500 bytes",
+		64 << 10: "more than 64 KiB",
+		3 << 20:  "more than 3 MiB",
+	} {
+		testutil.Set(t, &MaxUnzippedBytes, limit)
+		data := declaring(t, uint64(limit))
+		_, err := inspect(bytes.NewReader(data), int64(len(data)))
+		if !errors.Is(err, ErrTooLarge) ||
+			!strings.Contains(err.Error(), want) {
+			t.Errorf("a cap of %d answered %v, want ErrTooLarge "+
+				"naming %q", limit, err, want)
+		}
 	}
 }
 
@@ -208,8 +239,7 @@ func TestInspectHoldsTheDirectoryAgainstTheCap(t *testing.T) {
 // the size excelize cannot add up, which is not a matter of policy.
 func TestInspectWithoutACap(t *testing.T) {
 	old := MaxUnzippedBytes
-	MaxUnzippedBytes = 0
-	t.Cleanup(func() { MaxUnzippedBytes = old })
+	testutil.Set(t, &MaxUnzippedBytes, 0)
 
 	over := declaring(t, uint64(old)+1)
 	if _, err := inspect(
@@ -231,9 +261,7 @@ func TestOpenBytesTellsWhatIsNoWorkbook(t *testing.T) {
 	book := fixtureBytes(t)
 	var docx bytes.Buffer
 	zw := zip.NewWriter(&docx)
-	if _, err := zw.Create("word/document.xml"); err != nil {
-		t.Fatal(err)
-	}
+	writeEntry(t, zw, "word/document.xml", "")
 	if err := zw.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -258,19 +286,14 @@ func TestOpenBytesTellsWhatIsNoWorkbook(t *testing.T) {
 
 // The same refusals reach a caller of Open, under the file's path.
 func TestOpenTellsWhatIsNoWorkbook(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "export.xlsx")
-	if err := os.WriteFile(path, []byte("a,b\n1,2\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	path := testutil.TempFile(t, "export.xlsx", []byte("a,b\n1,2\n"))
 	_, err := Open(path, fixtureLayout())
 	if !errors.Is(err, ErrNotWorkbook) ||
 		!strings.Contains(err.Error(), path) {
 		t.Errorf("answered %v, want ErrNotWorkbook naming %s", err, path)
 	}
 
-	old := MaxUnzippedBytes
-	MaxUnzippedBytes = 16
-	t.Cleanup(func() { MaxUnzippedBytes = old })
+	testutil.Set(t, &MaxUnzippedBytes, 16)
 	if _, err := Open(writeFixture(t), fixtureLayout()); !errors.Is(
 		err, ErrTooLarge) {
 		t.Errorf("a workbook over the cap answered %v, want "+
@@ -439,31 +462,27 @@ func TestSheetScanKeepsOnlyTheTailOfTheRows(t *testing.T) {
 // workbook's own relationships, and in any letter case, as excelize
 // finds it.
 func TestSheetPartIsFoundByName(t *testing.T) {
-	f := excelize.NewFile()
-	t.Cleanup(func() { _ = f.Close() })
-	if _, err := f.NewSheet("Catatan"); err != nil {
-		t.Fatal(err)
-	}
-	for sheet, text := range map[string]string{
-		fixtureSheet: "pertama", "Catatan": "kedua",
-	} {
-		if err := f.SetCellValue(sheet, "A1", text); err != nil {
+	book := xlsxtest.WorkbookBytes(t, func(t *testing.T, f *excelize.File) {
+		if _, err := f.NewSheet("Catatan"); err != nil {
 			t.Fatal(err)
 		}
-	}
-	buf, err := f.WriteToBuffer()
-	if err != nil {
-		t.Fatal(err)
-	}
-	arc, err := inspect(bytes.NewReader(buf.Bytes()), int64(buf.Len()))
+		for sheet, text := range map[string]string{
+			xlsxtest.Sheet: "pertama", "Catatan": "kedua",
+		} {
+			if err := f.SetCellValue(sheet, "A1", text); err != nil {
+				t.Fatal(err)
+			}
+		}
+	})
+	arc, err := inspect(bytes.NewReader(book), int64(len(book)))
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	for sheet, want := range map[string]string{
-		fixtureSheet: "xl/worksheets/sheet1.xml",
-		"Catatan":    "xl/worksheets/sheet2.xml",
-		"CATATAN":    "xl/worksheets/sheet2.xml",
+		xlsxtest.Sheet: sheetXML,
+		"Catatan":      "xl/worksheets/sheet2.xml",
+		"CATATAN":      "xl/worksheets/sheet2.xml",
 	} {
 		part := arc.part(sheet)
 		if part == nil || part.Name != want {
@@ -486,18 +505,8 @@ func TestSheetPartIsFoundThroughAnyTarget(t *testing.T) {
 	for _, target := range []string{
 		"/xl/worksheets/sheet1.xml", "../xl/worksheets/sheet1.xml",
 	} {
-		book := rebuild(t, fixtureBytes(t),
-			func(name, content string) string {
-				if name != "xl/_rels/workbook.xml.rels" {
-					return content
-				}
-				if strings.Count(content, written) != 1 {
-					t.Fatalf("the relationships lack %s:\n%s",
-						written, content)
-				}
-				return strings.Replace(content, written,
-					`Target="`+target+`"`, 1)
-			})
+		book := replaced(t, fixtureBytes(t), relsXML, written,
+			`Target="`+target+`"`)
 
 		// The premise: excelize reads the sheet through this target.
 		wb, err := OpenBytes(book, fixtureLayout())
@@ -512,7 +521,7 @@ func TestSheetPartIsFoundThroughAnyTarget(t *testing.T) {
 			t.Fatalf("%s: %v", target, err)
 		}
 		found := "no part"
-		if part := arc.part(fixtureSheet); part != nil {
+		if part := arc.part(xlsxtest.Sheet); part != nil {
 			found = part.Name
 		}
 		if rows != 12 || found != sheetXML {
@@ -537,17 +546,14 @@ func TestOpenRefusesASheetItCannotReadToItsEnd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rows, err := f.GetRows(fixtureSheet)
+	rows, err := f.GetRows(xlsxtest.Sheet)
 	_ = f.Close()
 	if err != nil || len(rows) != 9 {
 		t.Fatalf("excelize answered %d rows and %v; the premise of "+
 			"this test is 9 rows and no error", len(rows), err)
 	}
 
-	path := filepath.Join(t.TempDir(), "cut.xlsx")
-	if err := os.WriteFile(path, book, 0o600); err != nil {
-		t.Fatal(err)
-	}
+	path := testutil.TempFile(t, "cut.xlsx", book)
 	_, fromFile := Open(path, fixtureLayout())
 	_, fromMemory := OpenBytes(book, fixtureLayout())
 	for door, err := range map[string]error{
@@ -558,9 +564,9 @@ func TestOpenRefusesASheetItCannotReadToItsEnd(t *testing.T) {
 			t.Errorf("%s answered %v, want a *TruncatedError", door, err)
 			continue
 		}
-		if te.Sheet != fixtureSheet || te.Read != 9 || te.Last != 12 {
+		if te.Sheet != xlsxtest.Sheet || te.Read != 9 || te.Last != 12 {
 			t.Errorf("%s read %d of %d rows of %q, want 9 of 12 of %q",
-				door, te.Read, te.Last, te.Sheet, fixtureSheet)
+				door, te.Read, te.Last, te.Sheet, xlsxtest.Sheet)
 		}
 		const want = `only 9 of the 12 rows of sheet "Sheet1" could ` +
 			"be read"
@@ -574,16 +580,8 @@ func TestOpenRefusesASheetItCannotReadToItsEnd(t *testing.T) {
 // there and returns the rows above as the whole sheet; the reading here
 // is refused with excelize's own error.
 func TestOpenReportsARowItCannotRead(t *testing.T) {
-	book := rebuild(t, fixtureBytes(t), func(name, content string) string {
-		if name != sheetXML {
-			return content
-		}
-		const cell = `<c r="B10"`
-		if strings.Count(content, cell) != 1 {
-			t.Fatalf("the sheet has no cell B10:\n%s", content)
-		}
-		return strings.Replace(content, cell, `<c r="10B"`, 1)
-	})
+	book := replaced(t, fixtureBytes(t), sheetXML, `<c r="B10"`,
+		`<c r="10B"`)
 
 	wb, err := OpenBytes(book, fixtureLayout())
 	if err == nil || wb != nil {
@@ -605,7 +603,7 @@ func TestScanReadsTheMergesExcelizeReports(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = f.Close() })
-	cells, err := f.GetMergeCells(fixtureSheet)
+	cells, err := f.GetMergeCells(xlsxtest.Sheet)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -618,7 +616,7 @@ func TestScanReadsTheMergesExcelizeReports(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	last, got, err := arc.scan(fixtureSheet)
+	last, got, err := arc.scan(xlsxtest.Sheet)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -636,7 +634,7 @@ func TestScanReadsTheMergesExcelizeReports(t *testing.T) {
 // scan with nothing to say, and the reading is taken as it is.
 func TestScanOfASheetItCannotFind(t *testing.T) {
 	arc := &archive{parts: map[string]*zip.File{}}
-	last, merges, err := arc.scan(fixtureSheet)
+	last, merges, err := arc.scan(xlsxtest.Sheet)
 	if last != 0 || merges != nil || err != nil {
 		t.Errorf("answered %d, %q and %v, want nothing", last, merges,
 			err)

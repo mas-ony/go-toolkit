@@ -32,16 +32,15 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/gofiber/fiber/v3/middleware/recover"
+	"github.com/mas-ony/go-toolkit/internal/testutil/fibertest"
 )
 
 // decoded is the envelope as a client would parse it, plus whether each
@@ -97,29 +96,22 @@ func envelopeApp(t *testing.T, cfg fiber.Config) *fiber.App {
 	return app
 }
 
-// waitForListener covers the gap between Listen returning and the serving
-// goroutine accepting connections.
-func waitForListener(t *testing.T, addr string) {
-	t.Helper()
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		if c, err := net.Dial("tcp", addr); err == nil {
-			_ = c.Close()
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatal("the listener never accepted a connection")
-}
-
-// do sends req through the in-process transport and decodes the answer as
-// a client would, recording which optional keys were present at all.
+// do sends req through the in-process transport and decodes the answer;
+// see decode.
 func do(t *testing.T, app *fiber.App, req *http.Request) (int, decoded) {
 	t.Helper()
 	resp, err := app.Test(req, fiber.TestConfig{Timeout: 0})
 	if err != nil {
 		t.Fatalf("request: %v", err)
 	}
+	return resp.StatusCode, decode(t, resp)
+}
+
+// decode reads the body of resp as a client would, recording which
+// optional keys were present at all, and closes it. Every answer in this
+// file is read through it, whichever transport carried the request.
+func decode(t *testing.T, resp *http.Response) decoded {
+	t.Helper()
 	defer func() { _ = resp.Body.Close() }()
 
 	body, err := io.ReadAll(resp.Body)
@@ -151,7 +143,7 @@ func do(t *testing.T, app *fiber.App, req *http.Request) (int, decoded) {
 		d.HasData = true
 		d.DataIsNull = string(v) == "null"
 	}
-	return resp.StatusCode, d
+	return d
 }
 
 // The failures a handler never sees that DO route through the
@@ -342,14 +334,7 @@ func TestIntegrationBodyLimitReachesTheErrorHandler(t *testing.T) {
 		return nil
 	})
 
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	go func() { _ = app.Listener(ln) }()
-	t.Cleanup(func() { _ = app.Shutdown() })
-	url := "http://" + ln.Addr().String() + "/items"
-	waitForListener(t, ln.Addr().String())
+	url := fibertest.Serve(t, app) + "/items"
 
 	post := func(size int) (*http.Response, error) {
 		return http.Post(url, "application/json",
@@ -361,20 +346,11 @@ func TestIntegrationBodyLimitReachesTheErrorHandler(t *testing.T) {
 	if err != nil {
 		t.Fatalf("a 512-byte body got a transport error: %v", err)
 	}
-	body, _ := io.ReadAll(resp.Body)
-	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusRequestEntityTooLarge {
 		t.Errorf("status %d, want %d", resp.StatusCode,
 			http.StatusRequestEntityTooLarge)
 	}
-	var env struct {
-		Success bool   `json:"success"`
-		Message string `json:"message"`
-	}
-	if err := json.Unmarshal(body, &env); err != nil {
-		t.Fatalf("the client did not receive the envelope: %v\n%s",
-			err, body)
-	}
+	env := decode(t, resp)
 	if env.Success || env.Message != "request body too large" {
 		t.Errorf("envelope = %+v, want the ErrorHandler's failure", env)
 	}

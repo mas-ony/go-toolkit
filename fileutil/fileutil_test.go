@@ -23,10 +23,18 @@ import (
 	"sync"
 	"syscall"
 	"testing"
+
+	"github.com/mas-ony/go-toolkit/internal/testutil"
 )
 
 // testID is the record id every unit test stores under.
 const testID = 1234
+
+// genericType is what DetectContentType answers for bytes it does not
+// accept, and what http.DetectContentType answers for bytes it does not
+// recognise. It is spelled out here rather than read from fileutil.go, so
+// that a change to either answer fails a test.
+const genericType = "application/octet-stream"
 
 // Magic-byte fixtures for the content-type tests. Real signatures rather than
 // invented ones, because the whole point of DetectContentType is that it reads
@@ -82,6 +90,23 @@ func listDir(t *testing.T, dir string) []string {
 	return names
 }
 
+// mustWrite stores data as Write does and returns the name Write reports,
+// failing the test if Write reports an error instead.
+func mustWrite(
+	t *testing.T,
+	uploadDir string,
+	id int,
+	name string,
+	data []byte,
+) string {
+	t.Helper()
+	stored, err := Write(uploadDir, id, name, data)
+	if err != nil {
+		t.Fatalf("Write(%q): %v", name, err)
+	}
+	return stored
+}
+
 // restoreExts snapshots the registration tables and puts them back when the
 // test ends, so a test that widens the accepted set does not change what every
 // later test is testing.
@@ -110,11 +135,8 @@ func restoreExts(t *testing.T) {
 // restoreLimits does the same for the two configurable limits.
 func restoreLimits(t *testing.T) {
 	t.Helper()
-
-	name, size := MaxNameLen, MaxFileBytes
-	t.Cleanup(func() {
-		MaxNameLen, MaxFileBytes = name, size
-	})
+	testutil.Set(t, &MaxNameLen, MaxNameLen)
+	testutil.Set(t, &MaxFileBytes, MaxFileBytes)
 }
 
 // assertNoTempFiles fails the test if a ".tmp-" file survives in dir.
@@ -326,10 +348,7 @@ func TestPathFindsWhatWriteStored(t *testing.T) {
 			t.Parallel()
 
 			uploadDir := t.TempDir()
-			stored, err := Write(uploadDir, testID, supplied, []byte("x"))
-			if err != nil {
-				t.Fatalf("Write(%q): %v", supplied, err)
-			}
+			stored := mustWrite(t, uploadDir, testID, supplied, []byte("x"))
 			if _, err := Stat(uploadDir, testID, stored); err != nil {
 				t.Fatalf(
 					"Write(%q) returned %q, which Path cannot resolve: %v",
@@ -350,10 +369,7 @@ func TestWriteReadStatRoundTrip(t *testing.T) {
 	uploadDir := t.TempDir()
 	data := []byte("file contents")
 
-	name, err := Write(uploadDir, testID, "scan.pdf", data)
-	if err != nil {
-		t.Fatalf("Write: %v", err)
-	}
+	name := mustWrite(t, uploadDir, testID, "scan.pdf", data)
 	if name != "scan.pdf" {
 		t.Errorf("returned name: got %q, want %q", name, "scan.pdf")
 	}
@@ -383,10 +399,7 @@ func TestWriteCreatesDirectoryOnDemand(t *testing.T) {
 
 	uploadDir := filepath.Join(t.TempDir(), "not", "yet", "created")
 
-	_, err := Write(uploadDir, testID, "scan.pdf", []byte("x"))
-	if err != nil {
-		t.Fatalf("Write: %v", err)
-	}
+	mustWrite(t, uploadDir, testID, "scan.pdf", []byte("x"))
 	info, err := os.Stat(Dir(uploadDir, testID))
 	if err != nil {
 		t.Fatalf("record directory was not created: %v", err)
@@ -407,10 +420,7 @@ func TestWriteReturnsTheSanitisedName(t *testing.T) {
 
 	uploadDir := t.TempDir()
 
-	name, err := Write(uploadDir, testID, "../../etc/passwd", []byte("x"))
-	if err != nil {
-		t.Fatalf("Write: %v", err)
-	}
+	name := mustWrite(t, uploadDir, testID, "../../etc/passwd", []byte("x"))
 	if name != "passwd" {
 		t.Fatalf("returned name: got %q, want %q", name, "passwd")
 	}
@@ -435,14 +445,8 @@ func TestWriteOverwritesTheSameName(t *testing.T) {
 
 	uploadDir := t.TempDir()
 
-	_, err := Write(uploadDir, testID, "scan.pdf", []byte("first"))
-	if err != nil {
-		t.Fatalf("first Write: %v", err)
-	}
-	_, err = Write(uploadDir, testID, "scan.pdf", []byte("second"))
-	if err != nil {
-		t.Fatalf("second Write: %v", err)
-	}
+	mustWrite(t, uploadDir, testID, "scan.pdf", []byte("first"))
+	mustWrite(t, uploadDir, testID, "scan.pdf", []byte("second"))
 
 	got, err := Read(uploadDir, testID, "scan.pdf")
 	if err != nil {
@@ -466,10 +470,7 @@ func TestWriteLeavesNoTempFileOnSuccess(t *testing.T) {
 	t.Parallel()
 
 	uploadDir := t.TempDir()
-	_, err := Write(uploadDir, testID, "scan.pdf", []byte("x"))
-	if err != nil {
-		t.Fatalf("Write: %v", err)
-	}
+	mustWrite(t, uploadDir, testID, "scan.pdf", []byte("x"))
 	assertNoTempFiles(t, Dir(uploadDir, testID))
 }
 
@@ -507,15 +508,14 @@ func TestWriteCleansUpTempFileOnFailure(t *testing.T) {
 //
 // The assertion is that Write reports it rather than proceeding, since the
 // caller writes the database row on success and would otherwise record a file
-// that was never stored.
+// that was never stored, and that it reports it in an error of its own:
+// os.Mkdir's EEXIST would print as "file exists" and read as "the directory
+// is already there", which is why mkdirAll builds errNotDir instead.
 func TestWriteFailsWhenTheUploadDirIsNotADirectory(t *testing.T) {
 	t.Parallel()
 
-	base := t.TempDir()
-	uploadDir := filepath.Join(base, "uploads")
-	if err := os.WriteFile(uploadDir, []byte("not a dir"), 0o644); err != nil {
-		t.Fatalf("setup: %v", err)
-	}
+	uploadDir := testutil.WriteFile(t,
+		filepath.Join(t.TempDir(), "uploads"), []byte("not a dir"))
 
 	name, err := Write(uploadDir, testID, "scan.pdf", []byte("x"))
 	if err == nil {
@@ -532,6 +532,13 @@ func TestWriteFailsWhenTheUploadDirIsNotADirectory(t *testing.T) {
 			err,
 			uploadDir)
 	}
+	var pathErr *fs.PathError
+	if !errors.As(err, &pathErr) {
+		t.Errorf("err = %v, want an *fs.PathError naming the path", err)
+	}
+	if !errors.Is(err, errNotDir) {
+		t.Errorf("err = %v, want it to carry errNotDir", err)
+	}
 }
 
 // TestWriteEmptyData records that a zero-byte file is stored rather than
@@ -542,10 +549,7 @@ func TestWriteEmptyData(t *testing.T) {
 	t.Parallel()
 
 	uploadDir := t.TempDir()
-	name, err := Write(uploadDir, testID, "scan.pdf", nil)
-	if err != nil {
-		t.Fatalf("Write: %v", err)
-	}
+	name := mustWrite(t, uploadDir, testID, "scan.pdf", nil)
 	info, err := Stat(uploadDir, testID, name)
 	if err != nil {
 		t.Fatalf("Stat: %v", err)
@@ -577,10 +581,7 @@ func TestWritePermissions(t *testing.T) {
 	defer setUmask(old)
 
 	uploadDir := t.TempDir()
-	name, err := Write(uploadDir, testID, "scan.pdf", []byte("x"))
-	if err != nil {
-		t.Fatalf("Write: %v", err)
-	}
+	name := mustWrite(t, uploadDir, testID, "scan.pdf", []byte("x"))
 
 	dirInfo, err := os.Stat(Dir(uploadDir, testID))
 	if err != nil {
@@ -630,10 +631,7 @@ func TestWritePermissionsOnCreatedParents(t *testing.T) {
 	base := t.TempDir()
 	uploadDir := filepath.Join(base, "not", "yet", "created")
 
-	name, err := Write(uploadDir, testID, "scan.pdf", []byte("x"))
-	if err != nil {
-		t.Fatalf("Write: %v", err)
-	}
+	name := mustWrite(t, uploadDir, testID, "scan.pdf", []byte("x"))
 
 	created := []string{
 		filepath.Join(base, "not"),
@@ -680,10 +678,7 @@ func TestWriteLeavesExistingDirectoryModesAlone(t *testing.T) {
 		t.Fatalf("setup: %v", err)
 	}
 
-	_, err := Write(uploadDir, testID, "scan.pdf", []byte("x"))
-	if err != nil {
-		t.Fatalf("Write: %v", err)
-	}
+	mustWrite(t, uploadDir, testID, "scan.pdf", []byte("x"))
 
 	info, err := os.Stat(uploadDir)
 	if err != nil {
@@ -759,10 +754,7 @@ func TestCopyUniqueSuffixesBeforeTheExtension(t *testing.T) {
 	t.Parallel()
 
 	uploadDir := t.TempDir()
-	_, err := Write(uploadDir, testID, "letter.docx", []byte("v1"))
-	if err != nil {
-		t.Fatalf("Write: %v", err)
-	}
+	mustWrite(t, uploadDir, testID, "letter.docx", []byte("v1"))
 
 	want := []string{"letter (2).docx", "letter (3).docx", "letter (4).docx"}
 	for _, expected := range want {
@@ -799,10 +791,7 @@ func TestCopyUniqueTakesTheDesiredNameWhenFree(t *testing.T) {
 	t.Parallel()
 
 	uploadDir := t.TempDir()
-	_, err := Write(uploadDir, testID, "letter.docx", []byte("v1"))
-	if err != nil {
-		t.Fatalf("Write: %v", err)
-	}
+	mustWrite(t, uploadDir, testID, "letter.docx", []byte("v1"))
 
 	name, _, err := CopyUnique(uploadDir, testID, "letter.docx", "backup.docx")
 	if err != nil {
@@ -829,9 +818,7 @@ func TestCopyUniqueReturnsTheNameOnDisk(t *testing.T) {
 	t.Parallel()
 
 	uploadDir := t.TempDir()
-	if _, err := Write(uploadDir, testID, ".pdf", []byte("v1")); err != nil {
-		t.Fatalf("Write: %v", err)
-	}
+	mustWrite(t, uploadDir, testID, ".pdf", []byte("v1"))
 
 	name, n, err := CopyUnique(uploadDir, testID, ".pdf", ".pdf")
 	if err != nil {
@@ -894,27 +881,28 @@ func TestCopyUniqueReportsAMissingSource(t *testing.T) {
 // Stat-then-write has a window: two copies under the same record can both see
 // the same name as available, and the loser's bytes land on top of the
 // winner's. The failure needs two things to show up — concurrency and the same
-// desired name — so it survives every sequential test above.
+// desired name — so it survives every sequential test above. The copies are
+// released together, and wide enough that the window is contended rather than
+// merely open.
 func TestCopyUniqueIsAtomicUnderConcurrency(t *testing.T) {
 	t.Parallel()
 
 	uploadDir := t.TempDir()
-	_, err := Write(uploadDir, testID, "letter.docx", []byte("v1"))
-	if err != nil {
-		t.Fatalf("Write: %v", err)
-	}
+	mustWrite(t, uploadDir, testID, "letter.docx", []byte("v1"))
 
-	const copies = 8
+	const copies = 24
 	var (
 		wg    sync.WaitGroup
 		mu    sync.Mutex
 		names = make(map[string]int, copies)
 		errs  []error
 	)
+	start := make(chan struct{})
 	for range copies {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			<-start
 			name, _, err := CopyUnique(
 				uploadDir, testID, "letter.docx", "letter.docx")
 			mu.Lock()
@@ -926,6 +914,7 @@ func TestCopyUniqueIsAtomicUnderConcurrency(t *testing.T) {
 			names[name]++
 		}()
 	}
+	close(start)
 	wg.Wait()
 
 	for _, err := range errs {
@@ -940,6 +929,15 @@ func TestCopyUniqueIsAtomicUnderConcurrency(t *testing.T) {
 	// a missing file rather than as a duplicate name.
 	if got := len(listDir(t, Dir(uploadDir, testID))); got != copies+1 {
 		t.Errorf("directory holds %d files, want %d", got, copies+1)
+	}
+	// And every copy holds the source bytes: a name handed out twice shows
+	// up as a short or doubled file even where the count lines up.
+	for name := range names {
+		if got, err := Read(uploadDir, testID, name); err != nil {
+			t.Errorf("Read(%q): %v", name, err)
+		} else if string(got) != "v1" {
+			t.Errorf("%q holds %q, want the source bytes", name, got)
+		}
 	}
 }
 
@@ -971,9 +969,7 @@ func TestCopyUniqueRefusesASuffixOverTheNameCap(t *testing.T) {
 	if NameTooLong(supplied) {
 		t.Fatalf("fixture is wrong: %q is already over the cap", supplied)
 	}
-	if _, err := Write(uploadDir, testID, supplied, []byte("v1")); err != nil {
-		t.Fatalf("Write: %v", err)
-	}
+	mustWrite(t, uploadDir, testID, supplied, []byte("v1"))
 
 	// The desired name is free, so no suffix is inserted and the copy fits.
 	first, _, err := CopyUnique(uploadDir, testID, supplied, "backup.pdf")
@@ -1017,14 +1013,11 @@ func TestRemove(t *testing.T) {
 		t.Parallel()
 
 		uploadDir := t.TempDir()
-		name, err := Write(uploadDir, testID, "scan.pdf", []byte("x"))
-		if err != nil {
-			t.Fatalf("Write: %v", err)
-		}
+		name := mustWrite(t, uploadDir, testID, "scan.pdf", []byte("x"))
 
 		Remove(uploadDir, testID, name)
 
-		_, err = os.Stat(Path(uploadDir, testID, name))
+		_, err := os.Stat(Path(uploadDir, testID, name))
 		if !errors.Is(err, fs.ErrNotExist) {
 			t.Error("the file is still present")
 		}
@@ -1038,14 +1031,8 @@ func TestRemove(t *testing.T) {
 		t.Parallel()
 
 		uploadDir := t.TempDir()
-		_, err := Write(uploadDir, testID, "scan.pdf", []byte("x"))
-		if err != nil {
-			t.Fatalf("Write: %v", err)
-		}
-		_, err = Write(uploadDir, testID, "other.pdf", []byte("y"))
-		if err != nil {
-			t.Fatalf("Write: %v", err)
-		}
+		mustWrite(t, uploadDir, testID, "scan.pdf", []byte("x"))
+		mustWrite(t, uploadDir, testID, "other.pdf", []byte("y"))
 
 		Remove(uploadDir, testID, "scan.pdf")
 
@@ -1070,10 +1057,7 @@ func TestRemove(t *testing.T) {
 		// than decorative: without it, a row with an empty name column
 		// resolves to this exact path and deletes a real file belonging to a
 		// different upload.
-		name, err := Write(uploadDir, testID, "", []byte("x"))
-		if err != nil {
-			t.Fatalf("Write: %v", err)
-		}
+		name := mustWrite(t, uploadDir, testID, "", []byte("x"))
 		if name != FallbackName {
 			t.Fatalf(
 				"fixture assumption broken: SafeName(\"\") is %q, want %q",
@@ -1112,15 +1096,12 @@ func TestRemove(t *testing.T) {
 		// these files on disk forever, and nothing in the caller would report
 		// it.
 		uploadDir := t.TempDir()
-		name, err := Write(uploadDir, testID, FallbackName, []byte("x"))
-		if err != nil {
-			t.Fatalf("Write: %v", err)
-		}
+		name := mustWrite(t, uploadDir, testID, FallbackName, []byte("x"))
 
 		// Whitespace is trimmed, which is not a substitution.
 		Remove(uploadDir, testID, "  "+FallbackName+"  ")
 
-		_, err = os.Stat(Path(uploadDir, testID, name))
+		_, err := os.Stat(Path(uploadDir, testID, name))
 		if !errors.Is(err, fs.ErrNotExist) {
 			t.Error("a file genuinely named for the fallback was not removed")
 		}
@@ -1146,10 +1127,7 @@ func TestRemoveFiles(t *testing.T) {
 
 	uploadDir := t.TempDir()
 	for _, supplied := range []string{"a.pdf", "b.pdf", "c.pdf"} {
-		if _, err := Write(uploadDir, testID, supplied,
-			[]byte("x")); err != nil {
-			t.Fatalf("Write(%q): %v", supplied, err)
-		}
+		mustWrite(t, uploadDir, testID, supplied, []byte("x"))
 	}
 
 	a, b := "a.pdf", "b.pdf"
@@ -1183,30 +1161,19 @@ func TestRemoveDir(t *testing.T) {
 	t.Parallel()
 
 	uploadDir := t.TempDir()
-	_, err := Write(uploadDir, testID, "scan.pdf", []byte("x"))
-	if err != nil {
-		t.Fatalf("Write: %v", err)
-	}
-	_, err = Write(uploadDir, testID, "other.pdf", []byte("y"))
-	if err != nil {
-		t.Fatalf("Write: %v", err)
-	}
+	mustWrite(t, uploadDir, testID, "scan.pdf", []byte("x"))
+	mustWrite(t, uploadDir, testID, "other.pdf", []byte("y"))
 	// A stray temporary from an interrupted upload, which is one of the
 	// reasons RemoveDir exists rather than a loop over known names.
-	orphan := filepath.Join(Dir(uploadDir, testID), ".tmp-orphan")
-	if err := os.WriteFile(orphan, []byte("z"), 0o600); err != nil {
-		t.Fatalf("setup: %v", err)
-	}
+	testutil.WriteFile(t,
+		filepath.Join(Dir(uploadDir, testID), ".tmp-orphan"), []byte("z"))
 
 	// A sibling record that must survive.
-	_, err = Write(uploadDir, testID+1, "keep.pdf", []byte("k"))
-	if err != nil {
-		t.Fatalf("Write: %v", err)
-	}
+	mustWrite(t, uploadDir, testID+1, "keep.pdf", []byte("k"))
 
 	RemoveDir(uploadDir, testID)
 
-	_, err = os.Stat(Dir(uploadDir, testID))
+	_, err := os.Stat(Dir(uploadDir, testID))
 	if !errors.Is(err, fs.ErrNotExist) {
 		t.Error("the record directory survived RemoveDir")
 	}
@@ -1380,8 +1347,7 @@ func TestEmptyInputSniffsAsTextSoTheGuardIsNeeded(t *testing.T) {
 func TestSniffedTiffIsGenericSoTheFallbackIsNeeded(t *testing.T) {
 	t.Parallel()
 
-	const generic = "application/octet-stream"
-	if got := http.DetectContentType(tiffBytes); got != generic {
+	if got := http.DetectContentType(tiffBytes); got != genericType {
 		t.Errorf(
 			"http.DetectContentType now reports %q for TIFF; the extension "+
 				"fallback's rationale has changed", got)
@@ -1600,19 +1566,16 @@ func TestRegisterExtsNormalisesTheContentType(t *testing.T) {
 func TestRegisteringATextSubtypeNeedsAContainer(t *testing.T) {
 	restoreExts(t)
 
-	const (
-		csv     = "text/csv"
-		generic = "application/octet-stream"
-	)
+	const csv = "text/csv"
 	csvBytes := []byte("kode,no_hak\n35.002,12\n")
 
 	RegisterExt(".csv", csv)
-	if got := DetectContentType("data.csv", csvBytes); got != generic {
+	if got := DetectContentType("data.csv", csvBytes); got != genericType {
 		t.Errorf(
 			"DetectContentType before the container declaration: got %q, "+
 				"want %q",
 			got,
-			generic)
+			genericType)
 	}
 
 	RegisterContainer(csv, "text/plain; charset=utf-8")
@@ -1620,19 +1583,19 @@ func TestRegisteringATextSubtypeNeedsAContainer(t *testing.T) {
 	if got := DetectContentType("data.csv", csvBytes); got != csv {
 		t.Errorf("DetectContentType: got %q, want %q", got, csv)
 	}
-	if got := DetectContentType("data.csv", htmlBytes); got != generic {
+	if got := DetectContentType("data.csv", htmlBytes); got != genericType {
 		t.Errorf(
 			"html named .csv: got %q, want %q — the container exception must "+
 				"not admit a different text type",
 			got,
-			generic)
+			genericType)
 	}
-	if got := DetectContentType("scan.pdf", csvBytes); got != generic {
+	if got := DetectContentType("scan.pdf", csvBytes); got != genericType {
 		t.Errorf(
 			"plain text named .pdf: got %q, want %q — declaring one "+
 				"container must not loosen every other extension",
 			got,
-			generic)
+			genericType)
 	}
 }
 
@@ -1675,7 +1638,6 @@ func TestContainerExceptionIsKeyedOnTheFormat(t *testing.T) {
 
 	RegisterExts(OfficeExts)
 
-	const generic = "application/octet-stream"
 	cases := []struct {
 		supplied string
 		data     []byte
@@ -1686,10 +1648,10 @@ func TestContainerExceptionIsKeyedOnTheFormat(t *testing.T) {
 		{"letter.doc", htmlBytes, "legacy office formats have no container"},
 	}
 	for _, c := range cases {
-		if got := DetectContentType(c.supplied, c.data); got != generic {
+		if got := DetectContentType(c.supplied, c.data); got != genericType {
 			t.Errorf(
 				"DetectContentType(%q): got %q, want %q (%s)",
-				c.supplied, got, generic, c.why)
+				c.supplied, got, genericType, c.why)
 		}
 	}
 }
@@ -1828,6 +1790,12 @@ func TestLabelsTrackTheirLimits(t *testing.T) {
 	if got, want := MaxFileLabel(), "5 MiB"; got != want {
 		t.Errorf("MaxFileLabel: got %q, want %q", got, want)
 	}
+	// A cap no unit divides is named in bytes rather than rounded, the
+	// rule bytesize.Label states for every byte limit in the toolkit.
+	MaxFileBytes = (20 << 20) + 1
+	if got, want := MaxFileLabel(), "20971521 bytes"; got != want {
+		t.Errorf("MaxFileLabel: got %q, want %q", got, want)
+	}
 
 	MaxNameLen = 50
 	if got, want := MaxNameLabel(), "50 bytes"; got != want {
@@ -1848,31 +1816,6 @@ func TestMaxNameLabelNamesTheUnit(t *testing.T) {
 	}
 	if !strings.HasSuffix(label, " bytes") {
 		t.Errorf("MaxNameLabel %q must name the unit, which is bytes", label)
-	}
-}
-
-// TestHumanBytesStaysTruthful pins the rule that the label only uses a larger
-// unit when the number divides into it exactly. Rounding would print a figure
-// the check does not enforce, which is the drift these labels exist to stop.
-func TestHumanBytesStaysTruthful(t *testing.T) {
-	t.Parallel()
-
-	cases := []struct {
-		n    int
-		want string
-	}{
-		{20 << 20, "20 MiB"},
-		{512 << 10, "512 KiB"},
-		{1 << 30, "1 GiB"},
-		{1024, "1 KiB"},
-		{1023, "1023 bytes"},
-		{(20 << 20) + 1, "20971521 bytes"},
-		{0, "0 bytes"},
-	}
-	for _, c := range cases {
-		if got := humanBytes(c.n); got != c.want {
-			t.Errorf("humanBytes(%d): got %q, want %q", c.n, got, c.want)
-		}
 	}
 }
 

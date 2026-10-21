@@ -20,8 +20,10 @@ package config
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
+	"github.com/mas-ony/go-toolkit/internal/strlist"
 	"github.com/spf13/viper"
 )
 
@@ -82,27 +84,13 @@ const (
 	ChannelTelegram = "telegram"
 )
 
-// validChannels is the allowlist checked by NotificationConfig.Validate.
+// validChannels is the allowlist checked by NotificationConfig.Validate,
+// in the order its error names them.
 //
 // Checked because a typo here is INVISIBLE at runtime. Enabled answers
 // false for a channel spelled "emial", so no mail is ever sent, and the
 // only symptom is a recipient who never hears about anything.
-var validChannels = map[string]struct{}{
-	ChannelWhatsApp: {},
-	ChannelEmail:    {},
-	ChannelTelegram: {},
-}
-
-// normaliseChannel returns the form a channel name is compared in:
-// lowercased, with surrounding space trimmed.
-//
-// NewNotificationConfig stores every entry in this form. Validate and
-// Enabled apply it again to what they compare, because a
-// NotificationConfig built as a struct literal never passed through the
-// constructor.
-func normaliseChannel(s string) string {
-	return strings.ToLower(strings.TrimSpace(s))
-}
+var validChannels = []string{ChannelWhatsApp, ChannelEmail, ChannelTelegram}
 
 // NewNotificationConfig reads NotificationConfig fields from the provided
 // Viper instance.
@@ -115,13 +103,18 @@ func normaliseChannel(s string) string {
 // supports. A key present in config.yaml but missing here is dead weight —
 // Viper never looks it up, so neither the file nor an environment variable can
 // supply it. The channel sections nested under it read their own keys.
+//
+// Every entry is stored in the form a channel is compared in,
+// strlist.Normalise's. Validate and Enabled apply it again to what they
+// compare, because a NotificationConfig built as a struct literal never
+// passed through this constructor.
 func NewNotificationConfig(v *viper.Viper) *NotificationConfig {
 	// Read through splitList, so NOTIFICATION_CHANNELS=whatsapp,email is
 	// two channels rather than one named "whatsapp,email".
 	raw := splitList(v, "notification.channels")
 	channels := make([]string, len(raw))
 	for i, ch := range raw {
-		channels[i] = normaliseChannel(ch)
+		channels[i] = strlist.Normalise(ch)
 	}
 	return &NotificationConfig{Channels: channels}
 }
@@ -137,9 +130,9 @@ func (c *NotificationConfig) Enabled(channel string) bool {
 	if c == nil {
 		return false
 	}
-	want := normaliseChannel(channel)
+	want := strlist.Normalise(channel)
 	for _, ch := range c.Channels {
-		if normaliseChannel(ch) == want {
+		if strlist.Normalise(ch) == want {
 			return true
 		}
 	}
@@ -178,15 +171,13 @@ func (c *NotificationConfig) Validate() error {
 	}
 
 	for i, ch := range c.Channels {
-		if _, ok := validChannels[normaliseChannel(ch)]; !ok {
+		if !slices.Contains(validChannels, strlist.Normalise(ch)) {
 			errs = append(errs, fmt.Errorf("notification.channels[%d] is "+
-				"not a channel (got %q): want %s, %s or %s, since any "+
-				"other spelling is never enabled and nothing reports it",
+				"not a channel (got %q): want %s, since any other "+
+				"spelling is never enabled and nothing reports it",
 				i,
 				ch,
-				ChannelWhatsApp,
-				ChannelEmail,
-				ChannelTelegram))
+				alternatives(validChannels)))
 		}
 	}
 
@@ -199,15 +190,17 @@ func (c *NotificationConfig) Validate() error {
 // Printing a value copy (%v on NotificationConfig, not &NotificationConfig)
 // bypasses it and dumps the struct fields directly.
 //
-// An empty list prints as "none" rather than as nothing, so a startup line
-// says in words that no channel sends.
+// An empty list prints as "(none)" rather than as nothing, so a startup
+// line says in words that no channel sends. The parentheses mark it as a
+// description, as they do for every label String prints in place of a
+// value: "none" is not a channel Validate accepts.
 func (c *NotificationConfig) String() string {
 	if c == nil {
 		return "<nil NotificationConfig>"
 	}
 	channels := strings.Join(c.Channels, ",")
 	if len(c.Channels) == 0 {
-		channels = "none"
+		channels = noneLabel
 	}
 
 	return fmt.Sprintf(

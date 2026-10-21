@@ -242,9 +242,19 @@ func trimYearSuffix(database string) string {
 	return database[:n-yearLen]
 }
 
-// joinNamespace prefixes an already-quoted table name with a namespace, or
-// returns it alone when there is none.
-func joinNamespace(namespace, table string) string {
+// qualify is both Qualify methods: it quotes table with quote when
+// needsQuoting reports that it cannot appear bare, and prefixes it with
+// namespace, or returns it alone when there is none.
+//
+// quote is called only for a name that needs it, and that is the property
+// both callers depend on: the package-level Qualify passes QuoteIdent, which
+// resolves the selected dialect, and Dialect.Qualify passes its own
+// QuoteIdent, which reads the receiver, so neither consults a grammar for a
+// plain name.
+func qualify(namespace, table string, quote func(string) string) string {
+	if needsQuoting(table) {
+		table = quote(table)
+	}
 	if namespace == "" {
 		return table
 	}
@@ -284,16 +294,13 @@ func Configure(namespace string) {
 // table name must be written in code.
 //
 // The dialect is resolved ONLY when the table name has to be quoted, which
-// is a tested property rather than an accident of the order of the lines
-// below. A repository built from plain names therefore works before
+// is a tested property rather than an accident of how qualify happens to be
+// written. A repository built from plain names therefore works before
 // SetDialect has run, and only a name that cannot appear bare makes
 // qualification depend on the grammar. Qualify on a Dialect takes the
 // grammar as its receiver and never depends on the selection at all.
 func Qualify(namespace, table string) string {
-	if !needsQuoting(table) {
-		return joinNamespace(namespace, table)
-	}
-	return joinNamespace(namespace, QuoteIdent(table))
+	return qualify(namespace, table, QuoteIdent)
 }
 
 // Qualify is Qualify in the grammar d rather than the selected one.
@@ -306,10 +313,7 @@ func Qualify(namespace, table string) string {
 // d is read only when the name needs quoting, matching Qualify, so a plain
 // name is joined without d having to be a grammar at all.
 func (d Dialect) Qualify(namespace, table string) string {
-	if !needsQuoting(table) {
-		return joinNamespace(namespace, table)
-	}
-	return joinNamespace(namespace, d.QuoteIdent(table))
+	return qualify(namespace, table, d.QuoteIdent)
 }
 
 // NamespaceForYear rewrites the database segment of a prefix to name year:

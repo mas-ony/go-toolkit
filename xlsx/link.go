@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"github.com/mas-ony/go-toolkit/internal/basename"
 )
 
 // LinkTarget is a hyperlink resolved into something the caller can act on.
@@ -70,36 +72,31 @@ var (
 	ErrNotAFile = errors.New("hyperlink does not point at a file")
 )
 
-// namesNoFile reports whether a filepath.Base result names something other
-// than a file.
+// notAFile is the refusal every route below gives a target that names no
+// file. target is the raw hyperlink, quoted so the message names what the
+// operator wrote rather than a path derived from it.
 //
-// Base is the key a caller searches on when Path names a location that does
-// not exist on this machine, so it has to be a filename. Base answers "." for
-// an empty path, ".." for a target that only climbs, and a lone separator for
-// one that is only separators; a caller looking through the scan directory for
-// any of those is looking for something that cannot be there. A target that
-// names no file is ErrNotAFile, which is the answer that sends the caller to
-// its other route instead.
+// Every route asks basename.NamesNoFile of the filepath.Base it derives,
+// the list fileutil folds a stored name onto its fallback by. Base is the
+// key a caller searches on when Path names a location that does not exist
+// on this machine, so it has to be a filename: Base answers "." for an
+// empty path, ".." for a target that only climbs, and a lone separator for
+// one that is only separators, and a caller looking through the scan
+// directory for any of those is looking for something that cannot be
+// there. ErrNotAFile is the answer that sends it to its other route
+// instead.
 //
 // ".." is the one a reader is most likely to think unreachable. It is not:
 // "..\\..\\archive" is an ordinary shape for a hyperlink, and Base reduces
 // every climbing target to it. filepath.Join then cleans the Path down to a
-// DIRECTORY, so without this case the caller gets a Path it can stat and a
+// DIRECTORY, so without the check the caller gets a Path it can stat and a
 // Base it can never match.
 //
-// The separator is spelled out both ways rather than as
-// string(filepath.Separator). That conversion is a CONSTANT, so on a Windows
-// build it folds to `\` and collides with the literal below — a duplicate
-// case, which is a compile error there though not on Linux. Both literals are
-// needed because Base returns the PLATFORM separator, and neither can reach
-// here as a real filename, since every backslash in the target became a
-// forward slash before Base ran.
-func namesNoFile(base string) bool {
-	switch base {
-	case "", ".", "..", "/", `\`:
-		return true
-	}
-	return false
+// Every backslash in a target has become a forward slash before Base runs,
+// so the platform's separator, which is the one NamesNoFile lists, is the
+// only one a run of separators can leave behind.
+func notAFile(target string) (LinkTarget, error) {
+	return LinkTarget{}, fmt.Errorf("%w: %s", ErrNotAFile, target)
 }
 
 // foreignTarget builds the LinkTarget for an absolute slashed path — a UNC
@@ -116,8 +113,8 @@ func namesNoFile(base string) bool {
 // the operator wrote rather than the path this function derived from it.
 func foreignTarget(slashed, target string) (LinkTarget, error) {
 	base := filepath.Base(slashed)
-	if namesNoFile(base) {
-		return LinkTarget{}, fmt.Errorf("%w: %s", ErrNotAFile, target)
+	if basename.NamesNoFile(base) {
+		return notAFile(target)
 	}
 	return LinkTarget{
 		Path:    filepath.FromSlash(slashed),
@@ -161,8 +158,8 @@ func resolvePlainPath(target, baseDir string) (LinkTarget, error) {
 	slashed := strings.ReplaceAll(target, `\`, "/")
 	base := filepath.Base(slashed)
 
-	if namesNoFile(base) {
-		return LinkTarget{}, fmt.Errorf("%w: %s", ErrNotAFile, target)
+	if basename.NamesNoFile(base) {
+		return notAFile(target)
 	}
 
 	// The three absolute shapes — a UNC share, a drive letter, and a POSIX
@@ -243,7 +240,7 @@ func resolveFileURL(target, baseDir string) (LinkTarget, error) {
 			}
 		}
 		if rest == "" || rest == "/" {
-			return LinkTarget{}, fmt.Errorf("%w: %s", ErrNotAFile, target)
+			return notAFile(target)
 		}
 		return resolvePlainPath(decodeURI(rest), baseDir)
 	}
@@ -270,7 +267,7 @@ func resolveFileURL(target, baseDir string) (LinkTarget, error) {
 	// key the caller's by-filename recovery searches on. Looking for a file
 	// called "." is worse than reporting that this was never a file.
 	if path == "" || path == "/" {
-		return LinkTarget{}, fmt.Errorf("%w: %s", ErrNotAFile, target)
+		return notAFile(target)
 	}
 
 	if u.Host != "" && u.Host != "localhost" {
@@ -397,7 +394,7 @@ func ResolveLink(target, baseDir string) (LinkTarget, error) {
 		strings.HasPrefix(lower, "https://"),
 		strings.HasPrefix(lower, "mailto:"),
 		strings.HasPrefix(lower, "ftp://"):
-		return LinkTarget{}, fmt.Errorf("%w: %s", ErrNotAFile, target)
+		return notAFile(target)
 
 	case strings.HasPrefix(lower, "file:"):
 		return resolveFileURL(target, baseDir)

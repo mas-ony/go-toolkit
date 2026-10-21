@@ -379,19 +379,38 @@ func TestJSONTagsAreTheWireContract(t *testing.T) {
 	}
 }
 
+// Envelope is the declaration Response is built from, so a body a handler
+// encodes decodes into a client's typed form with nothing lost.
+func TestEnvelopeDecodesWhatResponseEncodes(t *testing.T) {
+	t.Parallel()
+
+	type item struct {
+		ID int `json:"id"`
+	}
+	body := marshal(t, OK("ok", item{ID: 7}))
+
+	var env Envelope[item]
+	if err := json.Unmarshal([]byte(body), &env); err != nil {
+		t.Fatalf("decoding %s: %v", body, err)
+	}
+	if !env.Success || env.Message != "ok" || env.Data.ID != 7 {
+		t.Errorf("decoded %+v from %s", env, body)
+	}
+}
+
 // TestSwaggoTagsAreInertDocumentation records the doc comment's claim that the
 // `example` tags have no runtime effect.
 //
 // They sit next to the json tags and look like they might do something. This
 // asserts they do not: the marshalled output of a zero-value Response contains
-// none of the example values, so nobody has to wonder whether "[]" from the
-// Data tag can leak into a real response.
+// none of the example values, so nobody has to wonder whether the "true" on
+// Success can leak into a real response and report a failure as a success.
 func TestSwaggoTagsAreInertDocumentation(t *testing.T) {
 	t.Parallel()
 
-	f, ok := reflect.TypeOf(Response{}).FieldByName("Data")
+	f, ok := reflect.TypeOf(Response{}).FieldByName("Success")
 	if !ok {
-		t.Fatal("Data field not found")
+		t.Fatal("Success field not found")
 	}
 	if f.Tag.Get("example") == "" {
 		t.Skip("example tags removed; nothing left to assert")
@@ -402,6 +421,31 @@ func TestSwaggoTagsAreInertDocumentation(t *testing.T) {
 		t.Errorf(
 			"a zero Response marshalled to %s, want %s — example tags must "+
 				"not affect output", got, want)
+	}
+}
+
+// Data and Items carry no example, for the reason Envelope gives: swag can
+// read none as an any or a struct, the types they usually hold, and fails
+// the whole definition over one it cannot read. A tag belongs to the
+// declaration, so one instantiation of Paginated stands for all of them.
+func TestDataAndItemsCarryNoExample(t *testing.T) {
+	t.Parallel()
+
+	for _, c := range []struct {
+		typ   reflect.Type
+		field string
+	}{
+		{reflect.TypeOf(Response{}), "Data"},
+		{reflect.TypeOf(Paginated[int]{}), "Items"},
+	} {
+		f, ok := c.typ.FieldByName(c.field)
+		if !ok {
+			t.Fatalf("%s has no field %s", c.typ.Name(), c.field)
+		}
+		if ex, ok := f.Tag.Lookup("example"); ok {
+			t.Errorf("%s.%s carries example %q, which swag cannot parse",
+				c.typ.Name(), c.field, ex)
+		}
 	}
 }
 

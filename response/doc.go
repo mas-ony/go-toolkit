@@ -3,8 +3,13 @@
 // A handler returns either a Response for a single result, or a Response
 // whose Data field holds a Paginated value for a list. Nothing here writes
 // to a connection, imports a web framework, or knows what an HTTP status
-// code is: the envelope is a pair of structs and four constructors, and
+// code is: the envelope is two generic structs, Envelope and Paginated,
+// the Response a handler builds from the first, and four constructors, and
 // the caller decides how it reaches the wire.
+//
+// Envelope is generic over its data so a client reading the envelope uses
+// the declaration a handler writes it from: httpclient.Envelope is
+// Envelope under another name, decoding into the caller's own type.
 //
 //	return c.Status(200).JSON(response.OK("", user))
 //	return c.Status(404).JSON(response.Fail("user not found"))

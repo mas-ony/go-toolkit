@@ -10,7 +10,6 @@ package database
 
 import (
 	"context"
-	"database/sql"
 	"database/sql/driver"
 	"errors"
 	"io"
@@ -27,7 +26,9 @@ import (
 // It is a second fake rather than a reuse of tx_test.go's, which serves
 // begin, commit and rollback and refuses statements outright. The two want
 // opposite things from a connection, and one fake doing both would make
-// each set of tests read around the other's scaffolding.
+// each set of tests read around the other's scaffolding. What they do
+// share is what neither uses: a connector's Driver, from connectorBase,
+// and a conn's Prepare and Close, from connBase, both in tx_test.go.
 //
 // Recording the query TEXT is half the point. These three helpers hand
 // their SQL to BindNamed before it reaches a driver, and what that rewrites
@@ -41,19 +42,22 @@ type queryDB struct {
 	seen []seenQuery
 }
 
-// queryDriver is the driver.Driver behind queryConnector. Its Open refuses,
-// because the fake is reached only through the connector.
-type queryDriver struct{}
-
 // queryConnector hands out connections to one queryDB, so that sql.OpenDB
 // can use the fake without registering a driver name.
-type queryConnector struct{ db *queryDB }
+type queryConnector struct {
+	connectorBase
+	db *queryDB
+}
 
 // queryConn implements driver.QueryerContext, which is what lets
 // database/sql skip Prepare entirely and hand the statement over in one
-// call. A conn with only Prepare would work too, at the cost of a Stmt type
-// whose sole job is to carry the query text to the same place.
-type queryConn struct{ db *queryDB }
+// call, so connBase's refusing Prepare is never reached. A conn with only
+// Prepare would work too, at the cost of a Stmt type whose sole job is to
+// carry the query text to the same place.
+type queryConn struct {
+	connBase
+	db *queryDB
+}
 
 // queryRows replays a canned result set, one row per Next.
 type queryRows struct {
@@ -98,16 +102,14 @@ func selected(exprs ...string) string {
 
 // open returns a *sqlx.DB backed by this fake, bound as driverName.
 //
-// driverName never reaches a registry: sql.OpenDB takes the connector
-// directly, so no mysql or sqlserver driver is involved and the name's only
-// job is to pick the placeholder style through sqlx.BindType. That is
-// exactly the coupling buildDSN's doc comment describes, which is why the
-// tests below run under both names.
+// driverName never reaches a registry: openFake hands sql.OpenDB the
+// connector directly, so no mysql or sqlserver driver is involved and the
+// name's only job is to pick the placeholder style through sqlx.BindType.
+// That is exactly the coupling buildDSN's doc comment describes, which is
+// why the tests below run under both names.
 func (q *queryDB) open(t *testing.T, driverName string) *sqlx.DB {
 	t.Helper()
-	db := sqlx.NewDb(sql.OpenDB(&queryConnector{db: q}), driverName)
-	t.Cleanup(func() { _ = db.Close() })
-	return db
+	return openFake(t, &queryConnector{db: q}, driverName)
 }
 
 // lastQuery returns the most recent query, or a zero value if none ran.
@@ -127,27 +129,12 @@ func (q *queryDB) count() int {
 	return len(q.seen)
 }
 
-// Driver returns the driver the connector belongs to.
-func (c *queryConnector) Driver() driver.Driver { return queryDriver{} }
-
 // Columns returns the canned column names.
 func (r *queryRows) Columns() []string { return r.cols }
 
 // Connect opens a connection onto the shared queryDB.
 func (c *queryConnector) Connect(context.Context) (driver.Conn, error) {
 	return &queryConn{db: c.db}, nil
-}
-
-// Open refuses: the fake is reachable only through its connector.
-func (queryDriver) Open(string) (driver.Conn, error) {
-	return nil, errors.New(
-		"fake: this driver is only reachable through its connector")
-}
-
-// Prepare refuses. database/sql never calls it, because queryConn
-// implements QueryContext.
-func (c *queryConn) Prepare(string) (driver.Stmt, error) {
-	return nil, errors.New("fake: prepare is not supported")
 }
 
 // Begin refuses: the read helpers never start a transaction.
@@ -183,9 +170,6 @@ func (r *queryRows) Next(dest []driver.Value) error {
 	r.i++
 	return nil
 }
-
-// Close releases nothing; the fake holds no resources.
-func (c *queryConn) Close() error { return nil }
 
 // Close releases nothing; the rows live in memory.
 func (r *queryRows) Close() error { return nil }
@@ -351,6 +335,26 @@ func TestSortClause(t *testing.T) {
 		got := SortClause(c.fields, testSortCols, fallback)
 		if got != c.want {
 			t.Errorf("%s: SortClause = %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
+// Direction is the one reading of a direction: desc in any letter case and
+// with any surrounding space is descending, and everything else, nothing
+// at all included, is ascending.
+func TestSortFieldDirection(t *testing.T) {
+	for dir, want := range map[string]string{
+		"desc":       "DESC",
+		"DeSc":       "DESC",
+		" desc\t":    "DESC",
+		"":           "ASC",
+		"asc":        "ASC",
+		"sideways":   "ASC",
+		"descending": "ASC",
+		"de sc":      "ASC",
+	} {
+		if got := (SortField{Dir: dir}).Direction(); got != want {
+			t.Errorf("Direction for %q = %q, want %q", dir, got, want)
 		}
 	}
 }
