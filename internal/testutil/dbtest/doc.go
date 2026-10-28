@@ -1,7 +1,8 @@
 // Package dbtest is the harness the integration suites that need a real
 // server share: which servers a suite can run against, the variable each
 // one's DSN is read from, how a test runs once per server whose DSN is set
-// and skips when none is, and how a scratch table is named and dropped.
+// and skips when none is, how a statement is run against it, and how a
+// scratch table is named and dropped.
 //
 // The database and datetime suites read the same two variables, so one
 // scratch server serves both:

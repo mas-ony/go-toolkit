@@ -17,9 +17,9 @@ package config
 // decides how the application calls it.
 
 import (
-	"errors"
 	"fmt"
 
+	"github.com/mas-ony/go-toolkit/internal/upstream"
 	"github.com/spf13/viper"
 )
 
@@ -81,7 +81,7 @@ func NewWhatsAppConfig(v *viper.Viper) *WhatsAppConfig {
 // because there is nothing here to append to one.
 func (c *WhatsAppConfig) Validate() error {
 	if c == nil {
-		return errors.New("whatsapp config was not initialised")
+		return upstream.NotInitialised("notification.whatsapp")
 	}
 	return nil
 }
@@ -93,7 +93,7 @@ func (c *WhatsAppConfig) Validate() error {
 // bypasses it and dumps the struct fields directly.
 func (c *WhatsAppConfig) String() string {
 	if c == nil {
-		return "<nil WhatsAppConfig>"
+		return nilLabel("WhatsAppConfig")
 	}
 	return fmt.Sprintf("Async=%t",
 		c.Async,

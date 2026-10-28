@@ -38,7 +38,11 @@
 // quoted by internal/upstream instead, the code httpclient checks a base
 // URL with at run time, so the two cannot disagree about what a usable
 // base URL is. A port key is held to upstream.CheckPort for the same
-// reason: database.New refuses database.port by the same range.
+// reason: database.New refuses database.port by the same range. The error
+// for a key left unset is upstream.Required and the one for a section
+// never built upstream.NotInitialised, for the same reason again:
+// httpclient.New and database.New report what they were not given in the
+// same words.
 //
 // # How a key's environment spelling is derived
 //
@@ -168,8 +172,9 @@
 // the way NewViper derives it; every constructor survives an empty Viper;
 // every nil receiver validates to an error and logs as "<nil T>"; and no
 // String prints a password, token or signing secret. It also holds each
-// section file to a name derived from its prefix, and a section missing
-// from the test table fails there too.
+// section file to a name derived from its prefix and each Validate to that
+// prefix when it reports a section never built, and a section missing from
+// the test table fails there too.
 //
 // What is particular to each section — the rules its Validate enforces,
 // and helpers such as Namespace and the With installers — is tested beside

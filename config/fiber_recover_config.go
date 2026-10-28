@@ -12,11 +12,11 @@ package config
 // NewViper; see the package documentation.
 
 import (
-	"errors"
 	"fmt"
 
 	"github.com/gofiber/fiber/v3"
 	fiberrecover "github.com/gofiber/fiber/v3/middleware/recover"
+	"github.com/mas-ony/go-toolkit/internal/upstream"
 	"github.com/spf13/viper"
 )
 
@@ -186,7 +186,7 @@ func (c *RecoverConfig) WithStackTraceHandler(
 // there is nothing here to append to one.
 func (c *RecoverConfig) Validate() error {
 	if c == nil || c.Config == nil {
-		return errors.New("fiber.recover config was not initialised")
+		return upstream.NotInitialised("fiber.recover")
 	}
 	return nil
 }
@@ -205,10 +205,10 @@ func (c *RecoverConfig) Validate() error {
 // placeholder.
 func (c *RecoverConfig) String() string {
 	if c == nil {
-		return "<nil RecoverConfig>"
+		return nilLabel("RecoverConfig")
 	}
 	if c.Config == nil {
-		return "<uninitialised RecoverConfig>"
+		return uninitialisedLabel("RecoverConfig")
 	}
 	return fmt.Sprintf("EnableStackTrace=%t",
 		c.EnableStackTrace,

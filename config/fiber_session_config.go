@@ -38,6 +38,7 @@ import (
 	"github.com/gofiber/fiber/v3/extractors"
 	"github.com/gofiber/fiber/v3/middleware/session"
 	"github.com/mas-ony/go-toolkit/internal/strlist"
+	"github.com/mas-ony/go-toolkit/internal/upstream"
 	"github.com/spf13/viper"
 )
 
@@ -280,13 +281,9 @@ func NewSessionConfig(v *viper.Viper) *SessionConfig {
 // Every check appends rather than returning early, so one restart surfaces
 // every fiber.session.* problem at once.
 func (c *SessionConfig) Validate() error {
-	// errs is declared before the nil check only so the two statements
-	// read in the same order in all Validate implementations; the nil
-	// check is what must come first, since every line after it
-	// dereferences c.
 	var errs []error
 	if c == nil || c.Config == nil {
-		return errors.New("fiber.session config was not initialised")
+		return upstream.NotInitialised("fiber.session")
 	}
 
 	// Each timeout meets exactly one of its cases: zero is the absent
@@ -350,10 +347,10 @@ func (c *SessionConfig) Validate() error {
 	// Set-Cookie header.
 	switch {
 	case c.CookieSameSite == "":
-		errs = append(errs, errors.New("fiber.session.cookie_same_site is "+
-			"required: an empty value is served as Lax by the middleware's "+
-			"own fallback, where neither config.yaml nor a startup log "+
-			"line will show it"))
+		errs = append(errs, upstream.Required("fiber.session.cookie_same_site",
+			": an empty value is served as Lax by the middleware's own "+
+				"fallback, where neither config.yaml nor a startup log "+
+				"line will show it"))
 	case !strlist.ContainsFold(validSameSite, c.CookieSameSite):
 		errs = append(errs, fmt.Errorf("fiber.session.cookie_same_site "+
 			"must be one of %s, case-insensitive (got %q): the middleware "+
@@ -430,10 +427,10 @@ func (c *SessionConfig) Validate() error {
 // `cfg.Extractor.Extract == nil`, so the two agree on what "unset" means.
 func (c *SessionConfig) String() string {
 	if c == nil {
-		return "<nil SessionConfig>"
+		return nilLabel("SessionConfig")
 	}
 	if c.Config == nil {
-		return "<uninitialised SessionConfig>"
+		return uninitialisedLabel("SessionConfig")
 	}
 
 	cookieName := session.ConfigDefault.Extractor.Key + " " +

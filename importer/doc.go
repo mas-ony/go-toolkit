@@ -18,10 +18,48 @@
 //		_ = importer.WriteReport(*report, ds, outcomes)
 //	}
 //
-// Three files. importer.go holds the run itself — what one row's outcome
+// Four files. importer.go holds the run itself — what one row's outcome
 // is, the counters a run tallies, the Dataset seam, and Execute, which
 // drives the two against a workbook. table.go maps a sheet's columns onto
-// a dataset's row type. report.go renders a finished run.
+// a dataset's row type. report.go renders a finished run. upload.go is
+// the same reading for a service that imports an upload rather than a
+// file: UploadDataset, the export it reads, and OpenUpload, which hands
+// back its rows to be read by the caption of their columns.
+//
+// # An upload is an export, read by caption
+//
+// A service holds an UploadDataset per kind of export it takes, opens an
+// upload's bytes with OpenUpload against the dataset's UploadLayout, and
+// hands the sheet's rows to Import, a record at a time:
+//
+//	sheet, err := importer.OpenUpload(data, ds.Layout())
+//	if err != nil {
+//		return err
+//	}
+//	for _, row := range sheet.Rows() {
+//		rows := []*importer.Row{row}
+//		err := ds.Import(ctx, rows)
+//		if errors.Is(err, database.ErrRejected) {
+//			row.Fail(err.Error())
+//		} else if err != nil {
+//			return err
+//		}
+//	}
+//
+// An export is a sheet a program wrote: its columns stand side by side
+// from A in an order that does not vary, so an UploadLayout lists its
+// captions and nothing else, and a column's letter is where its caption
+// stands. The header check is made before OpenUpload returns a Sheet.
+//
+// A dataset reads a Row's cells by caption with Text, Int, Code, Decimal,
+// DecimalDotGrouped and Date, which note on the row what will not read by
+// the rule Table.Apply follows: a required cell fails the row, and any
+// other is left empty with a warning. A required cell that is empty
+// fails the row too, which Must does not ask of a Table: a column an
+// export declares NOT NULL is empty only when the row cannot be stored.
+// Peek, PeekAbove and Probe look at a row without noting anything on it,
+// for a dataset that has to tell which rows belong together before it
+// reads them.
 //
 // # A partly-failed import is the normal outcome
 //
@@ -109,6 +147,14 @@
 // Apply is tested against a Source held in the test rather than a file,
 // which is what that interface exists for — a table's coercion rules have
 // nothing to do with where the grid came from.
+//
+// upload_test.go writes workbooks in memory and opens them with
+// OpenUpload: the header check, a header of two rows, the footer and
+// blank rows, the errors passed through and ErrMacros, every reader's
+// empty, good and bad cell, required against optional columns, the
+// panic, the readers that note nothing, and every arm of
+// UploadLayout.Check. It holds the readers' notes to the same text Apply
+// gives, since both follow one rule.
 //
 // importer_integration_test.go drives Execute end to end against a real
 // workbook written to a temporary directory, with a dataset that records

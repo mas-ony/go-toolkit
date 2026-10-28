@@ -11,7 +11,6 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	"io"
 	"math"
 	"slices"
 	"strings"
@@ -29,57 +28,23 @@ const (
 	relsXML  = "xl/_rels/workbook.xml.rels"
 )
 
+// listing is the two parts that say a workbook has a sheet, as declaring
+// writes them, and listingBytes what they add to an archive's sizes.
+var listing = map[string]string{
+	"_rels/.rels": `<Relationships><Relationship Id="rId1" ` +
+		`Type="http://example.test/officeDocument" ` +
+		`Target="xl/workbook.xml"/></Relationships>`,
+	"xl/workbook.xml": `<workbook><sheets><sheet name="Sheet1" ` +
+		`sheetId="1" r:id="rId1"/></sheets></workbook>`,
+}
+
+var listingBytes = uint64(
+	len(listing["_rels/.rels"]) + len(listing["xl/workbook.xml"]))
+
 // fixtureBytes is the fixture as an upload would hold it: in memory.
 func fixtureBytes(t *testing.T) []byte {
 	t.Helper()
 	return xlsxtest.WorkbookBytes(t, fillFixture)
-}
-
-// writeEntry adds an entry named name, holding content, to zw.
-func writeEntry(t *testing.T, zw *zip.Writer, name, content string) {
-	t.Helper()
-	w, err := zw.Create(name)
-	if err == nil {
-		_, err = io.WriteString(w, content)
-	}
-	if err != nil {
-		t.Fatal(err)
-	}
-}
-
-// rebuild returns book with every entry passed through edit, which is
-// handed the entry's name and content and returns the content to keep.
-// Each of extra is added as an entry of its own.
-func rebuild(
-	t *testing.T, book []byte,
-	edit func(name, content string) string, extra ...string,
-) []byte {
-	t.Helper()
-	zr, err := zip.NewReader(bytes.NewReader(book), int64(len(book)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var buf bytes.Buffer
-	zw := zip.NewWriter(&buf)
-	for _, entry := range zr.File {
-		rc, err := entry.Open()
-		if err != nil {
-			t.Fatal(err)
-		}
-		content, err := io.ReadAll(rc)
-		_ = rc.Close()
-		if err != nil {
-			t.Fatal(err)
-		}
-		writeEntry(t, zw, entry.Name, edit(entry.Name, string(content)))
-	}
-	for _, name := range extra {
-		writeEntry(t, zw, name, "not read")
-	}
-	if err := zw.Close(); err != nil {
-		t.Fatal(err)
-	}
-	return buf.Bytes()
 }
 
 // replaced returns book with the one occurrence of old in its entry
@@ -91,7 +56,7 @@ func replaced(
 	entry, old, with string, extra ...string,
 ) []byte {
 	t.Helper()
-	return rebuild(t, book, func(name, content string) string {
+	return xlsxtest.Rebuild(t, book, func(name, content string) string {
 		if name != entry {
 			return content
 		}
@@ -111,19 +76,6 @@ func faultAt(t *testing.T, book []byte, row int) []byte {
 	return replaced(t, book, sheetXML, tag, "\x0b"+tag)
 }
 
-// listing is the two parts that say a workbook has a sheet, as declaring
-// writes them, and listingBytes what they add to an archive's sizes.
-var listing = map[string]string{
-	"_rels/.rels": `<Relationships><Relationship Id="rId1" ` +
-		`Type="http://example.test/officeDocument" ` +
-		`Target="xl/workbook.xml"/></Relationships>`,
-	"xl/workbook.xml": `<workbook><sheets><sheet name="Sheet1" ` +
-		`sheetId="1" r:id="rId1"/></sheets></workbook>`,
-}
-
-var listingBytes = uint64(
-	len(listing["_rels/.rels"]) + len(listing["xl/workbook.xml"]))
-
 // declaring builds a workbook's archive in which each sheet declares one
 // of sizes as its uncompressed size. The bytes are not there to back
 // the claim: inspect holds the cap against the directory alone, and the
@@ -134,7 +86,7 @@ func declaring(t *testing.T, sizes ...uint64) []byte {
 	var buf bytes.Buffer
 	zw := zip.NewWriter(&buf)
 	for name, content := range listing {
-		writeEntry(t, zw, name, content)
+		xlsxtest.WriteEntry(t, zw, name, content)
 	}
 	for i, size := range sizes {
 		w, err := zw.CreateRaw(&zip.FileHeader{
@@ -261,7 +213,7 @@ func TestOpenBytesTellsWhatIsNoWorkbook(t *testing.T) {
 	book := fixtureBytes(t)
 	var docx bytes.Buffer
 	zw := zip.NewWriter(&docx)
-	writeEntry(t, zw, "word/document.xml", "")
+	xlsxtest.WriteEntry(t, zw, "word/document.xml", "")
 	if err := zw.Close(); err != nil {
 		t.Fatal(err)
 	}

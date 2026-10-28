@@ -22,12 +22,6 @@ import (
 	"github.com/mas-ony/go-toolkit/internal/testutil"
 )
 
-// fakeDriver is the driver.Driver behind both fakes in this package's
-// tests: fakeConnector's here, and queryConnector's in
-// read_helpers_test.go. Its Open refuses, because each fake is reached
-// only through its connector.
-type fakeDriver struct{}
-
 // connBase supplies the two methods a driver.Conn must have that neither
 // fake uses. Prepare refuses, because every statement reaches a fake
 // through QueryContext or BeginTx instead, and Close releases nothing,
@@ -37,6 +31,12 @@ type connBase struct{}
 // connectorBase supplies the Driver method of both connectors, which
 // belong to fakeDriver alike. Both connectors embed it.
 type connectorBase struct{}
+
+// fakeDriver is the driver.Driver behind both fakes in this package's
+// tests: fakeConnector's here, and queryConnector's in
+// read_helpers_test.go. Its Open refuses, because each fake is reached
+// only through its connector.
+type fakeDriver struct{}
 
 // fakeDB is the shared state behind the connector, connections and
 // transactions below. Every field is guarded by mu because database/sql calls
@@ -120,6 +120,27 @@ func openFake(t *testing.T, c driver.Connector, driverName string) *sqlx.DB {
 	return db
 }
 
+// assertConnectionsReturned is the leak check that motivates the panic guard.
+//
+// It polls rather than reading once, because database/sql returns a connection
+// to the pool from the goroutine that rolled the transaction back, which is
+// not necessarily the test's goroutine.
+func assertConnectionsReturned(t *testing.T, db *sqlx.DB) {
+	t.Helper()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if inUse := db.Stats().InUse; inUse == 0 {
+			return
+		} else if time.Now().After(deadline) {
+			t.Errorf("%d connection(s) still checked out; the pool would "+
+				"drain under repeated failures", inUse)
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
 // open returns a *sqlx.DB backed by this fake.
 func (f *fakeDB) open(t *testing.T) *sqlx.DB {
 	t.Helper()
@@ -154,27 +175,6 @@ func (f *fakeDB) assert(t *testing.T, want counts) {
 	}
 }
 
-// assertConnectionsReturned is the leak check that motivates the panic guard.
-//
-// It polls rather than reading once, because database/sql returns a connection
-// to the pool from the goroutine that rolled the transaction back, which is
-// not necessarily the test's goroutine.
-func assertConnectionsReturned(t *testing.T, db *sqlx.DB) {
-	t.Helper()
-
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		if inUse := db.Stats().InUse; inUse == 0 {
-			return
-		} else if time.Now().After(deadline) {
-			t.Errorf("%d connection(s) still checked out; the pool would "+
-				"drain under repeated failures", inUse)
-			return
-		}
-		time.Sleep(time.Millisecond)
-	}
-}
-
 // waitForRollback blocks until the driver sees a rollback, or the timeout
 // expires. It reports whether one arrived.
 func (f *fakeDB) waitForRollback(timeout time.Duration) bool {
@@ -186,29 +186,6 @@ func (f *fakeDB) waitForRollback(timeout time.Duration) bool {
 	case <-timer.C:
 		return false
 	}
-}
-
-// Driver returns the driver both connectors belong to.
-func (connectorBase) Driver() driver.Driver { return fakeDriver{} }
-
-// Connect counts the connection, which is what the nesting tests read, and
-// opens it onto the shared fakeDB.
-func (c *fakeConnector) Connect(context.Context) (driver.Conn, error) {
-	c.db.mu.Lock()
-	c.db.connects++
-	c.db.mu.Unlock()
-	return &fakeConn{db: c.db}, nil
-}
-
-// Prepare refuses: no fake here is handed a statement to prepare.
-func (connBase) Prepare(string) (driver.Stmt, error) {
-	return nil, errors.New("fake: statements are not supported")
-}
-
-// Open refuses: the fake is reachable only through its connector.
-func (fakeDriver) Open(string) (driver.Conn, error) {
-	return nil, errors.New(
-		"fake: this driver is only reachable through its connector")
 }
 
 // Begin is the pre-context form database/sql falls back to only for a
@@ -244,6 +221,15 @@ func (c *fakeConn) BeginTx(
 	return &fakeTx{db: f}, nil
 }
 
+// Connect counts the connection, which is what the nesting tests read, and
+// opens it onto the shared fakeDB.
+func (c *fakeConnector) Connect(context.Context) (driver.Conn, error) {
+	c.db.mu.Lock()
+	c.db.connects++
+	c.db.mu.Unlock()
+	return &fakeConn{db: c.db}, nil
+}
+
 // Commit counts the call and returns the injected commit failure, if any.
 func (t *fakeTx) Commit() error {
 	f := t.db
@@ -270,6 +256,20 @@ func (t *fakeTx) Rollback() error {
 	default:
 	}
 	return err
+}
+
+// Open refuses: the fake is reachable only through its connector.
+func (fakeDriver) Open(string) (driver.Conn, error) {
+	return nil, errors.New(
+		"fake: this driver is only reachable through its connector")
+}
+
+// Driver returns the driver both connectors belong to.
+func (connectorBase) Driver() driver.Driver { return fakeDriver{} }
+
+// Prepare refuses: no fake here is handed a statement to prepare.
+func (connBase) Prepare(string) (driver.Stmt, error) {
+	return nil, errors.New("fake: statements are not supported")
 }
 
 // Close releases nothing; the fake holds no resources.
@@ -838,6 +838,11 @@ func TestNestedCallChecksOutASecondConnection(t *testing.T) {
 
 // TestPassingTheTxDownIsTheSupportedPattern is the positive counterpart: the
 // documented alternative uses one connection, which is what makes it safe.
+//
+// It also holds the signature the pattern rests on. step only compiles while
+// fn receives the concrete *sqlx.Tx a repository's own WithTx(tx) method
+// expects, so narrowing fn's parameter to sqlx.ExtContext fails here, where
+// the reason for not narrowing it is the thing being exercised.
 func TestPassingTheTxDownIsTheSupportedPattern(t *testing.T) {
 	t.Parallel()
 
@@ -867,33 +872,6 @@ func TestPassingTheTxDownIsTheSupportedPattern(t *testing.T) {
 		t.Errorf("connections opened: got %d, want 1", s.connects)
 	}
 	f.assert(t, counts{begins: 1, commits: 1, rollbacks: 0})
-}
-
-// TestFnReceivesAConcreteTxNotAnInterface guards the signature choice.
-//
-// fn takes *sqlx.Tx rather than sqlx.ExtContext specifically so repositories
-// can call their own .WithTx(tx) method. Narrowing the parameter to an
-// interface would still compile at every call site that only runs
-// statements, and break the pattern for any repository that hands tx to its
-// own WithTx method.
-func TestFnReceivesAConcreteTxNotAnInterface(t *testing.T) {
-	t.Parallel()
-
-	f := newFakeDB()
-	db := f.open(t)
-
-	err := WithTx(db, func(tx *sqlx.Tx) error {
-		// The assertion is the assignment itself: it only compiles while the
-		// parameter is the concrete type a repository's WithTx method expects.
-		var concrete *sqlx.Tx = tx
-		if concrete == nil {
-			t.Error("fn received a nil transaction")
-		}
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("WithTx: %v", err)
-	}
 }
 
 // TestWithTxDelegatesToWithTxContext checks the two entry points agree on

@@ -2,12 +2,12 @@ package dbdriver
 
 import "github.com/mas-ony/go-toolkit/internal/strlist"
 
-// The engines a database.driver name selects, each spelled as the
-// database/sql driver name the database package opens it under.
-const (
-	SQLServer = "sqlserver"
-	MySQL     = "mysql"
-)
+// vocabulary is the words one key accepts, each paired with what it
+// selects, in the order an error lists them.
+type vocabulary[T any] []struct {
+	word  string
+	value T
+}
 
 // Encryption is what one database.encrypt value asks of each engine's
 // driver.
@@ -19,11 +19,30 @@ type Encryption struct {
 	MySQL string
 }
 
-// vocabulary is the words one key accepts, each paired with what it
-// selects, in the order an error lists them.
-type vocabulary[T any] []struct {
-	word  string
-	value T
+// The engines a database.driver name selects, each spelled as the
+// database/sql driver name the database package opens it under.
+const (
+	SQLServer = "sqlserver"
+	MySQL     = "mysql"
+)
+
+// drivers pairs each name database.driver accepts with the engine it
+// selects. "mssql" is the legacy alias go-mssqldb registers for the same
+// driver, so it selects the same engine.
+var drivers = vocabulary[string]{
+	{"sqlserver", SQLServer},
+	{"mssql", SQLServer},
+	{"mysql", MySQL},
+}
+
+// encryptions pairs each value database.encrypt accepts with what it asks
+// of each driver. EncryptionFor says what the table means and what it does
+// not.
+var encryptions = vocabulary[Encryption]{
+	{"disable", Encryption{SQLServer: "disable", MySQL: "false"}},
+	{"false", Encryption{SQLServer: "false", MySQL: "preferred"}},
+	{"true", Encryption{SQLServer: "true", MySQL: "true"}},
+	{"strict", Encryption{SQLServer: "strict", MySQL: "true"}},
 }
 
 // lookup returns what word selects, and false for a word outside the
@@ -47,25 +66,6 @@ func (v vocabulary[T]) words() []string {
 		out[i] = e.word
 	}
 	return out
-}
-
-// drivers pairs each name database.driver accepts with the engine it
-// selects. "mssql" is the legacy alias go-mssqldb registers for the same
-// driver, so it selects the same engine.
-var drivers = vocabulary[string]{
-	{"sqlserver", SQLServer},
-	{"mssql", SQLServer},
-	{"mysql", MySQL},
-}
-
-// encryptions pairs each value database.encrypt accepts with what it asks
-// of each driver. EncryptionFor says what the table means and what it does
-// not.
-var encryptions = vocabulary[Encryption]{
-	{"disable", Encryption{SQLServer: "disable", MySQL: "false"}},
-	{"false", Encryption{SQLServer: "false", MySQL: "preferred"}},
-	{"true", Encryption{SQLServer: "true", MySQL: "true"}},
-	{"strict", Encryption{SQLServer: "strict", MySQL: "true"}},
 }
 
 // Engine returns the engine a database.driver value selects, SQLServer or

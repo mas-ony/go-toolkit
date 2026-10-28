@@ -96,17 +96,6 @@ func envelopeApp(t *testing.T, cfg fiber.Config) *fiber.App {
 	return app
 }
 
-// do sends req through the in-process transport and decodes the answer;
-// see decode.
-func do(t *testing.T, app *fiber.App, req *http.Request) (int, decoded) {
-	t.Helper()
-	resp, err := app.Test(req, fiber.TestConfig{Timeout: 0})
-	if err != nil {
-		t.Fatalf("request: %v", err)
-	}
-	return resp.StatusCode, decode(t, resp)
-}
-
 // decode reads the body of resp as a client would, recording which
 // optional keys were present at all, and closes it. Every answer in this
 // file is read through it, whichever transport carried the request.
@@ -144,6 +133,17 @@ func decode(t *testing.T, resp *http.Response) decoded {
 		d.DataIsNull = string(v) == "null"
 	}
 	return d
+}
+
+// do sends req through the in-process transport and decodes the answer;
+// see decode.
+func do(t *testing.T, app *fiber.App, req *http.Request) (int, decoded) {
+	t.Helper()
+	resp, err := app.Test(req, fiber.TestConfig{Timeout: 0})
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	return resp.StatusCode, decode(t, resp)
 }
 
 // The failures a handler never sees that DO route through the

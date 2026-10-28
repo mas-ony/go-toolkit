@@ -20,6 +20,12 @@ import (
 	"github.com/jmoiron/sqlx"
 )
 
+// seenQuery is one query as the driver received it, after BindNamed.
+type seenQuery struct {
+	query string
+	args  []driver.NamedValue
+}
+
 // queryDB is a driver that answers every query with the same canned result
 // and records what it was asked.
 //
@@ -64,12 +70,6 @@ type queryRows struct {
 	cols []string
 	rows [][]driver.Value
 	i    int
-}
-
-// seenQuery is one query as the driver received it, after BindNamed.
-type seenQuery struct {
-	query string
-	args  []driver.NamedValue
 }
 
 // oneRow is the shape a single-row lookup scans into.
@@ -129,14 +129,6 @@ func (q *queryDB) count() int {
 	return len(q.seen)
 }
 
-// Columns returns the canned column names.
-func (r *queryRows) Columns() []string { return r.cols }
-
-// Connect opens a connection onto the shared queryDB.
-func (c *queryConnector) Connect(context.Context) (driver.Conn, error) {
-	return &queryConn{db: c.db}, nil
-}
-
 // Begin refuses: the read helpers never start a transaction.
 func (c *queryConn) Begin() (driver.Tx, error) {
 	return nil, errors.New("fake: transactions are not supported")
@@ -161,6 +153,9 @@ func (c *queryConn) QueryContext(
 	return &queryRows{cols: cols, rows: rows}, nil
 }
 
+// Columns returns the canned column names.
+func (r *queryRows) Columns() []string { return r.cols }
+
 // Next copies the next canned row into dest, or reports io.EOF.
 func (r *queryRows) Next(dest []driver.Value) error {
 	if r.i >= len(r.rows) {
@@ -173,6 +168,11 @@ func (r *queryRows) Next(dest []driver.Value) error {
 
 // Close releases nothing; the rows live in memory.
 func (r *queryRows) Close() error { return nil }
+
+// Connect opens a connection onto the shared queryDB.
+func (c *queryConnector) Connect(context.Context) (driver.Conn, error) {
+	return &queryConn{db: c.db}, nil
+}
 
 // SelectClause resolves a request the way activeCols does, emits each
 // expression once, and puts the key first when the request left it out.

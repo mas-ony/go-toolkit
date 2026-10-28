@@ -49,17 +49,17 @@ var (
 	dstTarget = func(r *row) *string { return &r.Target }
 )
 
+// key is the map key a cell is stored under.
+func key(row int, col string) string {
+	return col + ":" + strconv.Itoa(row)
+}
+
 // newGrid returns an empty grid on the 1900 epoch.
 func newGrid() *grid {
 	return &grid{
 		cells: map[string]string{},
 		links: map[string]string{},
 	}
-}
-
-// key is the map key a cell is stored under.
-func key(row int, col string) string {
-	return col + ":" + strconv.Itoa(row)
 }
 
 // set stores a cell's text and returns the grid, so fixtures chain.

@@ -3,17 +3,33 @@ package config
 // Tests for checks.go.
 //
 // The sections' own rule tables already hold each key to these rules
-// through Validate. What is pinned here is the part they share, once: an
-// absent value reported as required and never also as too short, a valid
-// value let through, a message that names the key and ends on the advice
-// about a missing unit, a negative value printed as its type prints it,
-// and a list of allowed values named in the order it was given.
+// through Validate. What is pinned here is the part they share, once: a
+// section never built printed by its type, an absent value reported as
+// required and never also as too short, a valid value let through, a
+// message that names the key and ends on the advice about a missing unit,
+// a negative value printed as its type prints it, and a list of allowed
+// values named in the order it was given. The wording of a key left unset
+// and of a section never built is upstream's, and pinned there.
 
 import (
 	"strings"
 	"testing"
 	"time"
 )
+
+// A section never built is printed by its type in angle brackets, so the
+// line holds no value.
+func TestNeverBuiltLabels(t *testing.T) {
+	t.Parallel()
+	for want, got := range map[string]string{
+		"<nil XConfig>":           nilLabel("XConfig"),
+		"<uninitialised XConfig>": uninitialisedLabel("XConfig"),
+	} {
+		if got != want {
+			t.Errorf("got %q\nwant %q", got, want)
+		}
+	}
+}
 
 // The reason, when there is one, leads into the advice about a missing
 // unit, and the message reads whole without one.

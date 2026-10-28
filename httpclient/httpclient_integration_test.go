@@ -35,53 +35,34 @@ import (
 	"github.com/mas-ony/go-toolkit/config"
 )
 
-// countingServer answers with status until it has been called n times,
-// then answers 200. It records when each call arrived.
-func countingServer(t *testing.T, status, succeedOn int) (
-	*httptest.Server, func() []time.Time) {
-	t.Helper()
-
+// countingHandler answers with status until it has been called succeedOn
+// times, then answers 200. It records when each call arrived.
+func countingHandler(
+	status, succeedOn int,
+) (http.Handler, func() []time.Time) {
 	var mu sync.Mutex
 	var seen []time.Time
 
-	srv := httptest.NewServer(http.HandlerFunc(
-		func(w http.ResponseWriter, r *http.Request) {
-			mu.Lock()
-			seen = append(seen, time.Now())
-			n := len(seen)
-			mu.Unlock()
+	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		seen = append(seen, time.Now())
+		n := len(seen)
+		mu.Unlock()
 
-			if n >= succeedOn {
-				writeEnvelope(w, http.StatusOK, "", struct{}{})
-				return
-			}
-			writeEnvelope(w, status, "later", nil)
-		}))
-	t.Cleanup(srv.Close)
+		if n >= succeedOn {
+			writeEnvelope(w, http.StatusOK, "", struct{}{})
+			return
+		}
+		writeEnvelope(w, status, "later", nil)
+	})
 
-	return srv, func() []time.Time {
+	return h, func() []time.Time {
 		mu.Lock()
 		defer mu.Unlock()
 		out := make([]time.Time, len(seen))
 		copy(out, seen)
 		return out
 	}
-}
-
-// bodyServer answers every request with the given status and body.
-func bodyServer(t *testing.T, status int, contentType string,
-	body []byte) *httptest.Server {
-	t.Helper()
-	srv := httptest.NewServer(http.HandlerFunc(
-		func(w http.ResponseWriter, r *http.Request) {
-			if contentType != "" {
-				w.Header().Set("Content-Type", contentType)
-			}
-			w.WriteHeader(status)
-			_, _ = w.Write(body)
-		}))
-	t.Cleanup(srv.Close)
-	return srv
 }
 
 // Insecure is the one setting in the config section with a security
@@ -163,10 +144,9 @@ func TestIntegrationInsecureLeavesTheRestOfTheTLSConfigAlone(t *testing.T) {
 // that computed a zero or negative duration would still produce the right
 // number of attempts and still pass every test over there.
 func TestIntegrationBackoffDoublesFromTheFirstWait(t *testing.T) {
-	srv, times := countingServer(t, http.StatusServiceUnavailable, 4)
+	h, times := countingHandler(http.StatusServiceUnavailable, 4)
 
-	c := mustNew(t, &config.ClientConfig{
-		BaseURL:        srv.URL,
+	c := testClient(t, h, config.ClientConfig{
 		Retries:        3,
 		NoRetryMethods: []string{},
 	}, Options{})
@@ -212,10 +192,9 @@ func TestIntegrationBackoffDoublesFromTheFirstWait(t *testing.T) {
 // and this is the only way to reach it: the cancellation has to land while
 // the client is sleeping rather than while it is sending.
 func TestIntegrationContextCancelledDuringBackoffReturnsAtOnce(t *testing.T) {
-	srv, times := countingServer(t, http.StatusServiceUnavailable, 99)
+	h, times := countingHandler(http.StatusServiceUnavailable, 99)
 
-	c := mustNew(t, &config.ClientConfig{
-		BaseURL:        srv.URL,
+	c := testClient(t, h, config.ClientConfig{
 		Retries:        5,
 		NoRetryMethods: []string{},
 	}, Options{})
@@ -256,8 +235,12 @@ func TestIntegrationErrorMessageIsCapped(t *testing.T) {
 		t *testing.T, status int, contentType string, body []byte,
 	) *Error {
 		t.Helper()
-		srv := bodyServer(t, status, contentType, body)
-		c := mustNew(t, &config.ClientConfig{BaseURL: srv.URL}, Options{})
+		c := testClient(t, http.HandlerFunc(
+			func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", contentType)
+				w.WriteHeader(status)
+				_, _ = w.Write(body)
+			}), config.ClientConfig{}, Options{})
 		err := c.Do(context.Background(), http.MethodGet,
 			c.URL("/x", nil), nil, "", nil)
 		var apiErr *Error
@@ -338,16 +321,13 @@ func TestIntegrationErrorMessageIsCapped(t *testing.T) {
 // every caller got its OWN response under contention, which is the weaker
 // half and the one that would catch a shared buffer.
 func TestIntegrationOneClientIsSafeToShare(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(
+	c := testClient(t, http.HandlerFunc(
 		func(w http.ResponseWriter, r *http.Request) {
 			writeEnvelope(w, http.StatusOK, "", map[string]string{
 				"id":  strings.TrimPrefix(r.URL.Path, "/"),
 				"pad": strings.Repeat("x", 4096),
 			})
-		}))
-	defer srv.Close()
-
-	c := mustNew(t, &config.ClientConfig{BaseURL: srv.URL}, Options{})
+		}), config.ClientConfig{}, Options{})
 
 	type payload struct {
 		ID  string `json:"id"`

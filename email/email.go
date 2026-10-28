@@ -113,6 +113,52 @@ func names(rcpts []string) string {
 		strings.Join(rcpts[:shown], ", "), len(rcpts)-shown)
 }
 
+// New returns a Service for the relay cfg describes.
+//
+// It does not dial. A relay that is down, or credentials it refuses,
+// fail per send rather than at startup, where a mail outage would stop a
+// service whose main job is something else.
+//
+// ErrNotConfigured means there is nothing to send with: cfg is nil or
+// holds no setting at all, as config.EmailConfig.Configured reports, which
+// is what a deployment without notification.email.* produces. Call New
+// only when notification.channels includes email, and treat that error as
+// fatal there. Any other problem is Validate's joined error, so a section
+// filled in halfway fails loudly instead of quietly switching mail off.
+// upstream.CheckSection draws that line, as it does for telegram.New.
+func New(cfg *config.EmailConfig, log zerolog.Logger) (*Service, error) {
+	if err := upstream.CheckSection(cfg, ErrNotConfigured); err != nil {
+		return nil, err
+	}
+	// Validate has parsed From already. The error is checked all the
+	// same, because a nil address would panic on every send.
+	from, err := mail.ParseAddress(cfg.From)
+	if err != nil {
+		return nil, fmt.Errorf("notification.email.from: %w", err)
+	}
+
+	host := strings.TrimSpace(cfg.Host)
+	s := &Service{
+		host:     host,
+		addr:     net.JoinHostPort(host, strconv.Itoa(cfg.Port)),
+		mode:     strlist.Normalise(cfg.TLS),
+		username: cfg.Username,
+		password: cfg.Password,
+		from:     from,
+		timeout:  cfg.Timeout,
+		log:      log,
+	}
+	if s.mode != config.EmailTLSNone {
+		s.tlsConf = &tls.Config{
+			ServerName: host,
+			MinVersion: tls.VersionTLS12,
+			//nolint:gosec // notification.email.insecure is the opt-in
+			InsecureSkipVerify: cfg.Insecure,
+		}
+	}
+	return s, nil
+}
+
 // dial opens the connection within ctx: TCP, and under implicit TLS the
 // handshake too.
 func (s *Service) dial(ctx context.Context) (net.Conn, error) {
@@ -221,99 +267,6 @@ func (s *Service) deliver(
 	return nil
 }
 
-// New returns a Service for the relay cfg describes.
-//
-// It does not dial. A relay that is down, or credentials it refuses,
-// fail per send rather than at startup, where a mail outage would stop a
-// service whose main job is something else.
-//
-// ErrNotConfigured means there is nothing to send with: cfg is nil or
-// holds no setting at all, as config.EmailConfig.Configured reports, which
-// is what a deployment without notification.email.* produces. Call New
-// only when notification.channels includes email, and treat that error as
-// fatal there. Any other problem is Validate's joined error, so a section
-// filled in halfway fails loudly instead of quietly switching mail off.
-// upstream.CheckSection draws that line, as it does for telegram.New.
-func New(cfg *config.EmailConfig, log zerolog.Logger) (*Service, error) {
-	if err := upstream.CheckSection(cfg, ErrNotConfigured); err != nil {
-		return nil, err
-	}
-	// Validate has parsed From already. The error is checked all the
-	// same, because a nil address would panic on every send.
-	from, err := mail.ParseAddress(cfg.From)
-	if err != nil {
-		return nil, fmt.Errorf("notification.email.from: %w", err)
-	}
-
-	host := strings.TrimSpace(cfg.Host)
-	s := &Service{
-		host:     host,
-		addr:     net.JoinHostPort(host, strconv.Itoa(cfg.Port)),
-		mode:     strlist.Normalise(cfg.TLS),
-		username: cfg.Username,
-		password: cfg.Password,
-		from:     from,
-		timeout:  cfg.Timeout,
-		log:      log,
-	}
-	if s.mode != config.EmailTLSNone {
-		s.tlsConf = &tls.Config{
-			ServerName: host,
-			MinVersion: tls.VersionTLS12,
-			//nolint:gosec // notification.email.insecure is the opt-in
-			InsecureSkipVerify: cfg.Insecure,
-		}
-	}
-	return s, nil
-}
-
-// Start refuses credentials over a connection that is not encrypted
-// unless the server is on loopback, the rule PlainAuth applies. New runs
-// Validate, which applies it to the configuration, so a Service does not
-// get here with credentials for a remote relay in clear text; the check
-// stays so that the send path does not depend on that.
-func (a *auth) Start(server *smtp.ServerInfo) (string, []byte, error) {
-	if !server.TLS && !upstream.IsLoopback(server.Name) {
-		return "", nil, errors.New("refusing to send credentials over " +
-			"a connection that is not encrypted")
-	}
-	switch {
-	case strlist.ContainsFold(server.Auth, "PLAIN"):
-		a.mech = "PLAIN"
-		return a.mech, []byte("\x00" + a.username + "\x00" + a.password),
-			nil
-	case strlist.ContainsFold(server.Auth, "LOGIN"):
-		a.mech = "LOGIN"
-		return a.mech, nil, nil
-	}
-	offered := strings.Join(server.Auth, " ")
-	if offered == "" {
-		offered = "no mechanism"
-	}
-	return "", nil, fmt.Errorf("the server offers %s, and this client "+
-		"logs in only with PLAIN or LOGIN", offered)
-}
-
-// Next answers the server's challenges. PLAIN sends everything up front
-// and expects none. LOGIN is asked for the username, then the password;
-// the prompts are counted rather than read, because servers word them
-// differently and agree only on the order.
-func (a *auth) Next(fromServer []byte, more bool) ([]byte, error) {
-	if !more {
-		return nil, nil
-	}
-	if a.mech == "LOGIN" {
-		a.prompts++
-		switch a.prompts {
-		case 1:
-			return []byte(a.username), nil
-		case 2:
-			return []byte(a.password), nil
-		}
-	}
-	return nil, fmt.Errorf("unexpected %s challenge %q", a.mech, fromServer)
-}
-
 // Send delivers m through the relay, over a connection opened for it and
 // closed once the relay has taken it.
 //
@@ -379,4 +332,51 @@ func (s *Service) SendText(
 		Subject: subject,
 		Text:    body,
 	})
+}
+
+// Start refuses credentials over a connection that is not encrypted
+// unless the server is on loopback, the rule PlainAuth applies. New runs
+// Validate, which applies it to the configuration, so a Service does not
+// get here with credentials for a remote relay in clear text; the check
+// stays so that the send path does not depend on that.
+func (a *auth) Start(server *smtp.ServerInfo) (string, []byte, error) {
+	if !server.TLS && !upstream.IsLoopback(server.Name) {
+		return "", nil, errors.New("refusing to send credentials over " +
+			"a connection that is not encrypted")
+	}
+	switch {
+	case strlist.ContainsFold(server.Auth, "PLAIN"):
+		a.mech = "PLAIN"
+		return a.mech, []byte("\x00" + a.username + "\x00" + a.password),
+			nil
+	case strlist.ContainsFold(server.Auth, "LOGIN"):
+		a.mech = "LOGIN"
+		return a.mech, nil, nil
+	}
+	offered := strings.Join(server.Auth, " ")
+	if offered == "" {
+		offered = "no mechanism"
+	}
+	return "", nil, fmt.Errorf("the server offers %s, and this client "+
+		"logs in only with PLAIN or LOGIN", offered)
+}
+
+// Next answers the server's challenges. PLAIN sends everything up front
+// and expects none. LOGIN is asked for the username, then the password;
+// the prompts are counted rather than read, because servers word them
+// differently and agree only on the order.
+func (a *auth) Next(fromServer []byte, more bool) ([]byte, error) {
+	if !more {
+		return nil, nil
+	}
+	if a.mech == "LOGIN" {
+		a.prompts++
+		switch a.prompts {
+		case 1:
+			return []byte(a.username), nil
+		case 2:
+			return []byte(a.password), nil
+		}
+	}
+	return nil, fmt.Errorf("unexpected %s challenge %q", a.mech, fromServer)
 }

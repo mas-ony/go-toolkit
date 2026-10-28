@@ -20,18 +20,18 @@ import (
 	"github.com/rs/zerolog"
 )
 
-// quietRun builds a Run that logs nothing, from opt and the counters c: the
-// Run a summary is rendered from, and the one Execute is given.
-func quietRun(opt Options, c *Counters) *Run {
-	return &Run{Log: zerolog.Nop(), Opt: opt, Count: c}
-}
-
 // caveated is a dataset whose Info carries a caveat, the warning the
 // summary's mode line repeats.
 var caveated = fakeDataset{info: Info{
 	Name:   "things",
 	Caveat: "a re-run duplicates every row",
 }}
+
+// quietRun builds a Run that logs nothing, from opt and the counters c: the
+// Run a summary is rendered from, and the one Execute is given.
+func quietRun(opt Options, c *Counters) *Run {
+	return &Run{Log: zerolog.Nop(), Opt: opt, Count: c}
+}
 
 // readCSV parses a written report back.
 func readCSV(t *testing.T, path string) [][]string {

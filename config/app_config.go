@@ -192,18 +192,15 @@ func NewAppConfig(v *viper.Viper) *AppConfig {
 // Every check appends rather than returning early, so one restart surfaces
 // every app.* problem at once.
 func (c *AppConfig) Validate() error {
-	// errs is declared before the nil check only so the two statements read in
-	// the same order in all Validate implementations; the nil check is what
-	// must come first, since every line after it dereferences c.
 	var errs []error
 	if c == nil {
-		return errors.New("app config was not initialised")
+		return upstream.NotInitialised("app")
 	}
 	if c.Name == "" {
-		errs = append(errs, errors.New("app.name is required"))
+		errs = append(errs, upstream.Required("app.name", ""))
 	}
 	if c.Version == "" {
-		errs = append(errs, errors.New("app.version is required"))
+		errs = append(errs, upstream.Required("app.version", ""))
 	}
 	if !slices.Contains(validEnvs, c.Env) {
 		errs = append(errs, notOneOf("app.env", c.Env, validEnvs))
@@ -212,7 +209,7 @@ func (c *AppConfig) Validate() error {
 		errs = append(errs, err)
 	}
 	if c.Location == "" {
-		errs = append(errs, errors.New("app.location is required"))
+		errs = append(errs, upstream.Required("app.location", ""))
 	}
 	return errors.Join(errs...)
 }
@@ -224,7 +221,7 @@ func (c *AppConfig) Validate() error {
 // struct fields directly.
 func (c *AppConfig) String() string {
 	if c == nil {
-		return "<nil AppConfig>"
+		return nilLabel("AppConfig")
 	}
 	return fmt.Sprintf("Name=%s "+
 		"Version=%s "+

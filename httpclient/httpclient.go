@@ -184,10 +184,7 @@ func attempts(n int) string {
 // firstBackoff rather than shifting by a negative count, which panics.
 func backoff(attempt int) time.Duration {
 	shift := min(max(attempt-1, 0), maxBackoffShift)
-	wait := firstBackoff << shift
-	if wait > maxBackoff {
-		wait = maxBackoff
-	}
+	wait := min(firstBackoff<<shift, maxBackoff)
 	return wait
 }
 
@@ -273,7 +270,7 @@ func messageFrom(payload []byte) string {
 // including the one for a base url.Parse cannot read.
 func parseBase(raw, suffix string) (*url.URL, error) {
 	if upstream.TrimBase(raw) == "" {
-		return nil, errors.New("base URL is required")
+		return nil, upstream.Required("base URL", "")
 	}
 	u, err := upstream.ParseBaseURL("base URL", raw,
 		"every URL built on it is quoted in errors and logs, so send the "+
@@ -299,63 +296,6 @@ func parseBase(raw, suffix string) (*url.URL, error) {
 	return u, nil
 }
 
-// send makes one attempt and hands back the status and a copy of the
-// body.
-//
-// The copy is what the rest of Do stands on: the transport pools its
-// response buffers, and Close returns the one behind Body for reuse, so
-// anything still pointing at it reads whatever the next request lands
-// there instead. Closing also returns the pooled request, which is why
-// nothing releases it by hand on the path below that succeeds.
-//
-// A transport failure drops that request rather than returning it to
-// the pool. Send releases it on some of its own failure paths and not
-// others, and the error it hands back does not say which happened, so
-// releasing here would sometimes put one object in the pool twice and
-// hand it to two goroutines at once. The cost of not releasing is a
-// missed recycle on exactly the path retries take; the cost of
-// releasing is a data race, so the object is left to the collector.
-func (c *Client) send(
-	ctx context.Context,
-	method, rawURL string,
-	body []byte,
-	contentType string,
-) (int, []byte, error) {
-	req := c.hc.R().SetContext(ctx).SetURL(rawURL).SetMethod(method)
-	// The transport labels any body it is handed
-	// application/octet-stream when nothing else set a content type, so
-	// an empty contentType would mislabel a JSON body as binary rather
-	// than say nothing at all. The flag survives the copy the transport
-	// takes of this request.
-	req.RawRequest.Header.SetNoDefaultContentType(true)
-	if body != nil {
-		req.SetRawBody(body)
-	}
-	if contentType != "" {
-		req.SetHeader(fiber.HeaderContentType, contentType)
-	}
-
-	resp, err := req.Send()
-	if err != nil {
-		return 0, nil, err
-	}
-	defer resp.Close()
-
-	// A refusal's body is kept to upstream.MaxAnswerBytes, and the cap
-	// bounds how much of it is copied out of the response, not how much
-	// is read. The transport buffers the whole thing before send sees any
-	// of it, so nothing here keeps a pathological body from arriving; what
-	// the cap rules out is carrying it past resp.Close() and holding it for
-	// the length of the error path. The message a caller sees is shorter
-	// still: see maxMessageRunes.
-	status := resp.StatusCode()
-	payload := resp.Body()
-	if !upstream.IsSuccess(status) && len(payload) > upstream.MaxAnswerBytes {
-		payload = payload[:upstream.MaxAnswerBytes]
-	}
-	return status, bytes.Clone(payload), nil
-}
-
 // New builds a client for the configured base URL.
 //
 // cfg is the fiber.client.* section; opt carries the three settings that
@@ -372,7 +312,7 @@ func (c *Client) send(
 // to build a client.
 func New(cfg *config.ClientConfig, opt Options) (*Client, error) {
 	if cfg == nil {
-		return nil, errors.New("client config was not initialised")
+		return nil, upstream.NotInitialised("client")
 	}
 
 	u, err := parseBase(cfg.BaseURL, opt.TrimPathSuffix)
@@ -434,6 +374,63 @@ func New(cfg *config.ClientConfig, opt Options) (*Client, error) {
 		noRetry: noRetry,
 		log:     opt.Log,
 	}, nil
+}
+
+// send makes one attempt and hands back the status and a copy of the
+// body.
+//
+// The copy is what the rest of Do stands on: the transport pools its
+// response buffers, and Close returns the one behind Body for reuse, so
+// anything still pointing at it reads whatever the next request lands
+// there instead. Closing also returns the pooled request, which is why
+// nothing releases it by hand on the path below that succeeds.
+//
+// A transport failure drops that request rather than returning it to
+// the pool. Send releases it on some of its own failure paths and not
+// others, and the error it hands back does not say which happened, so
+// releasing here would sometimes put one object in the pool twice and
+// hand it to two goroutines at once. The cost of not releasing is a
+// missed recycle on exactly the path retries take; the cost of
+// releasing is a data race, so the object is left to the collector.
+func (c *Client) send(
+	ctx context.Context,
+	method, rawURL string,
+	body []byte,
+	contentType string,
+) (int, []byte, error) {
+	req := c.hc.R().SetContext(ctx).SetURL(rawURL).SetMethod(method)
+	// The transport labels any body it is handed
+	// application/octet-stream when nothing else set a content type, so
+	// an empty contentType would mislabel a JSON body as binary rather
+	// than say nothing at all. The flag survives the copy the transport
+	// takes of this request.
+	req.RawRequest.Header.SetNoDefaultContentType(true)
+	if body != nil {
+		req.SetRawBody(body)
+	}
+	if contentType != "" {
+		req.SetHeader(fiber.HeaderContentType, contentType)
+	}
+
+	resp, err := req.Send()
+	if err != nil {
+		return 0, nil, err
+	}
+	defer resp.Close()
+
+	// A refusal's body is kept to upstream.MaxAnswerBytes, and the cap
+	// bounds how much of it is copied out of the response, not how much
+	// is read. The transport buffers the whole thing before send sees any
+	// of it, so nothing here keeps a pathological body from arriving; what
+	// the cap rules out is carrying it past resp.Close() and holding it for
+	// the length of the error path. The message a caller sees is shorter
+	// still: see maxMessageRunes.
+	status := resp.StatusCode()
+	payload := resp.Body()
+	if !upstream.IsSuccess(status) && len(payload) > upstream.MaxAnswerBytes {
+		payload = payload[:upstream.MaxAnswerBytes]
+	}
+	return status, bytes.Clone(payload), nil
 }
 
 // WithBaseURL returns a client for another base URL. It shares this
@@ -520,33 +517,6 @@ func (c *Client) URL(path string, query url.Values) string {
 		u.RawQuery = merged.Encode()
 	}
 	return u.String()
-}
-
-// Error renders the method, the URL and the status on one line, followed
-// by the server's message when it sent one. The URL is Path verbatim; see
-// the type for what that means for a credential in a query.
-func (e *Error) Error() string {
-	if e.Msg == "" {
-		return fmt.Sprintf("%s %s: HTTP %d",
-			e.Method, e.Path, e.Status)
-	}
-	return fmt.Sprintf("%s %s: HTTP %d: %s",
-		e.Method, e.Path, e.Status, e.Msg)
-}
-
-// Unwrap lets errors.Is reach the sentinel for the statuses a caller
-// treats as control flow rather than failure. Every other status
-// unwraps to nil, so errors.As is the only way to inspect one.
-func (e *Error) Unwrap() error {
-	switch e.Status {
-	case fiber.StatusNotFound:
-		return ErrNotFound
-	case fiber.StatusConflict:
-		return ErrConflict
-	case fiber.StatusUnprocessableEntity:
-		return ErrUnprocessable
-	}
-	return nil
 }
 
 // Do performs a request with bounded retries and decodes the response
@@ -686,4 +656,31 @@ func (c *Client) Do(
 
 	return fmt.Errorf("%s: giving up after %s: %w",
 		call, attempts(retries+1), lastErr)
+}
+
+// Error renders the method, the URL and the status on one line, followed
+// by the server's message when it sent one. The URL is Path verbatim; see
+// the type for what that means for a credential in a query.
+func (e *Error) Error() string {
+	if e.Msg == "" {
+		return fmt.Sprintf("%s %s: HTTP %d",
+			e.Method, e.Path, e.Status)
+	}
+	return fmt.Sprintf("%s %s: HTTP %d: %s",
+		e.Method, e.Path, e.Status, e.Msg)
+}
+
+// Unwrap lets errors.Is reach the sentinel for the statuses a caller
+// treats as control flow rather than failure. Every other status
+// unwraps to nil, so errors.As is the only way to inspect one.
+func (e *Error) Unwrap() error {
+	switch e.Status {
+	case fiber.StatusNotFound:
+		return ErrNotFound
+	case fiber.StatusConflict:
+		return ErrConflict
+	case fiber.StatusUnprocessableEntity:
+		return ErrUnprocessable
+	}
+	return nil
 }

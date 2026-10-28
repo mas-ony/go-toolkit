@@ -24,6 +24,7 @@ import (
 	"strings"
 
 	"github.com/mas-ony/go-toolkit/internal/strlist"
+	"github.com/mas-ony/go-toolkit/internal/upstream"
 	"github.com/spf13/viper"
 )
 
@@ -162,12 +163,9 @@ func (c *NotificationConfig) Enabled(channel string) bool {
 // is: a NotificationConfig built as a struct literal never passed through
 // NewNotificationConfig.
 func (c *NotificationConfig) Validate() error {
-	// errs is declared before the nil check only so the two statements read in
-	// the same order in all Validate implementations; the nil check is what
-	// must come first, since every line after it dereferences c.
 	var errs []error
 	if c == nil {
-		return errors.New("notification config was not initialised")
+		return upstream.NotInitialised("notification")
 	}
 
 	for i, ch := range c.Channels {
@@ -196,7 +194,7 @@ func (c *NotificationConfig) Validate() error {
 // value: "none" is not a channel Validate accepts.
 func (c *NotificationConfig) String() string {
 	if c == nil {
-		return "<nil NotificationConfig>"
+		return nilLabel("NotificationConfig")
 	}
 	channels := strings.Join(c.Channels, ",")
 	if len(c.Channels) == 0 {

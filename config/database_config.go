@@ -74,6 +74,7 @@ import (
 
 	"github.com/mas-ony/go-toolkit/internal/dbdriver"
 	"github.com/mas-ony/go-toolkit/internal/strlist"
+	"github.com/mas-ony/go-toolkit/internal/upstream"
 	"github.com/spf13/viper"
 )
 
@@ -484,12 +485,9 @@ func (c *DatabaseConfig) Configured() bool { return configured(c) }
 // Every check appends rather than returning early, so one restart surfaces
 // every database.* problem at once.
 func (c *DatabaseConfig) Validate() error {
-	// errs is declared before the nil check only so the two statements read in
-	// the same order in all Validate implementations; the nil check is what
-	// must come first, since every line after it dereferences c.
 	var errs []error
 	if c == nil {
-		return errors.New("database config was not initialised")
+		return upstream.NotInitialised("database")
 	}
 
 	engine := dbdriver.Engine(c.Driver)
@@ -498,26 +496,25 @@ func (c *DatabaseConfig) Validate() error {
 			dbdriver.Names()))
 	}
 	if c.Host == "" {
-		errs = append(errs, errors.New("database.host is required"))
+		errs = append(errs, upstream.Required("database.host", ""))
 	}
 	if c.Port == 0 {
-		errs = append(errs, errors.New("database.port is required"))
+		errs = append(errs, upstream.Required("database.port", ""))
 	}
 	// The message spells out what a catalog IS on each driver, because the key
 	// is one word and the thing it names goes by two: a bad guess here
 	// connects successfully and then cannot find a table.
 	if c.Database == "" {
-		errs = append(errs, errors.New(
-			"database.catalog is required: it names the database this "+
-				"connection opens (a catalog on sqlserver/mssql, a database "+
-				"on mysql), and is also the first part of every qualified "+
-				"table name on both"))
+		errs = append(errs, upstream.Required("database.catalog",
+			": it names the database this connection opens (a catalog "+
+				"on sqlserver/mssql, a database on mysql), and is also "+
+				"the first part of every qualified table name on both"))
 	}
 	if c.Username == "" {
-		errs = append(errs, errors.New("database.username is required"))
+		errs = append(errs, upstream.Required("database.username", ""))
 	}
 	if c.Password == "" {
-		errs = append(errs, errors.New("database.password is required"))
+		errs = append(errs, upstream.Required("database.password", ""))
 	}
 
 	// The naming rules are the portability contract, and every one of them
@@ -530,12 +527,12 @@ func (c *DatabaseConfig) Validate() error {
 	switch engine {
 	case dbdriver.SQLServer:
 		if c.Schema == "" {
-			errs = append(errs, errors.New(
-				`database.schema is required for the mssql and sqlserver `+
-					`drivers: a SQL Server table reference is `+
-					`<catalog>.<schema>.<table> and the middle part has no `+
-					`default here — use "dbo" unless the migrations ran as `+
-					`a principal whose default schema is something else`))
+			errs = append(errs, upstream.Required("database.schema",
+				` for the mssql and sqlserver drivers: a SQL Server table `+
+					`reference is <catalog>.<schema>.<table> and the middle `+
+					`part has no default here — use "dbo" unless the `+
+					`migrations ran as a principal whose default schema is `+
+					`something else`))
 		}
 	case dbdriver.MySQL:
 		if c.Schema != "" {
@@ -563,7 +560,7 @@ func (c *DatabaseConfig) Validate() error {
 	// never passed through NewDatabaseConfig.
 	switch enc := strlist.Normalise(c.Encrypt); enc {
 	case "":
-		errs = append(errs, errors.New("database.encrypt is required: use "+
+		errs = append(errs, upstream.Required("database.encrypt", ": use "+
 			alternatives(dbdriver.EncryptModes())+". It is not an "+
 			"mssql-only key — the value is translated into MySQL's tls= "+
 			"as well, and an omitted key would mean that driver connected "+
@@ -639,7 +636,7 @@ func (c *DatabaseConfig) Validate() error {
 // worth confirming in a startup log after a driver change.
 func (c *DatabaseConfig) String() string {
 	if c == nil {
-		return "<nil DatabaseConfig>"
+		return nilLabel("DatabaseConfig")
 	}
 	return fmt.Sprintf("Driver=%s "+
 		"Host=%s "+

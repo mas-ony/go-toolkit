@@ -45,6 +45,7 @@ import (
 	"time"
 
 	"github.com/gofiber/fiber/v3"
+	"github.com/mas-ony/go-toolkit/internal/upstream"
 	"github.com/spf13/viper"
 )
 
@@ -100,7 +101,7 @@ const maxUnixSocketFileMode = 0o777
 // that silently loses requests. That is the right way round for a guess.
 //
 // Pinning the dependency is what keeps it honest; go.mod holds fasthttp at
-// v1.76.0, where this is 5s. Re-read shutdownChildren on every bump.
+// v1.77.0, where this is 5s. Re-read shutdownChildren on every bump.
 const defaultPreforkShutdownGracePeriod = 5 * time.Second
 
 // validListenerNetworks is the allowlist checked by ListenConfig.Validate,
@@ -562,12 +563,9 @@ func NewListenConfig(v *viper.Viper) *ListenConfig {
 // Every check appends rather than returning early, so one restart surfaces
 // every fiber.listen.* problem at once.
 func (c *ListenConfig) Validate() error {
-	// errs is declared before the nil check only so the two statements read in
-	// the same order in all Validate implementations; the nil check is what
-	// must come first, since every line after it dereferences c.
 	var errs []error
 	if c == nil || c.ListenConfig == nil {
-		return errors.New("fiber.listen config was not initialised")
+		return upstream.NotInitialised("fiber.listen")
 	}
 
 	// Required rather than defaulted, because 0 is not "ask Fiber" here — it
@@ -771,10 +769,10 @@ func (c *ListenConfig) Validate() error {
 // UnixSocketFileMode prints in octal (%#o), the notation it is written in.
 func (c *ListenConfig) String() string {
 	if c == nil {
-		return "<nil ListenConfig>"
+		return nilLabel("ListenConfig")
 	}
 	if c.ListenConfig == nil {
-		return "<uninitialised ListenConfig>"
+		return uninitialisedLabel("ListenConfig")
 	}
 	return fmt.Sprintf("CertClientFile=%s "+
 		"CertFile=%s "+

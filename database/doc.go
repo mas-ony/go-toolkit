@@ -3,12 +3,14 @@
 // either of two engines. It defines no repository and no interface, and it
 // is the only package here that knows a driver name.
 //
-// Five files, three jobs. db.go builds a driver-specific DSN, opens the
+// Six files, four jobs. db.go builds a driver-specific DSN, opens the
 // pool and tunes it. tx.go runs a function inside a transaction and decides
 // when that transaction commits, rolls back, or re-raises a panic.
 // dialect.go, read_helpers.go and namespace.go assemble query text:
 // respectively the grammar MySQL and SQL Server spell differently, the
 // clause assembly they spell the same, and namespace-qualified table names.
+// refusal.go reads a failed statement's answer: whether the table refused
+// the row, or the database itself failed.
 //
 // Nothing here names a real table or column. A service writes the
 // repositories, one per table or view, and calls these helpers to build
@@ -89,11 +91,12 @@
 // transactions — each pair a shortcut and an explicit-context form of one
 // function. ParseDialect, SetDialect and Configure for the wiring above.
 // SortField, Dialect and the clause helpers named under the two headings
-// below, each of the engine-dependent ones also a method on Dialect. Six
-// sentinels — ErrNotConfigured, ErrUnsupportedDriver,
-// ErrUnsupportedEncryptMode, ErrInvalidCredential, ErrMalformedDSN and
-// ErrNoIdentityValue — each documented where it is declared, and each
-// meant to be matched with errors.Is rather than by message text.
+// below, each of the engine-dependent ones also a method on Dialect.
+// Rejected, which wraps a refused row in ErrRejected. Seven sentinels —
+// ErrNotConfigured, ErrUnsupportedDriver, ErrUnsupportedEncryptMode,
+// ErrInvalidCredential, ErrMalformedDSN, ErrNoIdentityValue and
+// ErrRejected — each documented where it is declared, and each meant to
+// be matched with errors.Is rather than by message text.
 //
 // # Configuration arrives as two structs and nothing else
 //
@@ -338,7 +341,9 @@
 // buildDSN refuses rather than pretends to escape. The transaction tests
 // run against a fake driver, at the seam where begin, commit and rollback
 // are observable at all. The clause tests assert query TEXT, which is all a
-// string-building helper can be held to offline.
+// string-building helper can be held to offline. The refusal tests build
+// each driver's error value as the driver does, since a number on that
+// value is all Rejected reads.
 //
 // The INTEGRATION suite needs a scratch server for at least one engine and
 // is behind a build tag, so it is opt-in twice over:

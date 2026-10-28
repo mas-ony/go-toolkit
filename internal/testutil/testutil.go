@@ -15,6 +15,18 @@ import (
 // package's sends are both tested with it, so one value satisfies both.
 const BotToken = "123456789:AAFakeTokenForTests_0123456789abcdefg"
 
+// Only returns the one element of items, and fails the test unless there
+// is exactly one. what names the elements as the caller counts them,
+// "requests" or "connections", so a fake server that recorded two where
+// one was expected says so in its own words.
+func Only[T any](t testing.TB, what string, items []T) T {
+	t.Helper()
+	if len(items) != 1 {
+		t.Fatalf("saw %d %s, want 1", len(items), what)
+	}
+	return items[0]
+}
+
 // Set assigns v to *p until the test ends, then puts back what *p held
 // before. Set(t, &x, x) changes nothing and only arranges the restore, for
 // a test that changes x through the API it is testing.
@@ -38,38 +50,6 @@ func CapturePanic(fn func()) (recovered any) {
 	return nil
 }
 
-// Only returns the one element of items, and fails the test unless there
-// is exactly one. what names the elements as the caller counts them,
-// "requests" or "connections", so a fake server that recorded two where
-// one was expected says so in its own words.
-func Only[T any](t testing.TB, what string, items []T) T {
-	t.Helper()
-	if len(items) != 1 {
-		t.Fatalf("saw %d %s, want 1", len(items), what)
-	}
-	return items[0]
-}
-
-// WriteFile writes data to path, creating the directories above it, and
-// returns path. It fails the test on any error.
-func WriteFile(t testing.TB, path string, data []byte) string {
-	t.Helper()
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		t.Fatalf("mkdir for %s: %v", path, err)
-	}
-	if err := os.WriteFile(path, data, 0o644); err != nil {
-		t.Fatalf("write %s: %v", path, err)
-	}
-	return path
-}
-
-// TempFile is WriteFile under name in a directory of the test's own,
-// removed when the test ends, for a file nothing has to sit beside.
-func TempFile(t testing.TB, name string, data []byte) string {
-	t.Helper()
-	return WriteFile(t, filepath.Join(t.TempDir(), name), data)
-}
-
 // Glob returns the files in the test's working directory that match
 // pattern, and fails the test when the pattern is malformed or matches
 // nothing.
@@ -90,6 +70,26 @@ func Glob(t testing.TB, pattern string) []string {
 		t.Fatalf("no file matches %q", pattern)
 	}
 	return files
+}
+
+// WriteFile writes data to path, creating the directories above it, and
+// returns path. It fails the test on any error.
+func WriteFile(t testing.TB, path string, data []byte) string {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir for %s: %v", path, err)
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatalf("write %s: %v", path, err)
+	}
+	return path
+}
+
+// TempFile is WriteFile under name in a directory of the test's own,
+// removed when the test ends, for a file nothing has to sit beside.
+func TempFile(t testing.TB, name string, data []byte) string {
+	t.Helper()
+	return WriteFile(t, filepath.Join(t.TempDir(), name), data)
 }
 
 // ParseFile parses the Go source file at path, comments included, and

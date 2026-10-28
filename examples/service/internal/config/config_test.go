@@ -111,13 +111,6 @@ const (
 		"    cookie_secure: true\n"
 )
 
-// bodyLimitLine and idHeaderLine are single lines of base, verbatim,
-// for the cases that leave them out with cut.
-const (
-	bodyLimitLine = "  body_limit: 22020096  # the floor: 20 MiB + 1 MiB\n"
-	idHeaderLine  = "    header: X-Request-ID\n"
-)
-
 // databaseBlock is base's database section, verbatim, for the case that
 // leaves it out with cut.
 const databaseBlock = "database:\n" +
@@ -131,6 +124,13 @@ const databaseBlock = "database:\n" +
 	"  max_idle_conns: 10\n" +
 	"  conn_max_lifetime: 30m\n" +
 	"  conn_max_idle_time: 5m\n"
+
+// bodyLimitLine and idHeaderLine are single lines of base, verbatim,
+// for the cases that leave them out with cut.
+const (
+	bodyLimitLine = "  body_limit: 22020096  # the floor: 20 MiB + 1 MiB\n"
+	idHeaderLine  = "    header: X-Request-ID\n"
+)
 
 // jwtMode switches base to JWT authentication, with the secret and
 // expiry that mode requires. The secret is 32 bytes, the least the jwt
@@ -189,6 +189,15 @@ func isolate(t *testing.T) {
 	}
 }
 
+// credentials isolates the environment and supplies the database
+// credentials through it, as config.yaml expects a deployment to.
+func credentials(t *testing.T) {
+	t.Helper()
+	isolate(t)
+	t.Setenv("DATABASE_USERNAME", testUser)
+	t.Setenv("DATABASE_PASSWORD", testPassword)
+}
+
 // writeConfig writes body to a file called name in a fresh temporary
 // directory, removed when the test ends, and returns its path.
 func writeConfig(t *testing.T, name, body string) string {
@@ -198,15 +207,6 @@ func writeConfig(t *testing.T, name, body string) string {
 		t.Fatal(err)
 	}
 	return path
-}
-
-// credentials isolates the environment and supplies the database
-// credentials through it, as config.yaml expects a deployment to.
-func credentials(t *testing.T) {
-	t.Helper()
-	isolate(t)
-	t.Setenv("DATABASE_USERNAME", testUser)
-	t.Setenv("DATABASE_PASSWORD", testPassword)
 }
 
 // load isolates the environment, supplies the credentials, applies set
@@ -219,33 +219,6 @@ func load(t *testing.T, body string, set env) (*Config, error) {
 		t.Setenv(name, value)
 	}
 	return New(writeConfig(t, "config.yaml", body))
-}
-
-// mustLoad is load for a case that has to succeed: it fails the test
-// at once, with New's error, if the configuration is refused.
-func mustLoad(t *testing.T, body string, set env) *Config {
-	t.Helper()
-	c, err := load(t, body, set)
-	if err != nil {
-		t.Fatalf("refused:\n%v", err)
-	}
-	return c
-}
-
-// wantErr fails the test unless err is non-nil and mentions every
-// fragment. A nil err stops the test at once, so the caller may use err
-// afterwards; a missing fragment is reported and the test continues, so
-// every missing one is listed.
-func wantErr(t *testing.T, err error, fragments ...string) {
-	t.Helper()
-	if err == nil {
-		t.Fatalf("accepted; want an error mentioning %q", fragments)
-	}
-	for _, f := range fragments {
-		if !strings.Contains(err.Error(), f) {
-			t.Errorf("error lacks %q:\n%v", f, err)
-		}
-	}
 }
 
 // cut returns body with block removed. It fails the test unless block
@@ -268,6 +241,45 @@ func merge(a, b env) env {
 	return out
 }
 
+// mustLoad is load for a case that has to succeed: it fails the test
+// at once, with New's error, if the configuration is refused.
+func mustLoad(t *testing.T, body string, set env) *Config {
+	t.Helper()
+	c, err := load(t, body, set)
+	if err != nil {
+		t.Fatalf("refused:\n%v", err)
+	}
+	return c
+}
+
+// wantSections fails the test for each section in want whose line in got,
+// as logSections returns it, does not read as want says.
+func wantSections(t *testing.T, got, want map[string]string) {
+	t.Helper()
+	for name, line := range want {
+		if got[name] != line {
+			t.Errorf("section %s logged %q, want %q",
+				name, got[name], line)
+		}
+	}
+}
+
+// wantErr fails the test unless err is non-nil and mentions every
+// fragment. A nil err stops the test at once, so the caller may use err
+// afterwards; a missing fragment is reported and the test continues, so
+// every missing one is listed.
+func wantErr(t *testing.T, err error, fragments ...string) {
+	t.Helper()
+	if err == nil {
+		t.Fatalf("accepted; want an error mentioning %q", fragments)
+	}
+	for _, f := range fragments {
+		if !strings.Contains(err.Error(), f) {
+			t.Errorf("error lacks %q:\n%v", f, err)
+		}
+	}
+}
+
 // setMaxFileBytes sets fileutil.MaxFileBytes, the upload cap the
 // body_limit rule reads, for the rest of the test and restores it when
 // the test ends.
@@ -286,7 +298,7 @@ func logSections(t *testing.T, c *Config) (map[string]string, string) {
 	var buf bytes.Buffer
 	c.Log(zerolog.New(&buf))
 	got := map[string]string{}
-	for _, line := range strings.Split(buf.String(), "\n") {
+	for line := range strings.SplitSeq(buf.String(), "\n") {
 		var entry struct{ Section, Config string }
 		if json.Unmarshal([]byte(line), &entry) == nil &&
 			entry.Section != "" {
@@ -294,18 +306,6 @@ func logSections(t *testing.T, c *Config) (map[string]string, string) {
 		}
 	}
 	return got, buf.String()
-}
-
-// wantSections fails the test for each section in want whose line in got,
-// as logSections returns it, does not read as want says.
-func wantSections(t *testing.T, got, want map[string]string) {
-	t.Helper()
-	for name, line := range want {
-		if got[name] != line {
-			t.Errorf("section %s logged %q, want %q",
-				name, got[name], line)
-		}
-	}
 }
 
 // logSource runs Log on c and returns the file field of the

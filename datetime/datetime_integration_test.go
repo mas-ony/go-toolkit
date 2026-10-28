@@ -41,17 +41,17 @@ import (
 	"github.com/mas-ony/go-toolkit/internal/testutil/dbtest"
 )
 
+// row is one row of the scratch table, both columns scanned through Scan.
+type row struct {
+	D  *Datetime `db:"d"`
+	TS *Datetime `db:"ts"`
+}
+
 // stampTypes names the timestamp type each engine spells differently, by
 // the driver dbtest opens it with. Both spell a date DATE.
 var stampTypes = map[string]string{
 	dbdriver.MySQL:     "DATETIME(0)",
 	dbdriver.SQLServer: "DATETIME2(0)",
-}
-
-// row is one row of the scratch table, both columns scanned through Scan.
-type row struct {
-	D  *Datetime `db:"d"`
-	TS *Datetime `db:"ts"`
 }
 
 // zoneOffsetAt reports time.Local's offset on the given date, which is not

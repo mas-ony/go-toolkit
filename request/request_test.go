@@ -45,8 +45,7 @@ func probe(t *testing.T, target string, fn func(c fiber.Ctx)) *http.Response {
 // badRequest reports the code and message of a *fiber.Error, or (0, "") for
 // anything else.
 func badRequest(err error) (int, string) {
-	var fe *fiber.Error
-	if errors.As(err, &fe) {
+	if fe, ok := errors.AsType[*fiber.Error](err); ok {
 		return fe.Code, fe.Message
 	}
 	return 0, ""

@@ -73,6 +73,41 @@ type bot struct {
 // accepted is the answer to a message that was sent.
 const accepted = `{"ok":true,"result":{"message_id":42}}`
 
+// respond returns a reply that answers every request with status and body.
+func respond(
+	status int,
+	body string,
+) func(http.ResponseWriter, *http.Request) {
+	return func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		_, _ = io.WriteString(w, body)
+	}
+}
+
+// service builds a Service for b through New, the way an application does,
+// after change has adjusted the configuration.
+func service(
+	t *testing.T,
+	b *bot,
+	change func(*config.TelegramConfig),
+) *Service {
+	t.Helper()
+	cfg := &config.TelegramConfig{
+		Token:   testutil.BotToken,
+		APIURL:  b.srv.URL,
+		Timeout: 10 * time.Second,
+	}
+	if change != nil {
+		change(cfg)
+	}
+	s, err := New(cfg, zerolog.Nop())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	return s
+}
+
 // start begins serving and stops at the end of the test that started it.
 func (b *bot) start(t *testing.T) *bot {
 	t.Helper()
@@ -125,12 +160,11 @@ func (b *bot) serve(w http.ResponseWriter, r *http.Request) {
 	b.hits = append(b.hits, h)
 	b.mu.Unlock()
 
-	if b.reply != nil {
-		b.reply(w, r)
-		return
+	reply := b.reply
+	if reply == nil {
+		reply = respond(http.StatusOK, accepted)
 	}
-	w.Header().Set("Content-Type", "application/json")
-	_, _ = io.WriteString(w, accepted)
+	reply(w, r)
 }
 
 // seen returns every request so far, in arrival order.
@@ -144,41 +178,6 @@ func (b *bot) seen() []hit {
 func (b *bot) only(t *testing.T) hit {
 	t.Helper()
 	return testutil.Only(t, "requests at the API", b.seen())
-}
-
-// respond returns a reply that answers every request with status and body.
-func respond(
-	status int,
-	body string,
-) func(http.ResponseWriter, *http.Request) {
-	return func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(status)
-		_, _ = io.WriteString(w, body)
-	}
-}
-
-// service builds a Service for b through New, the way an application does,
-// after change has adjusted the configuration.
-func service(
-	t *testing.T,
-	b *bot,
-	change func(*config.TelegramConfig),
-) *Service {
-	t.Helper()
-	cfg := &config.TelegramConfig{
-		Token:   testutil.BotToken,
-		APIURL:  b.srv.URL,
-		Timeout: 10 * time.Second,
-	}
-	if change != nil {
-		change(cfg)
-	}
-	s, err := New(cfg, zerolog.Nop())
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	return s
 }
 
 // A send delivers one message the API reads back intact, sets nothing else

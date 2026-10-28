@@ -94,28 +94,14 @@ func TestSplitList(t *testing.T) {
 	}
 }
 
-// Nothing set, and only commas: both are "no list", and neither may
-// produce a list holding an empty string — which a caller checking
-// len() > 0 would read as one requested element.
-func TestSplitListHasNoPhantomElements(t *testing.T) {
-	t.Parallel()
-
-	v := viper.New()
-	if got := splitList(v, "zqunit.absent"); len(got) != 0 {
-		t.Errorf("an absent key = %#v, want no elements", got)
-	}
-
-	v.Set("zqunit.commas", ",,,")
-	if got := splitList(v, "zqunit.commas"); len(got) != 0 {
-		t.Errorf("a value of only commas = %#v, want no elements", got)
-	}
-}
-
 // An absent key and a stated empty list both have length zero and mean
 // different things: nil lets a middleware substitute its own default,
 // while a made-but-empty list is taken as written. The zerolog field and
 // level lists and fiber.client.no_retry_methods all turn on that
 // difference, so it is pinned here rather than assumed of spf13/cast.
+//
+// Neither holds an empty string, however many commas made it, since a
+// caller checking len() > 0 would read one as a requested element.
 func TestSplitListKeepsAbsentAndEmptyApart(t *testing.T) {
 	t.Parallel()
 
@@ -123,11 +109,14 @@ func TestSplitListKeepsAbsentAndEmptyApart(t *testing.T) {
 		t.Errorf("an absent key = %#v, want nil", got)
 	}
 
+	comma := viper.New()
+	comma.Set("zqunit.list", ",")
 	commas := viper.New()
-	commas.Set("zqunit.list", ",")
+	commas.Set("zqunit.list", ",,,")
 	for name, v := range map[string]*viper.Viper{
-		"a YAML []":   yamlViper(t, "zqunit:\n  list: []\n"),
-		"only commas": commas,
+		"a YAML []":    yamlViper(t, "zqunit:\n  list: []\n"),
+		"a lone comma": comma,
+		"only commas":  commas,
 	} {
 		if got := splitList(v, "zqunit.list"); got == nil || len(got) != 0 {
 			t.Errorf("%s = %#v, want a non-nil empty list", name, got)

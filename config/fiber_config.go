@@ -660,12 +660,9 @@ func NewFiberConfig(v *viper.Viper) *FiberConfig {
 // Every check appends rather than returning early, so one restart surfaces
 // every fiber.* problem at once.
 func (c *FiberConfig) Validate() error {
-	// errs is declared before the nil check only so the two statements read in
-	// the same order in all Validate implementations; the nil check is what
-	// must come first, since every line after it dereferences c.
 	var errs []error
 	if c == nil || c.Config == nil {
-		return errors.New("fiber config was not initialised")
+		return upstream.NotInitialised("fiber")
 	}
 
 	// GETOnly is refused rather than paired, because there is nothing here to
@@ -793,10 +790,10 @@ func (c *FiberConfig) Validate() error {
 // method and "[]" reads as allowing none.
 func (c *FiberConfig) String() string {
 	if c == nil {
-		return "<nil FiberConfig>"
+		return nilLabel("FiberConfig")
 	}
 	if c.Config == nil {
-		return "<uninitialised FiberConfig>"
+		return uninitialisedLabel("FiberConfig")
 	}
 	methods := fmt.Sprintf("%v", c.RequestMethods)
 	if len(c.RequestMethods) == 0 {

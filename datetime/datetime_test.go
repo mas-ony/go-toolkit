@@ -56,23 +56,6 @@ var (
 	_ encoding.TextUnmarshaler = (*Datetime)(nil)
 )
 
-// local builds an expected time in the test zone, keeping the tables below
-// readable.
-func local(year int, month time.Month, day, hour, min, sec int) time.Time {
-	return time.Date(year, month, day, hour, min, sec, 0, testZone)
-}
-
-// decoded is the Datetime UnmarshalJSON makes of input, for a test that
-// needs the input accepted before it can assert anything else.
-func decoded(t *testing.T, input string) Datetime {
-	t.Helper()
-	var d Datetime
-	if err := d.UnmarshalJSON([]byte(input)); err != nil {
-		t.Fatalf("UnmarshalJSON(%s): %v", input, err)
-	}
-	return d
-}
-
 // layouts holds an input in every shape parseLayouts reads, written as the
 // bare string a query parameter carries, beside the instant each has to
 // mean.
@@ -102,6 +85,23 @@ var layouts = []struct {
 	{"SQL text timestamp", "2024-03-15 10:30:45",
 		local(2024, 3, 15, 10, 30, 45)},
 	{"date only", "2024-03-15", local(2024, 3, 15, 0, 0, 0)},
+}
+
+// local builds an expected time in the test zone, keeping the tables below
+// readable.
+func local(year int, month time.Month, day, hour, min, sec int) time.Time {
+	return time.Date(year, month, day, hour, min, sec, 0, testZone)
+}
+
+// decoded is the Datetime UnmarshalJSON makes of input, for a test that
+// needs the input accepted before it can assert anything else.
+func decoded(t *testing.T, input string) Datetime {
+	t.Helper()
+	var d Datetime
+	if err := d.UnmarshalJSON([]byte(input)); err != nil {
+		t.Fatalf("UnmarshalJSON(%s): %v", input, err)
+	}
+	return d
 }
 
 // TestMain pins time.Local before any test runs.

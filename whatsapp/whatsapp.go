@@ -214,52 +214,111 @@ func recipient(phone string, empty bool) (types.JID, bool, error) {
 	return types.NewJID(digits, types.DefaultUserServer), true, nil
 }
 
-// storeDSN builds the SQLite URI for a credential store at path, falling
-// back to DefaultStorePath when path is empty.
+// storeFile is the credential database a store path names: path itself, or
+// DefaultStorePath when path is empty. It is the one place that default is
+// applied, so the store NewContext opens and the store an ErrNotPaired tells
+// an operator to put in place are the same file.
+func storeFile(path string) string {
+	return cmp.Or(path, DefaultStorePath)
+}
+
+// storeDSN builds the SQLite URI for the credential store storeFile names
+// for path.
 //
 // "file:" with a single slash covers both shapes: "file:whatsapp.db" is
 // relative to the working directory and "file:/var/lib/app/whatsapp.db" is
 // absolute, so nothing here has to tell them apart.
 func storeDSN(path string) string {
-	return "file:" + sqliteURIEscaper.Replace(cmp.Or(path, DefaultStorePath)) +
-		"?" + storePragmas
+	return "file:" + sqliteURIEscaper.Replace(storeFile(path)) + "?" +
+		storePragmas
 }
 
-// New creates and connects a WhatsApp Service.
+// pair links client's device by QR code, for a store that holds no device ID
+// yet: it connects, prints each code the QR channel emits, and returns once
+// the channel closes. A channel that closes without the device linked is
+// ErrNotPaired, naming file, the store NewContext opened and the one the
+// pairing would have been kept in.
 //
-// On first run (no existing session in whatsapp.db), whatsmeow requests a QR
-// code from WhatsApp's servers; New renders it as a scannable QR block on
-// stdout and additionally emits the raw code as an INFO log entry with key
-// "qr". Scan the code once with the WhatsApp mobile app under Linked Devices
-// → Link a Device. After pairing, the credentials are stored in whatsapp.db
-// and subsequent starts connect automatically without a QR code. The
-// whatsmeow credential tables are created on first run; no manual migration
-// is needed.
-//
-// That log line carries a live credential, which is the cost of the plaintext
-// fallback. The code is the whole pairing payload, so anyone who can read the
-// log while it is still current can render it and link a device of their own.
-// Each code expires with its cycle, which bounds the window rather than
-// closing it: for the length of the pairing attempt, read access to the log
-// is access to the account. Pair somewhere the log is not shared, or drop the
-// field and keep the terminal rendering alone.
-//
-// Blocking behaviour, which is the operational hazard on this path. On first
-// run New blocks until pairing completes or whatsmeow closes the QR channel,
-// and the channel is only closed once the codes stop refreshing, on the order
-// of minutes rather than seconds. A process started with an empty whatsapp.db
-// therefore stalls for that whole window before it does anything else. Pair
-// the device before first use, or start with an already-paired whatsapp.db in
-// place. The wait takes its bound from the context handed to GetQRChannel,
-// and the one below is context.Background, so it has none.
-//
-// An unscanned QR window is an ERROR, not a success. The client is connected
-// but not logged in at that point, and returning it would hand the caller a
-// non-nil Service that passes every nil check and then fails at every send.
-// ErrNotPaired lets a caller log the state and carry on with notifications
-// disabled, which is the outcome that path should get.
-func New(log zerolog.Logger) (*Service, error) {
-	return NewContext(context.Background(), log, DefaultStorePath)
+// This is the wait NewContext's ctx bounds, and the one place this package
+// can block for minutes.
+func pair(
+	ctx context.Context,
+	client *whatsmeow.Client,
+	log zerolog.Logger,
+	file string,
+) error {
+	// No session credentials in the store — the device has not been paired
+	// yet. Request a QR channel before connecting so the code can be printed
+	// as it arrives.
+	//
+	// The error is reported rather than discarded because of what discarding
+	// it costs. GetQRChannel hands back a nil channel alongside it, and the
+	// range below blocks forever on a nil channel, so the failure would
+	// present as a process that starts, logs nothing further, and never
+	// serves a request — the one outcome no caller can diagnose.
+	//
+	// Whatsmeow refuses the call when the client is nil, when it is already
+	// connected, or when the store already holds a device ID. None of the
+	// three can happen on the path NewContext calls this from, which is why
+	// reaching the hang would take a change in whatsmeow rather than a bug in
+	// this package.
+	qrChan, err := client.GetQRChannel(ctx)
+	if err != nil {
+		return fmt.Errorf("whatsapp: get QR channel: %w", err)
+	}
+	if err := client.Connect(); err != nil {
+		// qrChan is abandoned here rather than drained. Nothing feeds a
+		// channel whose connection never opened, and nothing closes it
+		// either, ctx included: whatsmeow watches ctx only while it is
+		// emitting codes, and it starts emitting only over an open
+		// connection.
+		return fmt.Errorf("whatsapp: connect for QR: %w", err)
+	}
+
+	// The QR channel emits one "code" event per QR cycle (codes refresh
+	// every ~20 s) until the user scans or the attempt times out.
+	for evt := range qrChan {
+		if evt.Event == "code" {
+			// Render the QR code as half-block Unicode characters
+			// directly to stdout so it is visible in the terminal or
+			// the captured log. GenerateHalfBlock produces the most
+			// compact output that all modern terminals can display
+			// without extra libraries.
+			//
+			// The write discards are explicit: a failed write to stdout
+			// is not worth failing pairing over, and the structured log
+			// line below is the fallback for exactly that case, and for
+			// a terminal that cannot render Unicode.
+			_, _ = fmt.Fprintln(os.Stdout, qrBannerTop)
+			qrterminal.GenerateHalfBlock(evt.Code, qrterminal.L, os.Stdout)
+			_, _ = fmt.Fprintln(os.Stdout, qrBannerBottom)
+			log.Info().
+				Str("qr", evt.Code).
+				Msg("whatsapp: scan QR code to link device (plaintext)")
+			continue
+		}
+		log.Info().Str("event", evt.Event).Msg("whatsapp: QR channel event")
+	}
+
+	// The channel closing does not mean the device was paired. Store.ID is
+	// what says so: whatsmeow writes it once the pairing handshake
+	// completes, so a nil ID here means the window expired unscanned.
+	//
+	// Disconnect before returning, because Connect above opened a WebSocket
+	// that nothing else holds a reference to once NewContext returns the
+	// error.
+	//
+	// The message names file, the store as NewContext opened it, since
+	// telling an operator to put a paired store in place is only useful if
+	// it says where, and a caller that passed its own path is not reading
+	// DefaultStorePath.
+	if client.Store.ID == nil {
+		client.Disconnect()
+		return fmt.Errorf(
+			"%w; scan the code shown above, or start with a paired "+
+				"store already at %s", ErrNotPaired, file)
+	}
+	return nil
 }
 
 // NewContext is New with an explicit context and credential store path.
@@ -348,86 +407,87 @@ func NewContext(
 		if err := client.Connect(); err != nil {
 			return nil, fmt.Errorf("whatsapp: connect: %w", err)
 		}
-		log.Info().Msg("whatsapp: client connected")
-		retained = true
-		return &Service{client: client, log: log}, nil
-	}
-
-	// No session credentials in the store — the device has not been paired
-	// yet. Request a QR channel before connecting so the code can be printed
-	// as it arrives.
-	//
-	// The error is reported rather than discarded because of what discarding
-	// it costs. GetQRChannel hands back a nil channel alongside it, and the
-	// range below blocks forever on a nil channel, so the failure would
-	// present as a process that starts, logs nothing further, and never
-	// serves a request — the one outcome no caller can diagnose.
-	//
-	// Whatsmeow refuses the call when the client is nil, when it is already
-	// connected, or when the store already holds a device ID. None of the
-	// three is reachable here, which is why reaching the hang would take a
-	// change in whatsmeow rather than a bug in this function.
-	qrChan, err := client.GetQRChannel(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("whatsapp: get QR channel: %w", err)
-	}
-	if err := client.Connect(); err != nil {
-		// qrChan is abandoned here rather than drained. Nothing feeds a
-		// channel whose connection never opened, and nothing closes it
-		// either: the context below is the only thing that would, and it
-		// is context.Background. A cancellable context is the lever if
-		// this path ever needs to be tidy rather than merely correct.
-		return nil, fmt.Errorf("whatsapp: connect for QR: %w", err)
-	}
-
-	// The QR channel emits one "code" event per QR cycle (codes refresh
-	// every ~20 s) until the user scans or the attempt times out.
-	for evt := range qrChan {
-		if evt.Event == "code" {
-			// Render the QR code as half-block Unicode characters
-			// directly to stdout so it is visible in the terminal or
-			// the captured log. GenerateHalfBlock produces the most
-			// compact output that all modern terminals can display
-			// without extra libraries.
-			//
-			// The write discards are explicit: a failed write to stdout
-			// is not worth failing pairing over, and the structured log
-			// line below is the fallback for exactly that case, and for
-			// a terminal that cannot render Unicode.
-			_, _ = fmt.Fprintln(os.Stdout, qrBannerTop)
-			qrterminal.GenerateHalfBlock(evt.Code, qrterminal.L, os.Stdout)
-			_, _ = fmt.Fprintln(os.Stdout, qrBannerBottom)
-			log.Info().
-				Str("qr", evt.Code).
-				Msg("whatsapp: scan QR code to link device (plaintext)")
-			continue
-		}
-		log.Info().Str("event", evt.Event).Msg("whatsapp: QR channel event")
-	}
-
-	// The channel closing does not mean the device was paired. Store.ID is
-	// what says so: whatsmeow writes it once the pairing handshake
-	// completes, so a nil ID here means the window expired unscanned.
-	//
-	// Disconnect before returning, because Connect above opened a WebSocket
-	// that nothing else holds a reference to once this function returns an
-	// error.
-	//
-	// The message names the store as it was opened, storePath or the
-	// default in its place, since telling an operator to put a paired store
-	// in place is only useful if it says where, and a caller that passed
-	// its own path is not reading DefaultStorePath.
-	if client.Store.ID == nil {
-		client.Disconnect()
-		return nil, fmt.Errorf(
-			"%w; scan the code shown above, or start with a paired "+
-				"store already at %s", ErrNotPaired,
-			cmp.Or(storePath, DefaultStorePath))
+	} else if err := pair(ctx, client, log, storeFile(storePath)); err != nil {
+		return nil, err
 	}
 
 	log.Info().Msg("whatsapp: client connected")
 	retained = true
 	return &Service{client: client, log: log}, nil
+}
+
+// New creates and connects a WhatsApp Service.
+//
+// On first run (no existing session in whatsapp.db), whatsmeow requests a QR
+// code from WhatsApp's servers; New renders it as a scannable QR block on
+// stdout and additionally emits the raw code as an INFO log entry with key
+// "qr". Scan the code once with the WhatsApp mobile app under Linked Devices
+// → Link a Device. After pairing, the credentials are stored in whatsapp.db
+// and subsequent starts connect automatically without a QR code. The
+// whatsmeow credential tables are created on first run; no manual migration
+// is needed.
+//
+// That log line carries a live credential, which is the cost of the plaintext
+// fallback. The code is the whole pairing payload, so anyone who can read the
+// log while it is still current can render it and link a device of their own.
+// Each code expires with its cycle, which bounds the window rather than
+// closing it: for the length of the pairing attempt, read access to the log
+// is access to the account. Pair somewhere the log is not shared, or drop the
+// field and keep the terminal rendering alone.
+//
+// Blocking behaviour, which is the operational hazard on this path. On first
+// run New blocks until pairing completes or whatsmeow closes the QR channel,
+// and the channel is only closed once the codes stop refreshing, on the order
+// of minutes rather than seconds. A process started with an empty whatsapp.db
+// therefore stalls for that whole window before it does anything else. Pair
+// the device before first use, or start with an already-paired whatsapp.db in
+// place. The wait takes its bound from the context handed to GetQRChannel,
+// and the one below is context.Background, so it has none.
+//
+// An unscanned QR window is an ERROR, not a success. The client is connected
+// but not logged in at that point, and returning it would hand the caller a
+// non-nil Service that passes every nil check and then fails at every send.
+// ErrNotPaired lets a caller log the state and carry on with notifications
+// disabled, which is the outcome that path should get.
+func New(log zerolog.Logger) (*Service, error) {
+	return NewContext(context.Background(), log, DefaultStorePath)
+}
+
+// SendTextContext is SendText with an explicit context, which is the only
+// way to bound how long a send may take: whatsmeow's transport applies its
+// own deadlines and this package adds none.
+//
+// A cancelled context stops the send. It says nothing about DELIVERY — a
+// message whose write reached WhatsApp before the cancellation may still
+// arrive, so a caller that retries on cancellation should expect the
+// recipient to see it twice rather than not at all.
+//
+// The no-op cases are checked before the context is, so an empty recipient
+// or message returns nil even under a context that is already done. That
+// keeps "nothing to send" a single answer rather than one that depends on
+// timing.
+func (s *Service) SendTextContext(
+	ctx context.Context,
+	phone, message string,
+) error {
+	jid, ok, err := recipient(phone, message == "")
+	if err != nil || !ok {
+		return err
+	}
+
+	// SendMessage returns (types.SendResponse, error). The SendResponse
+	// contains the server-assigned message ID and timestamp, which are not
+	// needed for fire-and-forget notifications. Assign to _ to make the
+	// discard explicit.
+	_, err = s.client.SendMessage(ctx, jid, &waE2E.Message{
+		Conversation: proto.String(message),
+	})
+	if err != nil {
+		return fmt.Errorf("whatsapp: send to %s: %w", jid.User, err)
+	}
+
+	s.log.Info().Str("to", jid.User).Msg("whatsapp: message sent")
+	return nil
 }
 
 // SendText delivers a plain-text WhatsApp message to the given phone number.
@@ -475,86 +535,6 @@ func NewContext(
 // Safe for concurrent use, and unsafe on a nil receiver; see Service.
 func (s *Service) SendText(phone, message string) error {
 	return s.SendTextContext(context.Background(), phone, message)
-}
-
-// SendTextContext is SendText with an explicit context, which is the only
-// way to bound how long a send may take: whatsmeow's transport applies its
-// own deadlines and this package adds none.
-//
-// A cancelled context stops the send. It says nothing about DELIVERY — a
-// message whose write reached WhatsApp before the cancellation may still
-// arrive, so a caller that retries on cancellation should expect the
-// recipient to see it twice rather than not at all.
-//
-// The no-op cases are checked before the context is, so an empty recipient
-// or message returns nil even under a context that is already done. That
-// keeps "nothing to send" a single answer rather than one that depends on
-// timing.
-func (s *Service) SendTextContext(
-	ctx context.Context,
-	phone, message string,
-) error {
-	jid, ok, err := recipient(phone, message == "")
-	if err != nil || !ok {
-		return err
-	}
-
-	// SendMessage returns (types.SendResponse, error). The SendResponse
-	// contains the server-assigned message ID and timestamp, which are not
-	// needed for fire-and-forget notifications. Assign to _ to make the
-	// discard explicit.
-	_, err = s.client.SendMessage(ctx, jid, &waE2E.Message{
-		Conversation: proto.String(message),
-	})
-	if err != nil {
-		return fmt.Errorf("whatsapp: send to %s: %w", jid.User, err)
-	}
-
-	s.log.Info().Str("to", jid.User).Msg("whatsapp: message sent")
-	return nil
-}
-
-// SendDocument delivers a document attachment (PDF, DOCX, etc.) to the given
-// phone number, with an optional caption shown above the file in the chat.
-//
-// data is the raw file bytes. filename is shown to the recipient as the
-// document's name and should include the extension (e.g. "report.pdf");
-// mimetype should match the actual content type (e.g. "application/pdf").
-//
-// Sending a document is a two-step whatsmeow operation, unlike SendText's
-// single call: Upload first encrypts and uploads the bytes to WhatsApp's
-// media servers, returning the URL and keys needed to reference the blob;
-// SendMessage then sends a DocumentMessage pointing at that uploaded blob,
-// which is the actual chat message the recipient sees. Because of the upload
-// step this is noticeably slower than SendText and depends on network
-// conditions — avoid calling it on a request path that needs to return
-// quickly.
-//
-// This form and SendText pass context.Background, so neither bounds how
-// long a send takes, and the only deadline is whatever whatsmeow's own
-// transport applies. SendDocumentContext is the form that can, and the one
-// to use on any path that has to return.
-//
-// Empty-input behaviour is NOT identical to SendText's. Both no-op on a
-// recipient that is empty once normalised, and this one also no-ops on empty
-// data. But SendText refuses an empty MESSAGE, whereas filename, mimetype and
-// caption are unchecked here: an empty filename ships FileName:"" and the
-// recipient receives a nameless attachment. That is deliberate — an empty
-// message is nothing to deliver, while a nameless document still delivers its
-// contents, and a notification that arrives badly labelled beats one that
-// silently does not arrive. A caller passing a stored filename straight
-// through should expect an empty column to reach this unchecked.
-//
-// Phone normalisation, the ErrInvalidPhone rejection, the error message
-// naming the recipient, and the non-nil-receiver requirement are all as
-// described on SendText.
-func (s *Service) SendDocument(
-	phone string,
-	data []byte,
-	filename, mimetype, caption string,
-) error {
-	return s.SendDocumentContext(
-		context.Background(), phone, data, filename, mimetype, caption)
 }
 
 // SendDocumentContext is SendDocument with an explicit context, and it is
@@ -620,6 +600,49 @@ func (s *Service) SendDocumentContext(
 	return nil
 }
 
+// SendDocument delivers a document attachment (PDF, DOCX, etc.) to the given
+// phone number, with an optional caption shown above the file in the chat.
+//
+// data is the raw file bytes. filename is shown to the recipient as the
+// document's name and should include the extension (e.g. "report.pdf");
+// mimetype should match the actual content type (e.g. "application/pdf").
+//
+// Sending a document is a two-step whatsmeow operation, unlike SendText's
+// single call: Upload first encrypts and uploads the bytes to WhatsApp's
+// media servers, returning the URL and keys needed to reference the blob;
+// SendMessage then sends a DocumentMessage pointing at that uploaded blob,
+// which is the actual chat message the recipient sees. Because of the upload
+// step this is noticeably slower than SendText and depends on network
+// conditions — avoid calling it on a request path that needs to return
+// quickly.
+//
+// This form and SendText pass context.Background, so neither bounds how
+// long a send takes, and the only deadline is whatever whatsmeow's own
+// transport applies. SendDocumentContext is the form that can, and the one
+// to use on any path that has to return.
+//
+// Empty-input behaviour is NOT identical to SendText's. Both no-op on a
+// recipient that is empty once normalised, and this one also no-ops on empty
+// data. But SendText refuses an empty MESSAGE, whereas filename, mimetype and
+// caption are unchecked here: an empty filename ships FileName:"" and the
+// recipient receives a nameless attachment. That is deliberate — an empty
+// message is nothing to deliver, while a nameless document still delivers its
+// contents, and a notification that arrives badly labelled beats one that
+// silently does not arrive. A caller passing a stored filename straight
+// through should expect an empty column to reach this unchecked.
+//
+// Phone normalisation, the ErrInvalidPhone rejection, the error message
+// naming the recipient, and the non-nil-receiver requirement are all as
+// described on SendText.
+func (s *Service) SendDocument(
+	phone string,
+	data []byte,
+	filename, mimetype, caption string,
+) error {
+	return s.SendDocumentContext(
+		context.Background(), phone, data, filename, mimetype, caption)
+}
+
 // Disconnect gracefully closes the WhatsApp WebSocket connection.
 // Call this during application shutdown after all in-flight requests have
 // completed to ensure any pending message acknowledgements are flushed.
@@ -628,7 +651,7 @@ func (s *Service) SendDocumentContext(
 // closed rather than dropped has to wire it into its own shutdown sequence,
 // a signal handler for instance.
 //
-// It does not close the credential store; see the note in New.
+// It does not close the credential store; see the note in NewContext.
 func (s *Service) Disconnect() {
 	s.client.Disconnect()
 	s.log.Info().Msg("whatsapp: disconnected")

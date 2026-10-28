@@ -34,6 +34,9 @@ type fatal struct {
 	msg string
 }
 
+// counter is the package state the Set tests change.
+var counter = 1
+
 // Helper does nothing; the helper under test calls it first.
 func (f *fatal) Helper() {}
 
@@ -43,9 +46,6 @@ func (f *fatal) Fatalf(format string, args ...any) {
 	f.msg = fmt.Sprintf(format, args...)
 	panic(f)
 }
-
-// counter is the package state the Set tests change.
-var counter = 1
 
 // Set holds the new value for the life of the test and restores the old
 // one when it ends, and Set to the current value restores whatever the

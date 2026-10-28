@@ -666,39 +666,6 @@ func buildDSN(
 	}
 }
 
-// New opens a validated, pooled database connection for the given
-// configuration.
-//
-// This is the shortcut form of NewContext, for a caller that holds no
-// context at the point it opens the pool — the usual case, since this runs
-// before anything is being served. The deadline is the same either way; a
-// caller-supplied context only adds a second way to end the wait.
-//
-// Steps:
-//  1. Builds a driver-specific DSN from cfg (credentials are embedded; never
-//     log it).
-//  2. Opens the connection pool via sqlx.Open — this validates the DSN format
-//     but performs no network I/O. The pool is not yet connected at this
-//     point.
-//  3. Applies pool settings (see applyPoolSettings for the clamping
-//     behaviour).
-//  4. Pings the server, under a pingTimeout deadline, to verify the
-//     credentials and network path. If the ping fails the pool is closed
-//     before returning so the caller never holds a reference to a broken pool.
-//
-// The deadline covers STARTUP only. Queries issued later carry whatever
-// context their caller supplies, so a caller passing context.Background()
-// gets no runtime bound from this or any other timeout here.
-//
-// A successful ping proves the network path, the credentials, and that the
-// login can reach its default database (cfg.Database). It proves NOTHING
-// about any QUALIFIED namespace a caller prefixes its queries with, which
-// this ping never exercises — so a catalog that does not exist, or that
-// this login cannot read, surfaces at the first query rather than here.
-func New(cfg *config.DatabaseConfig, app *config.AppConfig) (*sqlx.DB, error) {
-	return NewContext(context.Background(), cfg, app)
-}
-
 // NewContext is New with an explicit context, mirroring the WithTx /
 // WithTxContext split in tx.go.
 //
@@ -732,9 +699,11 @@ func NewContext(
 	// A nil AppConfig is a wiring mistake rather than an absent section:
 	// every deployment has an app.* section, and buildDSN reads its name and
 	// location on both branches. Refused as an error here, where it would
-	// otherwise be a nil dereference inside the DSN builder.
+	// otherwise be a nil dereference inside the DSN builder, and in the
+	// words config.AppConfig.Validate refuses a nil section in.
 	if app == nil {
-		return nil, errors.New("database: app config was not initialised")
+		return nil, fmt.Errorf("database: %w",
+			upstream.NotInitialised("app"))
 	}
 
 	driver, dsn, err := buildDSN(cfg, app)
@@ -839,4 +808,37 @@ func NewContext(
 	}
 
 	return db, nil
+}
+
+// New opens a validated, pooled database connection for the given
+// configuration.
+//
+// This is the shortcut form of NewContext, for a caller that holds no
+// context at the point it opens the pool — the usual case, since this runs
+// before anything is being served. The deadline is the same either way; a
+// caller-supplied context only adds a second way to end the wait.
+//
+// Steps:
+//  1. Builds a driver-specific DSN from cfg (credentials are embedded; never
+//     log it).
+//  2. Opens the connection pool via sqlx.Open — this validates the DSN format
+//     but performs no network I/O. The pool is not yet connected at this
+//     point.
+//  3. Applies pool settings (see applyPoolSettings for the clamping
+//     behaviour).
+//  4. Pings the server, under a pingTimeout deadline, to verify the
+//     credentials and network path. If the ping fails the pool is closed
+//     before returning so the caller never holds a reference to a broken pool.
+//
+// The deadline covers STARTUP only. Queries issued later carry whatever
+// context their caller supplies, so a caller passing context.Background()
+// gets no runtime bound from this or any other timeout here.
+//
+// A successful ping proves the network path, the credentials, and that the
+// login can reach its default database (cfg.Database). It proves NOTHING
+// about any QUALIFIED namespace a caller prefixes its queries with, which
+// this ping never exercises — so a catalog that does not exist, or that
+// this login cannot read, surfaces at the first query rather than here.
+func New(cfg *config.DatabaseConfig, app *config.AppConfig) (*sqlx.DB, error) {
+	return NewContext(context.Background(), cfg, app)
 }

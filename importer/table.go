@@ -119,6 +119,23 @@ type Field[T any] struct {
 	Set func(dst *T, c Cell) error
 }
 
+// cellFault is what a cell of col that will not read, with err, does to
+// its row: the row's error when the column is one the row cannot be
+// imported without, and otherwise a warning that the field is left
+// empty. Each names the column.
+//
+// It is the one rule for a cell, which Table.Apply and Row's readers
+// both follow, so a cell is reported alike whichever an import reads it
+// through.
+func cellFault(
+	col xlsx.Column, required bool, err error,
+) (fatal error, warning string) {
+	if required {
+		return fmt.Errorf("%s: %w", col, err), ""
+	}
+	return nil, fmt.Sprintf("%s: %v — left empty", col, err)
+}
+
 // coerce builds the field behind each built-in mapping, Text, Int,
 // Decimal, Date, Raw and Link: the cell is read by conv into the value dst
 // points at and stored there. An error from conv leaves the field as it
@@ -141,9 +158,6 @@ func coerce[T, V any](
 	}, captions...)
 }
 
-// Date1904 always reports true.
-func (epoch1904) Date1904() bool { return true }
-
 // NewSource adapts an open workbook to the Source a Table reads,
 // honouring the -date1904 override.
 //
@@ -156,137 +170,6 @@ func NewSource(wb *xlsx.File, force bool) Source {
 		return epoch1904{wb}
 	}
 	return wb
-}
-
-// Columns renders the whole table as the layout contract, for
-// xlsx.VerifyHeaders and xlsx.DataRows.
-//
-// Every field is included, Expect entries and all. That is what makes a
-// blank-row skip safe: DataRows tests the columns the caller declared an
-// interest in, and a column read only for a lookup is still one of them.
-func (t Table[T]) Columns() []xlsx.Column {
-	out := make([]xlsx.Column, 0, len(t))
-	for _, f := range t {
-		out = append(out, f.Column)
-	}
-	return out
-}
-
-// Apply reads one row into dst, returning the warnings it collected.
-//
-// A cell that will not coerce is a warning, not a failed row: the field
-// is left unset and the row goes on. A record whose one numeric cell
-// holds a stray note is still worth importing with its other twenty
-// columns intact, and the warning names the cell somebody has to go and
-// fix. Must inverts that for a column a row genuinely cannot be imported
-// without.
-//
-// The destination is supplied rather than allocated here because a row
-// type that holds a pointer to its model must have that pointer set
-// before any setter runs, and only the dataset knows what it needs to
-// build.
-//
-// A non-nil error means a Required column would not coerce. dst is left
-// partly filled in that case: the caller is dropping the row, and
-// rolling back the fields already written would buy nothing.
-func (t Table[T]) Apply(
-	src Source, row int, dst *T,
-) ([]string, error) {
-	var warns []string
-
-	date1904 := src.Date1904()
-	for _, f := range t {
-		if f.Set == nil {
-			continue
-		}
-		c := Cell{
-			Row:      row,
-			Col:      f.Col,
-			Text:     src.Cell(row, f.Col),
-			Date1904: date1904,
-		}
-		if f.WantLink {
-			c.Link = src.Hyperlink(row, f.Col)
-		}
-
-		err := f.Set(dst, c)
-		if err == nil {
-			continue
-		}
-		if f.Required {
-			return warns, fmt.Errorf("column %s (%s): %w",
-				f.Col, f.Purpose, err)
-		}
-		warns = append(warns, fmt.Sprintf(
-			"column %s (%s): %v — left empty",
-			f.Col, f.Purpose, err))
-	}
-	return warns, nil
-}
-
-// Validate checks the table itself: a column letter that is not one, a
-// letter mapped twice, a field with no accepted caption, and — among the
-// fields whose Key is set — two columns writing the same value.
-//
-// Worth calling once at start-up. Every one of these is a typo in a
-// table nobody reads end to end, and each fails in a way that looks like
-// a problem with the workbook rather than with the code: a bad letter
-// reads as an empty cell on every row, a duplicate letter reports one
-// column twice in a header failure while the second setter quietly
-// overwrites the first, and a duplicate key loses a whole column's worth
-// of data with nothing to show for it.
-//
-// A letter is held to xlsx.ColumnIndex, the reading the workbook's own
-// lookups give it, so the letters refused here are exactly the ones that
-// would read as empty: anything but letters, and a column past XFD.
-func (t Table[T]) Validate() error {
-	var problems []string
-
-	seen := make(map[string]bool, len(t))
-	wrote := make(map[string]string, len(t))
-	for _, f := range t {
-		// Upper-cased, because the cell lookup is case-insensitive, so "c"
-		// and "C" name one column and have to collide here. NOT trimmed,
-		// because the lookup trims nothing: " C" reads as an empty cell on
-		// every row and fails the header check, the kind of typo this
-		// method exists to catch before the workbook is blamed for it.
-		col := strings.ToUpper(f.Col)
-
-		if f.Key != "" {
-			if first, dup := wrote[f.Key]; dup {
-				problems = append(problems, fmt.Sprintf(
-					"columns %s and %s both write %q; the second"+
-						" wins and the first is read for nothing",
-					first, col, f.Key))
-			} else {
-				wrote[f.Key] = col
-			}
-		}
-
-		_, isColumn := xlsx.ColumnIndex(col)
-		switch {
-		case !isColumn:
-			problems = append(problems, fmt.Sprintf(
-				"%q (%s) is not a column letter", f.Col, f.Purpose))
-		case seen[col]:
-			problems = append(problems, fmt.Sprintf(
-				"column %s (%s) is mapped more than once",
-				col, f.Purpose))
-		default:
-			seen[col] = true
-		}
-		if len(f.Captions) == 0 {
-			problems = append(problems, fmt.Sprintf(
-				"column %s (%s) accepts no caption, so the header"+
-					" check cannot pass", f.Col, f.Purpose))
-		}
-	}
-
-	if len(problems) == 0 {
-		return nil
-	}
-	return fmt.Errorf("column table is not usable:\n  %s",
-		strings.Join(problems, "\n  "))
 }
 
 // Must marks a field as one the row cannot be imported without, turning
@@ -424,4 +307,137 @@ func Custom[T any](
 	f := Expect[T](col, purpose, captions...)
 	f.Set = set
 	return f
+}
+
+// Date1904 always reports true.
+func (epoch1904) Date1904() bool { return true }
+
+// Columns renders the whole table as the layout contract, for
+// xlsx.VerifyHeaders and xlsx.DataRows.
+//
+// Every field is included, Expect entries and all. That is what makes a
+// blank-row skip safe: DataRows tests the columns the caller declared an
+// interest in, and a column read only for a lookup is still one of them.
+func (t Table[T]) Columns() []xlsx.Column {
+	out := make([]xlsx.Column, 0, len(t))
+	for _, f := range t {
+		out = append(out, f.Column)
+	}
+	return out
+}
+
+// Apply reads one row into dst, returning the warnings it collected.
+//
+// A cell that will not coerce is a warning, not a failed row: the field
+// is left unset and the row goes on. A record whose one numeric cell
+// holds a stray note is still worth importing with its other twenty
+// columns intact, and the warning names the cell somebody has to go and
+// fix. Must inverts that for a column a row genuinely cannot be imported
+// without.
+//
+// The destination is supplied rather than allocated here because a row
+// type that holds a pointer to its model must have that pointer set
+// before any setter runs, and only the dataset knows what it needs to
+// build.
+//
+// A non-nil error means a Required column would not coerce. dst is left
+// partly filled in that case: the caller is dropping the row, and
+// rolling back the fields already written would buy nothing.
+func (t Table[T]) Apply(
+	src Source, row int, dst *T,
+) ([]string, error) {
+	var warns []string
+
+	date1904 := src.Date1904()
+	for _, f := range t {
+		if f.Set == nil {
+			continue
+		}
+		c := Cell{
+			Row:      row,
+			Col:      f.Col,
+			Text:     src.Cell(row, f.Col),
+			Date1904: date1904,
+		}
+		if f.WantLink {
+			c.Link = src.Hyperlink(row, f.Col)
+		}
+
+		err := f.Set(dst, c)
+		if err == nil {
+			continue
+		}
+		fatal, warning := cellFault(f.Column, f.Required, err)
+		if fatal != nil {
+			return warns, fatal
+		}
+		warns = append(warns, warning)
+	}
+	return warns, nil
+}
+
+// Validate checks the table itself: a column letter that is not one, a
+// letter mapped twice, a field with no accepted caption, and — among the
+// fields whose Key is set — two columns writing the same value.
+//
+// Worth calling once at start-up. Every one of these is a typo in a
+// table nobody reads end to end, and each fails in a way that looks like
+// a problem with the workbook rather than with the code: a bad letter
+// reads as an empty cell on every row, a duplicate letter reports one
+// column twice in a header failure while the second setter quietly
+// overwrites the first, and a duplicate key loses a whole column's worth
+// of data with nothing to show for it.
+//
+// A letter is held to xlsx.ColumnIndex, the reading the workbook's own
+// lookups give it, so the letters refused here are exactly the ones that
+// would read as empty: anything but letters, and a column past XFD.
+func (t Table[T]) Validate() error {
+	var problems []string
+
+	seen := make(map[string]bool, len(t))
+	wrote := make(map[string]string, len(t))
+	for _, f := range t {
+		// Upper-cased, because the cell lookup is case-insensitive, so "c"
+		// and "C" name one column and have to collide here. NOT trimmed,
+		// because the lookup trims nothing: " C" reads as an empty cell on
+		// every row and fails the header check, the kind of typo this
+		// method exists to catch before the workbook is blamed for it.
+		col := strings.ToUpper(f.Col)
+
+		if f.Key != "" {
+			if first, dup := wrote[f.Key]; dup {
+				problems = append(problems, fmt.Sprintf(
+					"columns %s and %s both write %q; the second"+
+						" wins and the first is read for nothing",
+					first, col, f.Key))
+			} else {
+				wrote[f.Key] = col
+			}
+		}
+
+		_, isColumn := xlsx.ColumnIndex(col)
+		switch {
+		case !isColumn:
+			problems = append(problems, fmt.Sprintf(
+				"%q (%s) is not a column letter", f.Col, f.Purpose))
+		case seen[col]:
+			named := f.Column
+			named.Col = col
+			problems = append(problems, fmt.Sprintf(
+				"%s is mapped more than once", named))
+		default:
+			seen[col] = true
+		}
+		if len(f.Captions) == 0 {
+			problems = append(problems, fmt.Sprintf(
+				"%s accepts no caption, so the header check"+
+					" cannot pass", f.Column))
+		}
+	}
+
+	if len(problems) == 0 {
+		return nil
+	}
+	return fmt.Errorf("column table is not usable:\n  %s",
+		strings.Join(problems, "\n  "))
 }

@@ -183,6 +183,67 @@ var optional = map[string]bool{
 	"client":       true,
 }
 
+// New reads the YAML file at path, lets the environment override it key
+// by key, and returns the configuration only when every section in use,
+// and every rule validateCrossSection checks, is valid. Otherwise it
+// returns no Config and one error joining every problem found.
+//
+// The file is parsed as YAML whatever its extension. A missing file is
+// tolerated, so a deployment can run from the environment alone; if the
+// environment then falls short, the error says the file was not found,
+// or the list of missing keys would read as a broken file. A file that
+// exists but cannot be read or parsed is refused outright. An empty
+// path skips the file and reads the environment alone.
+func New(path string) (*Config, error) {
+	v := config.NewViper()
+	missing := false
+	if path != "" {
+		v.SetConfigFile(path)
+		v.SetConfigType("yaml")
+		err := v.ReadInConfig()
+		// Viper returns the file system's own error, so a missing
+		// file is told apart from one that is unreadable or malformed.
+		missing = errors.Is(err, fs.ErrNotExist)
+		if err != nil && !missing {
+			return nil, fmt.Errorf("reading %s: %w", path, err)
+		}
+	}
+
+	// Every section is read, in use or not: which ones are in use is
+	// only known once fiber.auth and notification have been read.
+	c := &Config{
+		App:          config.NewAppConfig(v),
+		Database:     config.NewDatabaseConfig(v),
+		Notification: config.NewNotificationConfig(v),
+		WhatsApp:     config.NewWhatsAppConfig(v),
+		Email:        config.NewEmailConfig(v),
+		Telegram:     config.NewTelegramConfig(v),
+		Fiber:        config.NewFiberConfig(v),
+		Auth:         config.NewAuthConfig(v),
+		JWT:          config.NewJWTConfig(v),
+		Session:      config.NewSessionConfig(v),
+		Client:       config.NewClientConfig(v),
+		Limiter:      config.NewLimiterConfig(v),
+		Listen:       config.NewListenConfig(v),
+		Recover:      config.NewRecoverConfig(v),
+		RequestID:    config.NewRequestIDConfig(v),
+		Zerolog:      config.NewZerologConfig(v),
+		file:         path,
+		missing:      missing,
+	}
+	c.sections = c.plan(config.SuppliedSections(v, c.sectionList()))
+
+	if err := c.validate(); err != nil {
+		if missing {
+			return nil, fmt.Errorf("%s not found, and the "+
+				"environment alone is not a complete "+
+				"configuration:\n%w", path, err)
+		}
+		return nil, err
+	}
+	return c, nil
+}
+
 // sectionList pairs every section with the name it is logged under and
 // the key prefix its keys are nested behind, in the order the startup
 // log prints them.
@@ -440,67 +501,6 @@ func (c *Config) validate() error {
 	return errors.Join(errs...)
 }
 
-// New reads the YAML file at path, lets the environment override it key
-// by key, and returns the configuration only when every section in use,
-// and every rule validateCrossSection checks, is valid. Otherwise it
-// returns no Config and one error joining every problem found.
-//
-// The file is parsed as YAML whatever its extension. A missing file is
-// tolerated, so a deployment can run from the environment alone; if the
-// environment then falls short, the error says the file was not found,
-// or the list of missing keys would read as a broken file. A file that
-// exists but cannot be read or parsed is refused outright. An empty
-// path skips the file and reads the environment alone.
-func New(path string) (*Config, error) {
-	v := config.NewViper()
-	missing := false
-	if path != "" {
-		v.SetConfigFile(path)
-		v.SetConfigType("yaml")
-		err := v.ReadInConfig()
-		// Viper returns the file system's own error, so a missing
-		// file is told apart from one that is unreadable or malformed.
-		missing = errors.Is(err, fs.ErrNotExist)
-		if err != nil && !missing {
-			return nil, fmt.Errorf("reading %s: %w", path, err)
-		}
-	}
-
-	// Every section is read, in use or not: which ones are in use is
-	// only known once fiber.auth and notification have been read.
-	c := &Config{
-		App:          config.NewAppConfig(v),
-		Database:     config.NewDatabaseConfig(v),
-		Notification: config.NewNotificationConfig(v),
-		WhatsApp:     config.NewWhatsAppConfig(v),
-		Email:        config.NewEmailConfig(v),
-		Telegram:     config.NewTelegramConfig(v),
-		Fiber:        config.NewFiberConfig(v),
-		Auth:         config.NewAuthConfig(v),
-		JWT:          config.NewJWTConfig(v),
-		Session:      config.NewSessionConfig(v),
-		Client:       config.NewClientConfig(v),
-		Limiter:      config.NewLimiterConfig(v),
-		Listen:       config.NewListenConfig(v),
-		Recover:      config.NewRecoverConfig(v),
-		RequestID:    config.NewRequestIDConfig(v),
-		Zerolog:      config.NewZerologConfig(v),
-		file:         path,
-		missing:      missing,
-	}
-	c.sections = c.plan(config.SuppliedSections(v, c.sectionList()))
-
-	if err := c.validate(); err != nil {
-		if missing {
-			return nil, fmt.Errorf("%s not found, and the "+
-				"environment alone is not a complete "+
-				"configuration:\n%w", path, err)
-		}
-		return nil, err
-	}
-	return c, nil
-}
-
 // Addr is the address to hand to Fiber's Listen. On a unix socket
 // (fiber.listen.listener_network unix) it is app.host verbatim: the
 // socket path, with no port. Otherwise it is app.host and app.port
@@ -542,10 +542,10 @@ func (c *Config) Log(log zerolog.Logger) {
 	}
 }
 
-// String renders the stand-in for the startup log, for example
-// "<inactive: fiber.auth.mode is session>".
-func (s inactive) String() string { return "<inactive: " + string(s) + ">" }
-
 // Validate reports nothing: none of a switched-off section's values is
 // in use, so none of them can be wrong.
 func (inactive) Validate() error { return nil }
+
+// String renders the stand-in for the startup log, for example
+// "<inactive: fiber.auth.mode is session>".
+func (s inactive) String() string { return "<inactive: " + string(s) + ">" }

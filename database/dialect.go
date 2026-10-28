@@ -79,6 +79,8 @@ package database
 //     SQL Server requires every non-aggregated column in the GROUP BY.
 //   - Errors. A duplicate key is error 1062 on MySQL and 2627 or 2601 on
 //     SQL Server. Classify driver errors by number, never by message text.
+//     Rejected does so for the errors that fault the row rather than the
+//     database, and is in refusal.go.
 
 import (
 	"context"
@@ -181,28 +183,6 @@ func activeDialect() Dialect {
 		panic("dialect not selected: call SetDialect at startup")
 	}
 	return d
-}
-
-// valid reports whether d is one of the grammars in engines.
-func (d Dialect) valid() bool {
-	_, ok := engines[d]
-	return ok
-}
-
-// isMySQL reports whether d spells MySQL grammar, and panics on a value that
-// spells no grammar at all.
-//
-// Every method below branches through it rather than on `d == DialectMySQL`,
-// so that a zero or out-of-range Dialect fails loudly instead of falling
-// into the T-SQL side of an if/else. That is the same bargain SetDialect and
-// activeDialect strike for the package-level forms: an engine nobody chose
-// is a wiring mistake, and emitting the wrong grammar for it would surface
-// as a syntax error far from the cause.
-func (d Dialect) isMySQL() bool {
-	if !d.valid() {
-		panic("database: " + d.String() + " is not a grammar")
-	}
-	return d == DialectMySQL
 }
 
 // unsupportedDriver is the error for a driver name this package cannot
@@ -327,6 +307,20 @@ func SetDialect(d Dialect) {
 	selectedDialect.Store(int32(d))
 }
 
+// LikeArg returns s as a contains-pattern for LikePredicate: s with its LIKE
+// metacharacters escaped, between % wildcards. A search for "50%" then
+// matches only values that contain "50%", not every value containing "50".
+func LikeArg(s string) string {
+	return "%" + likeEscaper.Replace(s) + "%"
+}
+
+// LikePredicate returns "col LIKE :param ESCAPE '!'", the predicate that
+// matches a pattern from LikeArg. col must be a column expression chosen in
+// code, and param is the bind name without its leading colon.
+func LikePredicate(col, param string) string {
+	return col + " LIKE :" + param + " ESCAPE '" + likeEscape + "'"
+}
+
 // QuoteIdent quotes name as an identifier for the selected dialect, so a
 // word that is reserved on only one engine parses on both; user, for
 // example, is reserved in T-SQL but not in MySQL.
@@ -341,14 +335,6 @@ func SetDialect(d Dialect) {
 // Quoting only the names that need it keeps logged SQL readable.
 func QuoteIdent(name string) string {
 	return activeDialect().QuoteIdent(name)
-}
-
-// QuoteIdent is QuoteIdent in the grammar d rather than the selected one.
-func (d Dialect) QuoteIdent(name string) string {
-	if d.isMySQL() {
-		return "`" + strings.ReplaceAll(name, "`", "``") + "`"
-	}
-	return "[" + strings.ReplaceAll(name, "]", "]]") + "]"
 }
 
 // NowExpr returns SQL for the current date and time on the database server,
@@ -371,14 +357,6 @@ func (d Dialect) QuoteIdent(name string) string {
 // Server 2022 and later.
 func NowExpr() string {
 	return activeDialect().NowExpr()
-}
-
-// NowExpr is NowExpr in the grammar d rather than the selected one.
-func (d Dialect) NowExpr() string {
-	if d.isMySQL() {
-		return "NOW()"
-	}
-	return "SYSDATETIME()"
 }
 
 // InsertReturningID inserts one row and returns the integer key the
@@ -420,34 +398,6 @@ func InsertReturningID(
 		ctx, ext, table, cols, vals, pk, arg)
 }
 
-// InsertReturningID is InsertReturningID in the grammar d rather than the
-// selected one. ext still has to be bound to a connection of the engine d
-// spells, which nothing here can check.
-func (d Dialect) InsertReturningID(
-	ctx context.Context,
-	ext sqlx.ExtContext,
-	table, cols, vals, pk string,
-	arg any,
-) (int, error) {
-	var (
-		id  int64
-		err error
-	)
-	if d.isMySQL() {
-		id, err = insertMySQL(ctx, ext, table, cols, vals, arg)
-	} else {
-		id, err = insertSQLServer(ctx, ext, table, cols, vals, pk, arg)
-	}
-	if err != nil {
-		return 0, err
-	}
-	n := int(id)
-	if int64(n) != id {
-		return 0, fmt.Errorf("identity value %d overflows int", id)
-	}
-	return n, nil
-}
-
 // ApplyLimit caps a finished SELECT at n rows. On MySQL it appends LIMIT n;
 // on SQL Server it inserts TOP (n) after SELECT, or after SELECT DISTINCT
 // or SELECT ALL, where T-SQL requires it.
@@ -484,28 +434,6 @@ func ApplyLimit(query string, n int) string {
 	return activeDialect().ApplyLimit(query, n)
 }
 
-// ApplyLimit is ApplyLimit in the grammar d rather than the selected one.
-func (d Dialect) ApplyLimit(query string, n int) string {
-	mysql := d.isMySQL()
-	if n <= 0 {
-		return query
-	}
-	rest, ok := cutKeyword(query, "SELECT")
-	if !ok {
-		return query
-	}
-	if mysql {
-		return query + "\nLIMIT " + strconv.Itoa(n)
-	}
-	if r, ok := cutKeyword(rest, "DISTINCT"); ok {
-		rest = r
-	} else if r, ok := cutKeyword(rest, "ALL"); ok {
-		rest = r
-	}
-	head := query[:len(query)-len(rest)]
-	return head + "TOP (" + strconv.Itoa(n) + ") " + rest
-}
-
 // PageClause returns the pagination tail for the selected dialect and
 // stores the offset and limit it binds in args. page is 1-based.
 //
@@ -534,42 +462,6 @@ func PageClause(args map[string]any, page, limit int) string {
 	return activeDialect().PageClause(args, page, limit)
 }
 
-// PageClause is PageClause in the grammar d rather than the selected one.
-func (d Dialect) PageClause(args map[string]any, page, limit int) string {
-	mysql := d.isMySQL()
-	if page < 1 {
-		page = 1
-	}
-	if limit < 1 {
-		limit = 1
-	}
-	offset := math.MaxInt
-	if page-1 <= math.MaxInt/limit {
-		offset = (page - 1) * limit
-	}
-	args["offset"] = offset
-	args["limit"] = limit
-
-	if mysql {
-		return "\nLIMIT :limit OFFSET :offset"
-	}
-	return "\nOFFSET :offset ROWS FETCH NEXT :limit ROWS ONLY"
-}
-
-// LikeArg returns s as a contains-pattern for LikePredicate: s with its LIKE
-// metacharacters escaped, between % wildcards. A search for "50%" then
-// matches only values that contain "50%", not every value containing "50".
-func LikeArg(s string) string {
-	return "%" + likeEscaper.Replace(s) + "%"
-}
-
-// LikePredicate returns "col LIKE :param ESCAPE '!'", the predicate that
-// matches a pattern from LikeArg. col must be a column expression chosen in
-// code, and param is the bind name without its leading colon.
-func LikePredicate(col, param string) string {
-	return col + " LIKE :" + param + " ESCAPE '" + likeEscape + "'"
-}
-
 // RecursiveCTE opens a recursive common table expression named name, up to
 // and including the opening parenthesis:
 //
@@ -595,6 +487,116 @@ func LikePredicate(col, param string) string {
 //     gathered so far.
 func RecursiveCTE(name string) string {
 	return activeDialect().RecursiveCTE(name)
+}
+
+// valid reports whether d is one of the grammars in engines.
+func (d Dialect) valid() bool {
+	_, ok := engines[d]
+	return ok
+}
+
+// isMySQL reports whether d spells MySQL grammar, and panics on a value that
+// spells no grammar at all.
+//
+// Every method below branches through it rather than on `d == DialectMySQL`,
+// so that a zero or out-of-range Dialect fails loudly instead of falling
+// into the T-SQL side of an if/else. That is the same bargain SetDialect and
+// activeDialect strike for the package-level forms: an engine nobody chose
+// is a wiring mistake, and emitting the wrong grammar for it would surface
+// as a syntax error far from the cause.
+func (d Dialect) isMySQL() bool {
+	if !d.valid() {
+		panic("database: " + d.String() + " is not a grammar")
+	}
+	return d == DialectMySQL
+}
+
+// QuoteIdent is QuoteIdent in the grammar d rather than the selected one.
+func (d Dialect) QuoteIdent(name string) string {
+	if d.isMySQL() {
+		return "`" + strings.ReplaceAll(name, "`", "``") + "`"
+	}
+	return "[" + strings.ReplaceAll(name, "]", "]]") + "]"
+}
+
+// NowExpr is NowExpr in the grammar d rather than the selected one.
+func (d Dialect) NowExpr() string {
+	if d.isMySQL() {
+		return "NOW()"
+	}
+	return "SYSDATETIME()"
+}
+
+// InsertReturningID is InsertReturningID in the grammar d rather than the
+// selected one. ext still has to be bound to a connection of the engine d
+// spells, which nothing here can check.
+func (d Dialect) InsertReturningID(
+	ctx context.Context,
+	ext sqlx.ExtContext,
+	table, cols, vals, pk string,
+	arg any,
+) (int, error) {
+	var (
+		id  int64
+		err error
+	)
+	if d.isMySQL() {
+		id, err = insertMySQL(ctx, ext, table, cols, vals, arg)
+	} else {
+		id, err = insertSQLServer(ctx, ext, table, cols, vals, pk, arg)
+	}
+	if err != nil {
+		return 0, err
+	}
+	n := int(id)
+	if int64(n) != id {
+		return 0, fmt.Errorf("identity value %d overflows int", id)
+	}
+	return n, nil
+}
+
+// ApplyLimit is ApplyLimit in the grammar d rather than the selected one.
+func (d Dialect) ApplyLimit(query string, n int) string {
+	mysql := d.isMySQL()
+	if n <= 0 {
+		return query
+	}
+	rest, ok := cutKeyword(query, "SELECT")
+	if !ok {
+		return query
+	}
+	if mysql {
+		return query + "\nLIMIT " + strconv.Itoa(n)
+	}
+	if r, ok := cutKeyword(rest, "DISTINCT"); ok {
+		rest = r
+	} else if r, ok := cutKeyword(rest, "ALL"); ok {
+		rest = r
+	}
+	head := query[:len(query)-len(rest)]
+	return head + "TOP (" + strconv.Itoa(n) + ") " + rest
+}
+
+// PageClause is PageClause in the grammar d rather than the selected one.
+func (d Dialect) PageClause(args map[string]any, page, limit int) string {
+	mysql := d.isMySQL()
+	if page < 1 {
+		page = 1
+	}
+	if limit < 1 {
+		limit = 1
+	}
+	offset := math.MaxInt
+	if page-1 <= math.MaxInt/limit {
+		offset = (page - 1) * limit
+	}
+	args["offset"] = offset
+	args["limit"] = limit
+
+	if mysql {
+		return "\nLIMIT :limit OFFSET :offset"
+	}
+	return "\nOFFSET :offset ROWS FETCH NEXT :limit ROWS ONLY"
 }
 
 // RecursiveCTE is RecursiveCTE in the grammar d rather than the selected

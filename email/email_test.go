@@ -82,44 +82,51 @@ type relay struct {
 	sessions []*session
 }
 
+// login returns a config change that sets the relay credentials.
+func login(user, pass string) func(*config.EmailConfig) {
+	return func(c *config.EmailConfig) {
+		c.Username, c.Password = user, pass
+	}
+}
+
 // text is the decoded body of a single-part message.
 func text(t *testing.T, raw []byte) string {
 	t.Helper()
 	return string(root(t, read(t, raw)).body)
 }
 
-// note records into s under the relay's lock, which is what a test's
-// later read synchronises with.
-func (r *relay) note(f func()) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	f()
+// between returns the text of s after the first open and before the close
+// that follows it.
+func between(s, open, close string) string {
+	_, rest, _ := strings.Cut(s, open)
+	inside, _, _ := strings.Cut(rest, close)
+	return inside
 }
 
-// seen returns a copy of every session so far.
-func (r *relay) seen() []session {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	out := make([]session, len(r.sessions))
-	for i, s := range r.sessions {
-		out[i] = *s
-		out[i].rcpts = slices.Clone(s.rcpts)
-		out[i].data = bytes.Clone(s.data)
-	}
-	return out
-}
-
-// only returns the one session the test expects.
-func (r *relay) only(t *testing.T) session {
+// service builds a Service for r through New, the way an application
+// does, after change has adjusted the configuration.
+func service(
+	t *testing.T,
+	r *relay,
+	change func(*config.EmailConfig),
+) *Service {
 	t.Helper()
-	return testutil.Only(t, "connections at the relay", r.seen())
-}
-
-// login returns a config change that sets the relay credentials.
-func login(user, pass string) func(*config.EmailConfig) {
-	return func(c *config.EmailConfig) {
-		c.Username, c.Password = user, pass
+	addr := r.ln.Addr().(*net.TCPAddr)
+	cfg := &config.EmailConfig{
+		Host:    "127.0.0.1",
+		Port:    addr.Port,
+		TLS:     config.EmailTLSNone,
+		From:    "Notifikasi <noreply@example.go.id>",
+		Timeout: 10 * time.Second,
 	}
+	if change != nil {
+		change(cfg)
+	}
+	s, err := New(cfg, zerolog.Nop())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	return s
 }
 
 // login runs the server half of AUTH PLAIN or LOGIN.
@@ -156,6 +163,33 @@ func (r *relay) login(
 	return user, mech, known && pass == want
 }
 
+// note records into s under the relay's lock, which is what a test's
+// later read synchronises with.
+func (r *relay) note(f func()) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	f()
+}
+
+// seen returns a copy of every session so far.
+func (r *relay) seen() []session {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]session, len(r.sessions))
+	for i, s := range r.sessions {
+		out[i] = *s
+		out[i].rcpts = slices.Clone(s.rcpts)
+		out[i].data = bytes.Clone(s.data)
+	}
+	return out
+}
+
+// only returns the one session the test expects.
+func (r *relay) only(t *testing.T) session {
+	t.Helper()
+	return testutil.Only(t, "connections at the relay", r.seen())
+}
+
 // offer is what EHLO lists after the greeting line.
 func (r *relay) offer(encrypted bool) []string {
 	ext := slices.Clone(r.ext)
@@ -166,14 +200,6 @@ func (r *relay) offer(encrypted bool) []string {
 		ext = append(ext, "AUTH "+strings.Join(r.mechs, " "))
 	}
 	return ext
-}
-
-// between returns the text of s after the first open and before the close
-// that follows it.
-func between(s, open, close string) string {
-	_, rest, _ := strings.Cut(s, open)
-	inside, _, _ := strings.Cut(rest, close)
-	return inside
 }
 
 // serve holds one SMTP conversation on conn, as the relay's fields
@@ -319,32 +345,6 @@ func (r *relay) start(t *testing.T) *relay {
 	go r.accept()
 	t.Cleanup(r.stop)
 	return r
-}
-
-// service builds a Service for r through New, the way an application
-// does, after change has adjusted the configuration.
-func service(
-	t *testing.T,
-	r *relay,
-	change func(*config.EmailConfig),
-) *Service {
-	t.Helper()
-	addr := r.ln.Addr().(*net.TCPAddr)
-	cfg := &config.EmailConfig{
-		Host:    "127.0.0.1",
-		Port:    addr.Port,
-		TLS:     config.EmailTLSNone,
-		From:    "Notifikasi <noreply@example.go.id>",
-		Timeout: 10 * time.Second,
-	}
-	if change != nil {
-		change(cfg)
-	}
-	s, err := New(cfg, zerolog.Nop())
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	return s
 }
 
 // stop ends the relay at the end of the test that started it.

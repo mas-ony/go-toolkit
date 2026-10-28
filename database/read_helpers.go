@@ -89,23 +89,6 @@ func scanNamed(
 	return scan(ctx, ext, dest, bound, boundArgs...)
 }
 
-// Direction returns the ORDER BY keyword Dir stands for: "DESC" for
-// "desc" in any letter case and with any surrounding space, and "ASC" for
-// anything else, an empty Dir included.
-//
-// It is the one reading of a direction, so a parser that normalises Dir
-// as it fills the struct, as request.Sort does, and SortClause, which
-// normalises whatever it is handed, cannot read the same text two ways.
-// The word is read through strlist.Normalise, the form every word matched
-// against a fixed vocabulary is read in, a boolean in a query among them.
-// The result is one of two constants and never the text it was read from.
-func (f SortField) Direction() string {
-	if strlist.Normalise(f.Dir) == "desc" {
-		return "DESC"
-	}
-	return "ASC"
-}
-
 // NeedsJoin reports whether the requested columns include any that a JOIN
 // supplies, so a builder can leave that JOIN out when nothing reads it.
 // joinCols lists the names which depend on it.
@@ -372,4 +355,21 @@ func SortClause(fields []SortField, allowed []string, fallback string) string {
 		return "\nORDER BY " + fallback
 	}
 	return "\nORDER BY " + sb.String()
+}
+
+// Direction returns the ORDER BY keyword Dir stands for: "DESC" for
+// "desc" in any letter case and with any surrounding space, and "ASC" for
+// anything else, an empty Dir included.
+//
+// It is the one reading of a direction, so a parser that normalises Dir
+// as it fills the struct, as request.Sort does, and SortClause, which
+// normalises whatever it is handed, cannot read the same text two ways.
+// The word is read through strlist.Normalise, the form every word matched
+// against a fixed vocabulary is read in, a boolean in a query among them.
+// The result is one of two constants and never the text it was read from.
+func (f SortField) Direction() string {
+	if strlist.Normalise(f.Dir) == "desc" {
+		return "DESC"
+	}
+	return "ASC"
 }

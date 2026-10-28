@@ -28,6 +28,7 @@ import (
 	"fmt"
 
 	"github.com/gofiber/fiber/v3/middleware/limiter"
+	"github.com/mas-ony/go-toolkit/internal/upstream"
 	"github.com/spf13/viper"
 )
 
@@ -515,12 +516,9 @@ func NewLimiterConfig(v *viper.Viper) *LimiterConfig {
 // Every check appends rather than returning early, so one restart surfaces
 // every fiber.limiter.* problem at once.
 func (c *LimiterConfig) Validate() error {
-	// errs is declared before the nil check only so the two statements read in
-	// the same order in all Validate implementations; the nil check is what
-	// must come first, since every line after it dereferences c.
 	var errs []error
 	if c == nil || c.Config == nil {
-		return errors.New("fiber.limiter config was not initialised")
+		return upstream.NotInitialised("fiber.limiter")
 	}
 	// Below a second the middleware does not round down, it throws the
 	// value away: configDefault tests int(Expiration.Seconds()) <= 0 and
@@ -563,15 +561,16 @@ func (c *LimiterConfig) Validate() error {
 	// afterwards.
 	switch c.Strategy {
 	case "":
-		errs = append(errs, fmt.Errorf("fiber.limiter.strategy is required: "+
-			"it selects how hits are counted, and leaving it empty installs "+
-			"the middleware's own FixedWindow anyway — a rule neither "+
-			"config.yaml nor a startup log line will show. Write %q to keep "+
-			"counting per window and discarding the count at the boundary "+
-			"(which admits a burst of 2×max across it), or %q to weight the "+
-			"previous window's count into the current one",
-			StrategyFixed,
-			StrategySliding))
+		errs = append(errs, upstream.Required("fiber.limiter.strategy",
+			fmt.Sprintf(": it selects how hits are counted, and leaving it "+
+				"empty installs the middleware's own FixedWindow anyway — "+
+				"a rule neither config.yaml nor a startup log line will "+
+				"show. Write %q to keep counting per window and "+
+				"discarding the count at the boundary (which admits a "+
+				"burst of 2×max across it), or %q to weight the previous "+
+				"window's count into the current one",
+				StrategyFixed,
+				StrategySliding)))
 	case StrategyFixed, StrategySliding:
 		installed := strategyName(c.LimiterMiddleware)
 		if installed != c.Strategy {
@@ -651,10 +650,10 @@ func (c *LimiterConfig) Validate() error {
 // the log exactly as it does in the error.
 func (c *LimiterConfig) String() string {
 	if c == nil {
-		return "<nil LimiterConfig>"
+		return nilLabel("LimiterConfig")
 	}
 	if c.Config == nil {
-		return "<uninitialised LimiterConfig>"
+		return uninitialisedLabel("LimiterConfig")
 	}
 	return fmt.Sprintf("Strategy=%q "+
 		"Expiration=%s "+

@@ -24,6 +24,12 @@ import (
 // entry in allowedTypes; see the warning on OfficeExts.
 const plainText = "text/plain; charset=utf-8"
 
+// zipType is what Go's sniffer reports for a ZIP archive, and so the
+// container every zip-backed office format sniffs as. Like plainText it is a
+// containerSniffs value, never an entry in allowedTypes; see the container
+// exception on DetectContentType for what admitting it would undo.
+const zipType = "application/zip"
+
 // maxCopySuffix bounds the search for a free name in CopyUnique. A directory
 // holding ten thousand copies of one document is a runaway loop somewhere
 // else, and failing with a message beats spinning inside a syscall.
@@ -106,11 +112,11 @@ var errNotDir = errors.New("not a directory")
 // they sniff as application/octet-stream and reach the extension table by the
 // ordinary route.
 var containerSniffs = map[string]string{
-	docxType: "application/zip",
-	xlsxType: "application/zip",
-	pptxType: "application/zip",
-	odtType:  "application/zip",
-	odsType:  "application/zip",
+	docxType: zipType,
+	xlsxType: zipType,
+	pptxType: zipType,
+	odtType:  zipType,
+	odsType:  zipType,
 	rtfType:  plainText,
 }
 
@@ -547,21 +553,6 @@ func MaxNameLabel() string {
 	return fmt.Sprintf("%d bytes", MaxNameLen)
 }
 
-// Dir returns the directory holding the files for one record.
-// It does not create the directory or check that it exists.
-func Dir(uploadDir string, id int) string {
-	return filepath.Join(uploadDir, strconv.Itoa(id))
-}
-
-// Path returns the full path of a stored file.
-//
-// name is passed through SafeName first, so a value that somehow reached the
-// database with a directory component in it still resolves inside the
-// record's own directory.
-func Path(uploadDir string, id int, name string) string {
-	return filepath.Join(Dir(uploadDir, id), SafeName(name))
-}
-
 // SafeName reduces a supplied filename to a single path element that is safe
 // to join onto an upload directory.
 //
@@ -651,6 +642,21 @@ func SafeName(name string) string {
 		return FallbackName
 	}
 	return name
+}
+
+// Dir returns the directory holding the files for one record.
+// It does not create the directory or check that it exists.
+func Dir(uploadDir string, id int) string {
+	return filepath.Join(uploadDir, strconv.Itoa(id))
+}
+
+// Path returns the full path of a stored file.
+//
+// name is passed through SafeName first, so a value that somehow reached the
+// database with a directory component in it still resolves inside the
+// record's own directory.
+func Path(uploadDir string, id int, name string) string {
+	return filepath.Join(Dir(uploadDir, id), SafeName(name))
 }
 
 // AllowedExts returns the accepted extensions, sorted, for use in error
@@ -1187,6 +1193,38 @@ func CopyUnique(
 	return stored, len(data), nil
 }
 
+// RemoveDir deletes a record's whole directory and everything in it. Used
+// when the record itself is deleted, where individual filenames do not matter
+// and any stray file from an interrupted upload should go too.
+//
+// Errors are discarded for the reasons given on Remove.
+func RemoveDir(uploadDir string, id int) {
+	_ = os.RemoveAll(Dir(uploadDir, id))
+}
+
+// RemoveFiles deletes several stored files belonging to one record, then
+// tries once to remove the now-possibly-empty directory.
+//
+// names is []*string rather than []string so a nullable name column maps
+// straight through: a row with no file attached carries a nil name. Nil
+// entries are skipped, so callers can pass the name fields off a slice of
+// models without filtering them first.
+//
+// Each name goes through the same fallback guard as Remove, and errors are
+// discarded for the same reasons. The directory removal is attempted once at
+// the end rather than after every file: the result is identical (it only
+// succeeds when the directory is empty) and it is one syscall instead of n.
+func RemoveFiles(uploadDir string, id int, names []*string) {
+	for _, name := range names {
+		if name == nil || !removable(*name) {
+			continue
+		}
+		_ = os.Remove(Path(uploadDir, id, *name))
+	}
+	// Best-effort removal of the now-possibly-empty directory.
+	_ = os.Remove(Dir(uploadDir, id))
+}
+
 // Remove deletes one stored file and then tries to remove the
 // now-possibly-empty record directory.
 //
@@ -1227,36 +1265,4 @@ func Remove(uploadDir string, id int, name string) {
 	if removable(name) {
 		RemoveFiles(uploadDir, id, []*string{&name})
 	}
-}
-
-// RemoveFiles deletes several stored files belonging to one record, then
-// tries once to remove the now-possibly-empty directory.
-//
-// names is []*string rather than []string so a nullable name column maps
-// straight through: a row with no file attached carries a nil name. Nil
-// entries are skipped, so callers can pass the name fields off a slice of
-// models without filtering them first.
-//
-// Each name goes through the same fallback guard as Remove, and errors are
-// discarded for the same reasons. The directory removal is attempted once at
-// the end rather than after every file: the result is identical (it only
-// succeeds when the directory is empty) and it is one syscall instead of n.
-func RemoveFiles(uploadDir string, id int, names []*string) {
-	for _, name := range names {
-		if name == nil || !removable(*name) {
-			continue
-		}
-		_ = os.Remove(Path(uploadDir, id, *name))
-	}
-	// Best-effort removal of the now-possibly-empty directory.
-	_ = os.Remove(Dir(uploadDir, id))
-}
-
-// RemoveDir deletes a record's whole directory and everything in it. Used
-// when the record itself is deleted, where individual filenames do not matter
-// and any stray file from an interrupted upload should go too.
-//
-// Errors are discarded for the reasons given on Remove.
-func RemoveDir(uploadDir string, id int) {
-	_ = os.RemoveAll(Dir(uploadDir, id))
 }

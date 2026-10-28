@@ -40,6 +40,10 @@ const maxExponent = 65
 // counts from. See Date.
 const maxSerial = 2958466
 
+// MaxCodeDigits is the most digits Code takes: what a BIGINT column holds
+// whatever the digits are.
+const MaxCodeDigits = 18
+
 // dateLayouts are the text date formats accepted when a cell is not a serial
 // number, ordered from least to most ambiguous.
 //
@@ -154,6 +158,19 @@ func inThrees(s string, sep rune) bool {
 // separator the number ends in.
 func isGrouping(s string, sep rune) bool {
 	return strings.Count(s, string(sep)) > 1 && inThrees(s, sep)
+}
+
+// notANumber is the error for a cell that holds no number the reader can
+// take. cell is the text as it was typed, since the message is there to
+// send somebody to it; see Decimal.
+func notANumber(cell string) error {
+	return fmt.Errorf("%q is not a number", cell)
+}
+
+// outOfRange is the error for a cell whose number is too large or too
+// small for what it is read into. cell is quoted as notANumber quotes it.
+func outOfRange(cell string) error {
+	return fmt.Errorf("%q is out of range", cell)
 }
 
 // englishMonth returns a date written out with an Indonesian month
@@ -298,11 +315,11 @@ func Int(s string) (*int, error) {
 	// it there, so "-9223372036854775809" would be read as the number
 	// one above it.
 	if errors.Is(err, strconv.ErrRange) {
-		return nil, fmt.Errorf("%q is out of range", s)
+		return nil, outOfRange(s)
 	}
 	f, err := strconv.ParseFloat(s, 64)
 	if err != nil {
-		return nil, fmt.Errorf("%q is not a number", s)
+		return nil, notANumber(s)
 	}
 
 	// ParseFloat also accepts "NaN" and "Inf", case-insensitively, and any
@@ -329,10 +346,10 @@ func Int(s string) (*int, error) {
 	// that value, so `>=` is right, and it is right on a 32-bit target
 	// too, where intBound is 2^31 and int is that narrow.
 	if math.IsNaN(f) || math.IsInf(f, 0) {
-		return nil, fmt.Errorf("%q is not a number", s)
+		return nil, notANumber(s)
 	}
 	if f < -intBound || f >= intBound {
-		return nil, fmt.Errorf("%q is out of range", s)
+		return nil, outOfRange(s)
 	}
 
 	n = int(f)
@@ -395,7 +412,7 @@ func Decimal(s string) (*decimal.Decimal, error) {
 		d, err := decimal.NewFromString(s)
 		if err != nil || d.Exponent() < -maxExponent ||
 			d.Exponent() > maxExponent {
-			return nil, fmt.Errorf("%q is out of range", orig)
+			return nil, outOfRange(orig)
 		}
 		return &d, nil
 	}
@@ -413,7 +430,7 @@ func Decimal(s string) (*decimal.Decimal, error) {
 		return (r >= '0' && r <= '9') || r == '-' || r == '+'
 	})
 	if start < 0 {
-		return nil, fmt.Errorf("%q is not a number", orig)
+		return nil, notANumber(orig)
 	}
 	// A separator directly in front of the first digit opens the number:
 	// ".5" and ",5" are a half, the way some programs write a number below
@@ -461,7 +478,7 @@ func Decimal(s string) (*decimal.Decimal, error) {
 	run := s[start:end]
 	s = strings.TrimRight(run, ".,")
 	if s == "" || s == "-" || s == "+" {
-		return nil, fmt.Errorf("%q is not a number", orig)
+		return nil, notANumber(orig)
 	}
 	closing := run[len(run)-1]
 
@@ -503,7 +520,7 @@ func Decimal(s string) (*decimal.Decimal, error) {
 
 	d, err := decimal.NewFromString(s)
 	if err != nil {
-		return nil, fmt.Errorf("%q is not a number", orig)
+		return nil, notANumber(orig)
 	}
 	return &d, nil
 }
@@ -536,9 +553,34 @@ func DecimalDotGrouped(s string) (*decimal.Decimal, error) {
 	plain := strings.ReplaceAll(s, ".", "")
 	d, err := decimal.NewFromString(strings.Replace(plain, ",", ".", 1))
 	if err != nil {
-		return nil, fmt.Errorf("%q is not a number", s)
+		return nil, notANumber(s)
 	}
 	return &d, nil
+}
+
+// Code parses a cell that holds a dotted code, 5.1.02.01.01.0024, as the
+// number its digits spell once the dots are taken out: 510201010024. It
+// returns nil for an empty cell, and refuses one that holds anything but
+// digits and dots, or more than MaxCodeDigits digits.
+//
+// The leading zeros of a code are lost in the number, which is the
+// point: the column it is stored in is a number, and two codes that
+// differ only in their dots are the same code.
+func Code(s string) (*int, error) {
+	digits := strings.ReplaceAll(Trim(s), ".", "")
+	if digits == "" {
+		return nil, nil
+	}
+	if strings.Trim(digits, "0123456789") != "" ||
+		len(digits) > MaxCodeDigits {
+		return nil, fmt.Errorf("%q is not a dotted code of at most "+
+			"%d digits", s, MaxCodeDigits)
+	}
+	code, err := strconv.Atoi(digits)
+	if err != nil {
+		return nil, outOfRange(s)
+	}
+	return &code, nil
 }
 
 // Day returns the calendar date t names, read in t's own location, as

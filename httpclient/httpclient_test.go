@@ -25,6 +25,17 @@ import (
 	"github.com/rs/zerolog"
 )
 
+// mustNew builds a client from cfg and opt, failing the test rather than
+// returning an error nobody would check.
+func mustNew(t *testing.T, cfg *config.ClientConfig, opt Options) *Client {
+	t.Helper()
+	c, err := New(cfg, opt)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	return c
+}
+
 // writeEnvelope answers with the envelope a handler built on the response
 // package writes, OK for a 2xx and Fail for anything else, so the tests
 // run a real client against what a real server sends rather than against
@@ -56,17 +67,6 @@ func testClient(
 	cfg.BaseURL = srv.URL
 	opt.Log = zerolog.New(io.Discard)
 	return mustNew(t, &cfg, opt)
-}
-
-// mustNew builds a client from cfg and opt, failing the test rather than
-// returning an error nobody would check.
-func mustNew(t *testing.T, cfg *config.ClientConfig, opt Options) *Client {
-	t.Helper()
-	c, err := New(cfg, opt)
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	return c
 }
 
 // The base URL should tolerate the form somebody pastes from a browser.

@@ -38,6 +38,9 @@ import (
 	"github.com/xuri/excelize/v2"
 )
 
+// serial is the date serial the epoch and number-format tests write.
+const serial = 35000
+
 // linkedWorkbook writes a workbook into dir whose column A holds one link
 // per target, alternating between the two storage forms Hyperlink reads —
 // a real hyperlink in the sheet's relationships, and a HYPERLINK() formula
@@ -51,25 +54,17 @@ func linkedWorkbook(t *testing.T, dir string, targets ...string) string {
 	fill := func(t *testing.T, f *excelize.File) {
 		for i, target := range targets {
 			cell := fmt.Sprintf("A%d", i+1)
-			var err error
 			if i%2 == 0 {
 				xlsxtest.SetCell(t, f, cell, "open")
-				err = f.SetCellHyperLink(xlsxtest.Sheet, cell, target,
-					"External")
+				setLink(t, f, cell, target)
 			} else {
-				err = f.SetCellFormula(xlsxtest.Sheet, cell,
+				setFormula(t, f, cell,
 					fmt.Sprintf(`HYPERLINK(%q,"open")`, target))
-			}
-			if err != nil {
-				t.Fatalf("writing the link in %s: %v", cell, err)
 			}
 		}
 	}
 	return xlsxtest.SaveWorkbook(t, filepath.Join(dir, "book.xlsx"), fill)
 }
-
-// serial is the date serial the epoch and number-format tests write.
-const serial = 35000
 
 // bareLayout reads Sheet from its first row, with no header above the
 // data, which is how most of the workbooks here are laid out.
@@ -84,9 +79,7 @@ func fillProduct(t *testing.T, f *excelize.File) {
 	t.Helper()
 	xlsxtest.SetCell(t, f, "A1", 2)
 	xlsxtest.SetCell(t, f, "B1", 3)
-	if err := f.SetCellFormula(xlsxtest.Sheet, "C1", "A1*B1"); err != nil {
-		t.Fatalf("SetCellFormula: %v", err)
-	}
+	setFormula(t, f, "C1", "A1*B1")
 }
 
 // The same serial number means two different dates depending on a property

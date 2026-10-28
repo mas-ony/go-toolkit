@@ -179,13 +179,6 @@ const (
 // order its error names them.
 var validEmailTLS = []string{EmailTLSStartTLS, EmailTLSImplicit, EmailTLSNone}
 
-// hasCredentials reports whether either half of the relay login is set.
-// Validate holds that against an unencrypted connection and String reports
-// it, so the two answer the same question by one rule.
-func (c *EmailConfig) hasCredentials() bool {
-	return c.Username != "" || c.Password != ""
-}
-
 // NewEmailConfig reads EmailConfig fields from the provided Viper instance.
 //
 // Never returns an error: absent keys and uncastable values both come back
@@ -212,6 +205,13 @@ func NewEmailConfig(v *viper.Viper) *EmailConfig {
 		Timeout:  v.GetDuration("notification.email.timeout"),
 		Async:    v.GetBool("notification.email.async"),
 	}
+}
+
+// hasCredentials reports whether either half of the relay login is set.
+// Validate holds that against an unencrypted connection and String reports
+// it, so the two answer the same question by one rule.
+func (c *EmailConfig) hasCredentials() bool {
+	return c.Username != "" || c.Password != ""
 }
 
 // Configured reports whether any notification.email.* setting reached
@@ -247,20 +247,16 @@ func (c *EmailConfig) Configured() bool { return configured(c) }
 // Every check appends rather than returning early, so one restart surfaces
 // every notification.email.* problem at once.
 func (c *EmailConfig) Validate() error {
-	// errs is declared before the nil check only so the two statements read
-	// in the same order in all Validate implementations; the nil check is
-	// what must come first, since every line after it dereferences c.
 	var errs []error
 	if c == nil {
-		return errors.New("notification.email config was not initialised")
+		return upstream.NotInitialised("notification.email")
 	}
 
 	host := strings.TrimSpace(c.Host)
 	mode := strlist.Normalise(c.TLS)
 
 	if host == "" {
-		errs = append(errs, errors.New(
-			"notification.email.host is required"))
+		errs = append(errs, upstream.Required("notification.email.host", ""))
 	}
 	err := upstream.CheckPort("notification.email.port", c.Port)
 	if err != nil {
@@ -270,13 +266,13 @@ func (c *EmailConfig) Validate() error {
 	known := slices.Contains(validEmailTLS, mode)
 	switch {
 	case mode == "":
-		errs = append(errs, fmt.Errorf("notification.email.tls is "+
-			"required: use %q (port 587), %q (port 465) or %q. It has no "+
-			"default, because a relay on any other port implies nothing "+
-			"and a guess would be a mode nobody chose",
-			EmailTLSStartTLS,
-			EmailTLSImplicit,
-			EmailTLSNone))
+		errs = append(errs, upstream.Required("notification.email.tls",
+			fmt.Sprintf(": use %q (port 587), %q (port 465) or %q. It has "+
+				"no default, because a relay on any other port implies "+
+				"nothing and a guess would be a mode nobody chose",
+				EmailTLSStartTLS,
+				EmailTLSImplicit,
+				EmailTLSNone)))
 	case !known:
 		errs = append(errs, notOneOf("notification.email.tls", c.TLS,
 			validEmailTLS))
@@ -305,8 +301,7 @@ func (c *EmailConfig) Validate() error {
 	}
 
 	if c.From == "" {
-		errs = append(errs, errors.New(
-			"notification.email.from is required"))
+		errs = append(errs, upstream.Required("notification.email.from", ""))
 	} else if _, err := mail.ParseAddress(c.From); err != nil {
 		errs = append(errs, fmt.Errorf("notification.email.from is not an "+
 			`address (got %q): write "noreply@example.com" or `+
@@ -356,7 +351,7 @@ func (c *EmailConfig) Validate() error {
 // position from a password that never reached the process.
 func (c *EmailConfig) String() string {
 	if c == nil {
-		return "<nil EmailConfig>"
+		return nilLabel("EmailConfig")
 	}
 
 	auth := setOrNone(c.hasCredentials())

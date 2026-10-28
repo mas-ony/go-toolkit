@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/jmoiron/sqlx"
+	"github.com/mas-ony/go-toolkit/internal/testutil/dbtest"
 )
 
 // readRow is one row of the read fixture, with the has_child flag that
@@ -52,7 +53,7 @@ func readFixture(t *testing.T, db *sqlx.DB) (parent, child string) {
 	child = scratchTable(t, db, "read_child",
 		"CREATE TABLE %s (id INT NOT NULL PRIMARY KEY,"+
 			" parent_id INT NOT NULL)")
-	mustExec(t, db,
+	dbtest.Exec(t, db,
 		"INSERT INTO "+parent+" (id, code, amount) VALUES"+
 			" (1, 'alpha', 1234), (2, 'beta', 5678), (3, 'alpha', 91011)",
 		"INSERT INTO "+child+" (id, parent_id) VALUES (1, 2)",

@@ -66,41 +66,6 @@ var (
 	ErrAmbiguous = errors.New("reference matches more than one file")
 )
 
-// resolve returns the one path in paths, or ErrAmbiguous naming all of them.
-//
-// Candidates are named by their path RELATIVE TO THE INDEXED ROOT rather
-// than by basename. The two are the same string in a flat directory, which
-// is the usual case; they differ exactly when a recursive walk found one
-// name twice, and that is the case where a basename says nothing —
-// "1.pdf, 1.pdf" tells an operator there is a problem and nothing about
-// where. Rel can only fail for a path outside root, which a walk of root
-// cannot produce, so the basename stands as a fallback that should never be
-// reached.
-//
-// An empty slice is likewise unreachable — both maps are built by append,
-// so a present key has at least one path — but it is answered rather than
-// fallen through, because falling through produces an ErrAmbiguous naming
-// no candidates at all, which is the least useful sentence this package
-// could hand an operator.
-func (i *Index) resolve(paths []string) (string, error) {
-	switch len(paths) {
-	case 0:
-		return "", ErrNotFound
-	case 1:
-		return paths[0], nil
-	}
-	names := make([]string, 0, len(paths))
-	for _, p := range paths {
-		name := filepath.Base(p)
-		if rel, err := filepath.Rel(i.root, p); err == nil {
-			name = rel
-		}
-		names = append(names, name)
-	}
-	slices.Sort(names)
-	return "", fmt.Errorf("%w: %s", ErrAmbiguous, strings.Join(names, ", "))
-}
-
 // stemOf is lower, a lowercased file name, without its extension. NewIndex
 // files a document under it in byStem, and Lookup asks byStem for it when
 // a reference carries an extension, so the key a file is stored under and
@@ -172,6 +137,34 @@ func read(path string) (name string, data []byte, err error) {
 		return "", nil, fmt.Errorf("%s is empty", path)
 	}
 	return name, data, nil
+}
+
+// ReadFile reads a document from an explicit path, for callers that already
+// know the file outright — a hyperlink target, say — rather than searching
+// for it. No Index is needed.
+//
+// The extension gate still applies, and so does the size cap. A path is only a
+// statement about where a file is, not about what it is, and one that turns
+// out to point at a spreadsheet, an executable, or a two-gigabyte disk image
+// should be refused here rather than read into memory and pushed at a service
+// that will refuse it anyway.
+func ReadFile(path string) (name string, data []byte, err error) {
+	if path == "" {
+		return "", nil, ErrNotFound
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", nil, fmt.Errorf("reading %s: %w", path, err)
+	}
+	if info.IsDir() {
+		return "", nil, fmt.Errorf("%s is a directory", path)
+	}
+	if !fileutil.HasAllowedExt(filepath.Base(path)) {
+		return "", nil, fmt.Errorf("%q is not an accepted file type (%s)",
+			filepath.Base(path), strings.Join(fileutil.AllowedExts(), " "))
+	}
+	return read(path)
 }
 
 // NewIndex walks dir and indexes every file with an accepted extension.
@@ -274,6 +267,41 @@ func NewIndex(dir string, recursive bool) (*Index, error) {
 	return idx, nil
 }
 
+// resolve returns the one path in paths, or ErrAmbiguous naming all of them.
+//
+// Candidates are named by their path RELATIVE TO THE INDEXED ROOT rather
+// than by basename. The two are the same string in a flat directory, which
+// is the usual case; they differ exactly when a recursive walk found one
+// name twice, and that is the case where a basename says nothing —
+// "1.pdf, 1.pdf" tells an operator there is a problem and nothing about
+// where. Rel can only fail for a path outside root, which a walk of root
+// cannot produce, so the basename stands as a fallback that should never be
+// reached.
+//
+// An empty slice is likewise unreachable — both maps are built by append,
+// so a present key has at least one path — but it is answered rather than
+// fallen through, because falling through produces an ErrAmbiguous naming
+// no candidates at all, which is the least useful sentence this package
+// could hand an operator.
+func (i *Index) resolve(paths []string) (string, error) {
+	switch len(paths) {
+	case 0:
+		return "", ErrNotFound
+	case 1:
+		return paths[0], nil
+	}
+	names := make([]string, 0, len(paths))
+	for _, p := range paths {
+		name := filepath.Base(p)
+		if rel, err := filepath.Rel(i.root, p); err == nil {
+			name = rel
+		}
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	return "", fmt.Errorf("%w: %s", ErrAmbiguous, strings.Join(names, ", "))
+}
+
 // Count returns the number of indexed files. Files sharing a stem are counted
 // separately, so Count can exceed the number of resolvable references.
 func (i *Index) Count() int { return i.files }
@@ -365,34 +393,6 @@ func (i *Index) Load(ref string) (name string, data []byte, err error) {
 	path, err := i.Lookup(ref)
 	if err != nil {
 		return "", nil, err
-	}
-	return read(path)
-}
-
-// ReadFile reads a document from an explicit path, for callers that already
-// know the file outright — a hyperlink target, say — rather than searching
-// for it. No Index is needed.
-//
-// The extension gate still applies, and so does the size cap. A path is only a
-// statement about where a file is, not about what it is, and one that turns
-// out to point at a spreadsheet, an executable, or a two-gigabyte disk image
-// should be refused here rather than read into memory and pushed at a service
-// that will refuse it anyway.
-func ReadFile(path string) (name string, data []byte, err error) {
-	if path == "" {
-		return "", nil, ErrNotFound
-	}
-
-	info, err := os.Stat(path)
-	if err != nil {
-		return "", nil, fmt.Errorf("reading %s: %w", path, err)
-	}
-	if info.IsDir() {
-		return "", nil, fmt.Errorf("%s is a directory", path)
-	}
-	if !fileutil.HasAllowedExt(filepath.Base(path)) {
-		return "", nil, fmt.Errorf("%q is not an accepted file type (%s)",
-			filepath.Base(path), strings.Join(fileutil.AllowedExts(), " "))
 	}
 	return read(path)
 }

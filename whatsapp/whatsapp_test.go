@@ -16,6 +16,18 @@ import (
 	"go.mau.fi/whatsmeow/types"
 )
 
+// safeBuffer is a zerolog sink that survives -race.
+//
+// Only Disconnect and the success paths log, and no test here reaches
+// either concurrently: against a nil client every send fails before its
+// success line. The mutex is here so that TestSendIsSafeForConcurrentUse
+// stays a test of the Service rather than of whether bytes.Buffer tolerates
+// concurrent writes, should a send path ever log on failure.
+type safeBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
 // Every test in this file drives a Service whose client field is a NIL
 // *whatsmeow.Client. That is not a shortcut around a missing fake — it is the
 // only seam this package has, and it is worth setting out why before reading
@@ -45,10 +57,10 @@ import (
 //
 //   - Anything past the first client call. SendDocument fails at Upload, so
 //     its second error message ("send document to …") is unreachable without a
-//     live client. See TestErrorMessagesIdentifyWhichStepFailed.
+//     live client. See TestPhoneNormalisation.
 //   - The QR pairing flow, session persistence, and reconnect behaviour in
-//     New — including the unpaired-window check, which is the one branch of
-//     New with a decision in it.
+//     New — including the unpaired-window check in pair, which is the one
+//     branch of New with a decision in it.
 //   - Whether WhatsApp actually accepts a JID this package builds. The tests
 //     assert the string handed to whatsmeow, not the server's opinion of it.
 
@@ -56,18 +68,6 @@ import (
 // form normalisePhone leaves. Tests about what normalisation does to a
 // number spell their numbers out instead.
 const testPhone = "628123456789"
-
-// safeBuffer is a zerolog sink that survives -race.
-//
-// Only Disconnect and the success paths log, and no test here reaches
-// either concurrently: against a nil client every send fails before its
-// success line. The mutex is here so that TestSendIsSafeForConcurrentUse
-// stays a test of the Service rather than of whether bytes.Buffer tolerates
-// concurrent writes, should a send path ever log on failure.
-type safeBuffer struct {
-	mu  sync.Mutex
-	buf bytes.Buffer
-}
 
 // packageSourceFiles lists the non-test .go files in the package directory.
 //
@@ -196,6 +196,12 @@ func (b *safeBuffer) String() string {
 // whatsmeow. An error produced by a guard in this package would satisfy
 // "no panic" just as well while proving nothing about the client call at all.
 //
+// It also holds both sends to wrapping their cause with %w rather than
+// quoting it with %v, which is what lets a caller tell "not paired yet" from
+// "network is down" with errors.Is. A caller that only logs and moves on
+// needs none of that, but the alternative is a decision that cannot be
+// reversed later without touching every message.
+//
 // If whatsmeow ever drops one of these guards, this test panics first and
 // names the method, which is a far cheaper diagnosis than a stack trace
 // attributed to whichever normalisation test happened to run first.
@@ -260,7 +266,8 @@ func TestNilClientIsTheTestingSeam(t *testing.T) {
 				if !errors.Is(err, whatsmeow.ErrClientIsNil) {
 					t.Errorf("got %v, want an error wrapping "+
 						"whatsmeow.ErrClientIsNil — the call did not reach "+
-						"whatsmeow", err)
+						"whatsmeow, or its error replaced the cause rather "+
+						"than wrapping it", err)
 				}
 			} else if err != nil {
 				t.Errorf("got %v, want nil", err)
@@ -461,9 +468,23 @@ func TestPhoneNormalisationRunsBeforeTheEmptyGuard(t *testing.T) {
 //
 // The observation point is the ERROR MESSAGE, which embeds the normalised
 // number — the only place it becomes visible without a live client. That is
-// indirect, and it is also the reason TestErrorMessagesIdentifyWhichStepFailed
-// exists: the prefixes asserted here are load-bearing for this test, not just
-// for an operator reading a log.
+// indirect, and it makes the prefixes asserted here load-bearing twice: for
+// this test, and for an operator reading a log.
+//
+// The second matters because SendDocument is a two-step operation whose
+// failures read almost identically ("upload document for X" versus "send
+// document to X"). Callers log these at Warn and do nothing else with them,
+// so the prefix is the entire diagnosis: it says whether WhatsApp's media
+// servers were unreachable or whether the message itself was refused. The
+// send-side prefix is NOT asserted, and cannot be: a nil client fails at
+// Upload, so the second message is unreachable without a live connection,
+// which makes its absence a known gap rather than an assumed pass.
+//
+// The number in the message is a privacy consequence as well, recorded so
+// that changing it is a decision and leaving it is one too. A caller whose
+// only handling is to log the error puts a mobile number wherever its logs
+// go, once per failed notification. If the number is ever redacted, this
+// test fails, and the callers that log the error are the ones to re-read.
 //
 // Both methods are exercised with the same table on purpose. They resolve
 // the number through one recipient helper, and running the table twice is
@@ -739,88 +760,6 @@ func TestSourceBuildsUserJIDsOnly(t *testing.T) {
 	}
 }
 
-// TestErrorMessagesIdentifyWhichStepFailed pins the message prefixes.
-//
-// SendDocument is a two-step operation whose failures read almost identically
-// ("upload document for X" versus "send document to X"). Callers log these at
-// Warn and do nothing else with them, so the prefix is the entire diagnosis:
-// it says whether WhatsApp's media servers were unreachable or whether the
-// message itself was refused.
-//
-// The send-side prefix is NOT asserted here, and cannot be: a nil client fails
-// at Upload, so the second message is unreachable without a live connection.
-// Listed anyway so its absence is a known gap rather than an assumed pass.
-func TestErrorMessagesIdentifyWhichStepFailed(t *testing.T) {
-	t.Parallel()
-
-	t.Run("SendText names the recipient and the step", func(t *testing.T) {
-		t.Parallel()
-
-		svc, _ := newTestService(t)
-		err := svc.SendText(testPhone, "new message")
-		assertPhoneInError(t, err, "whatsapp: send to ", testPhone)
-	})
-
-	t.Run("SendDocument distinguishes upload from send", func(t *testing.T) {
-		t.Parallel()
-
-		svc, _ := newTestService(t)
-		err := svc.SendDocument(
-			testPhone, []byte("%PDF-1.4"), "a.pdf", "application/pdf", "")
-		assertPhoneInError(t, err, "whatsapp: upload document for ",
-			testPhone)
-	})
-}
-
-// TestErrorsWrapRatherThanReplace checks that the cause survives fmt.Errorf.
-//
-// %w rather than %v is what lets a caller distinguish "not paired yet" from
-// "network is down" with errors.Is. A caller that only logs and moves on needs
-// none of that, but the alternative is a decision that cannot be reversed
-// later without touching every message.
-func TestErrorsWrapRatherThanReplace(t *testing.T) {
-	t.Parallel()
-
-	svc, _ := newTestService(t)
-
-	textErr := svc.SendText(testPhone, "new message")
-	if !errors.Is(textErr, whatsmeow.ErrClientIsNil) {
-		t.Errorf("SendText: %v does not wrap the cause", textErr)
-	}
-
-	docErr := svc.SendDocument(
-		testPhone, []byte("%PDF-1.4"), "a.pdf", "application/pdf", "")
-	if !errors.Is(docErr, whatsmeow.ErrClientIsNil) {
-		t.Errorf("SendDocument: %v does not wrap the cause", docErr)
-	}
-}
-
-// TestErrorsEmbedTheRecipientsPhoneNumber records a privacy consequence rather
-// than a defect, so that changing it is a decision and leaving it is one too.
-//
-// Both error messages interpolate the number, so a caller whose only handling
-// is to log the error puts a mobile number wherever its logs go, once per
-// failed notification.
-//
-// If the number is ever redacted here, this test fails and points at the
-// callers that would need re-reading.
-func TestErrorsEmbedTheRecipientsPhoneNumber(t *testing.T) {
-	t.Parallel()
-
-	svc, _ := newTestService(t)
-
-	err := svc.SendText(testPhone, "new message")
-	if err == nil {
-		t.Fatal("got nil, want an error")
-	}
-	if !strings.Contains(err.Error(), testPhone) {
-		t.Errorf("error %q no longer carries the number. If that was "+
-			"deliberate, delete this test and re-read the callers that "+
-			"log it; if it was not, the message just lost the field that "+
-			"identifies which notification failed", err)
-	}
-}
-
 // TestFailedSendsAreSilent checks that this package logs nothing on the error
 // path, leaving the decision to the caller.
 //
@@ -954,6 +893,10 @@ func TestANilServiceIsNotSafe(t *testing.T) {
 // storeDSN is the one place a caller-supplied string is spliced into
 // something a parser reads, so it gets the same treatment the database
 // package gives a DSN: the escaping is asserted rather than described.
+//
+// Each case spells out the whole URI, so the pragma order is held too, and
+// it is load-bearing rather than cosmetic: the driver documents busy
+// timeout as one of the pragmas that must be set first.
 func TestStoreDSN(t *testing.T) {
 	t.Parallel()
 
@@ -1015,22 +958,6 @@ func TestStoreDSN(t *testing.T) {
 					tc.path, got, tc.want)
 			}
 		})
-	}
-}
-
-// The pragma order is load-bearing rather than cosmetic: the driver
-// documents busy timeout as one of the pragmas that must be set first.
-func TestStoreDSNSetsBusyTimeoutBeforeForeignKeys(t *testing.T) {
-	t.Parallel()
-
-	dsn := storeDSN("")
-	busy := strings.Index(dsn, "busy_timeout")
-	fk := strings.Index(dsn, "foreign_keys")
-	if busy < 0 || fk < 0 {
-		t.Fatalf("both pragmas must be present: %s", dsn)
-	}
-	if busy > fk {
-		t.Errorf("busy_timeout comes after foreign_keys in %s", dsn)
 	}
 }
 

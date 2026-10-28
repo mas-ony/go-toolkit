@@ -26,6 +26,7 @@ import (
 
 	fiberzerolog "github.com/gofiber/contrib/v3/zerolog"
 	"github.com/mas-ony/go-toolkit/internal/strlist"
+	"github.com/mas-ony/go-toolkit/internal/upstream"
 	"github.com/rs/zerolog"
 	"github.com/spf13/viper"
 )
@@ -720,17 +721,14 @@ func (c *ZerologConfig) RequestIDField() string {
 // Every check appends rather than returning early, so one restart surfaces
 // every fiber.zerolog.* problem at once.
 func (c *ZerologConfig) Validate() error {
-	// errs is declared before the nil check only so the two statements read in
-	// the same order in all Validate implementations; the nil check is what
-	// must come first, since every line after it dereferences c.
 	var errs []error
 	if c == nil || c.Config == nil {
-		return errors.New("fiber.zerolog config was not initialised")
+		return upstream.NotInitialised("fiber.zerolog")
 	}
 	if len(c.Fields) == 0 {
-		errs = append(errs, errors.New("fiber.zerolog.fields is required: an "+
-			"empty list is not the middleware's default list, it is a "+
-			"request log with no fields at all"))
+		errs = append(errs, upstream.Required("fiber.zerolog.fields",
+			": an empty list is not the middleware's default list, it is "+
+				"a request log with no fields at all"))
 	}
 
 	errs = append(errs, c.levelErrs...)
@@ -793,10 +791,10 @@ func (c *ZerologConfig) Validate() error {
 // three.
 func (c *ZerologConfig) String() string {
 	if c == nil {
-		return "<nil ZerologConfig>"
+		return nilLabel("ZerologConfig")
 	}
 	if c.Config == nil {
-		return "<uninitialised ZerologConfig>"
+		return uninitialisedLabel("ZerologConfig")
 	}
 	messages := fmt.Sprintf("%q", c.Messages)
 	if c.Messages == nil {

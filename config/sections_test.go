@@ -91,17 +91,6 @@ var sections = []section{
 	{"TelegramConfig", asSection(NewTelegramConfig), (*TelegramConfig)(nil)},
 }
 
-// asSection adapts a section's constructor to the shape the table above
-// and runRules take. A function returning *AppConfig is not a function
-// returning SectionConfig, since Go converts the result but not the
-// function type, so every constructor goes through this one adapter rather
-// than a wrapper of its own.
-func asSection[T SectionConfig](
-	newSection func(*viper.Viper) T,
-) func(*viper.Viper) SectionConfig {
-	return func(v *viper.Viper) SectionConfig { return newSection(v) }
-}
-
 // numberWords maps each count word a header may open with, "Zero" to
 // "Thirty-nine", to its value, so the stated count can be compared with
 // the number of keys the header lists.
@@ -122,6 +111,17 @@ var numberWords = func() map[string]int {
 	return m
 }()
 
+// asSection adapts a section's constructor to the shape the table above
+// and runRules take. A function returning *AppConfig is not a function
+// returning SectionConfig, since Go converts the result but not the
+// function type, so every constructor goes through this one adapter rather
+// than a wrapper of its own.
+func asSection[T SectionConfig](
+	newSection func(*viper.Viper) T,
+) func(*viper.Viper) SectionConfig {
+	return func(v *viper.Viper) SectionConfig { return newSection(v) }
+}
+
 // headerOf returns the comment block that opens two lines below the
 // package clause, after one blank line, which is where each section file
 // documents its keys. Below the clause rather than above it, because a
@@ -137,17 +137,48 @@ func headerOf(f *ast.File, fset *token.FileSet) string {
 	return ""
 }
 
+// sectionNames returns the literals f hands upstream.NotInitialised: the
+// name its Validate reports a section that was never built under.
+func sectionNames(f *ast.File) []*ast.BasicLit {
+	var names []*ast.BasicLit
+	ast.Inspect(f, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		fn, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok || fn.Sel.Name != "NotInitialised" {
+			return true
+		}
+		if pkg, ok := fn.X.(*ast.Ident); !ok || pkg.Name != "upstream" {
+			return true
+		}
+		for _, arg := range call.Args {
+			if lit, ok := arg.(*ast.BasicLit); ok {
+				names = append(names, lit)
+			}
+		}
+		return true
+	})
+	return names
+}
+
 // keysRead collects every string literal that is a whole key under prefix
-// and is not half of a concatenation. That is the set of keys the code
-// reads: a key reaches Viper as a literal argument, and a key named in an
-// error message is either spaced or split across a "+".
+// and is neither half of a concatenation nor a name from sectionNames.
+// That is the set of keys the code reads: a key reaches Viper as a literal
+// argument, a key named in an error message is either spaced or split
+// across a "+", and the section's own prefix, handed to
+// upstream.NotInitialised, is no key at all.
 func keysRead(f *ast.File, prefix string) map[string]bool {
-	concatenated := map[*ast.BasicLit]bool{}
+	notKeys := map[*ast.BasicLit]bool{}
+	for _, lit := range sectionNames(f) {
+		notKeys[lit] = true
+	}
 	ast.Inspect(f, func(n ast.Node) bool {
 		if b, ok := n.(*ast.BinaryExpr); ok && b.Op == token.ADD {
 			for _, side := range []ast.Expr{b.X, b.Y} {
 				if lit, ok := side.(*ast.BasicLit); ok {
-					concatenated[lit] = true
+					notKeys[lit] = true
 				}
 			}
 		}
@@ -157,7 +188,7 @@ func keysRead(f *ast.File, prefix string) map[string]bool {
 	read := map[string]bool{}
 	ast.Inspect(f, func(n ast.Node) bool {
 		lit, ok := n.(*ast.BasicLit)
-		if !ok || lit.Kind != token.STRING || concatenated[lit] {
+		if !ok || lit.Kind != token.STRING || notKeys[lit] {
 			return true
 		}
 		s := strings.Trim(lit.Value, "`\"")
@@ -224,7 +255,8 @@ func runRules(t *testing.T, base map[string]any,
 
 // TestEverySectionListsExactlyTheKeysItReads holds each header to the
 // promise it makes: its count, its list and its spellings all have to
-// agree with what the constructor reads.
+// agree with what the constructor reads. The section it names is also the
+// one Validate names when the section was never built.
 func TestEverySectionListsExactlyTheKeysItReads(t *testing.T) {
 	t.Parallel()
 
@@ -274,6 +306,17 @@ func TestEverySectionListsExactlyTheKeysItReads(t *testing.T) {
 			for key := range read {
 				if !listed[key] {
 					t.Errorf("%s is read but missing from the header", key)
+				}
+			}
+			names := sectionNames(f)
+			if len(names) == 0 {
+				t.Error("Validate never reports the section as never " +
+					"built through upstream.NotInitialised")
+			}
+			for _, lit := range names {
+				if name := strings.Trim(lit.Value, "`\""); name != prefix {
+					t.Errorf("Validate reports the section as %q, not by "+
+						"its prefix %q", name, prefix)
 				}
 			}
 

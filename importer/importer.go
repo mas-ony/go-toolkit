@@ -17,6 +17,19 @@ import (
 // the report as-is, so they are the vocabulary an operator reads.
 type Status string
 
+// ReportShape describes the dataset's columns in the CSV report.
+type ReportShape struct {
+	// Label heads the Outcome.Label column.
+	Label string
+
+	// ID heads the Outcome.ID column.
+	ID string
+
+	// Fields are the dataset's own columns, in the order they are
+	// written, matching the keys it sets through Outcome.Set.
+	Fields []string
+}
+
 // Outcome records what happened to one workbook row.
 //
 // ExcelRow is the reliable anchor: it points at a cell somebody can open.
@@ -50,19 +63,6 @@ type Outcome struct {
 	// names in ReportShape.Fields. A key with no value is written as an
 	// empty cell rather than omitted, so every line has the same shape.
 	Fields map[string]string
-}
-
-// ReportShape describes the dataset's columns in the CSV report.
-type ReportShape struct {
-	// Label heads the Outcome.Label column.
-	Label string
-
-	// ID heads the Outcome.ID column.
-	ID string
-
-	// Fields are the dataset's own columns, in the order they are
-	// written, matching the keys it sets through Outcome.Set.
-	Fields []string
 }
 
 // Counter is one named tally, rendered in the summary.
@@ -116,26 +116,6 @@ type Info struct {
 	Caveat string
 }
 
-// Transport is what the connection flags supply: the same
-// fiber.client.* section a service loads from YAML, plus the two
-// deadlines a client does not set for itself.
-//
-// A dataset that writes over HTTP builds its client from this —
-// httpclient.New(&t.ClientConfig, httpclient.Options{...}) — and one that
-// writes anywhere else ignores it. Embedding the config type rather than
-// a shape of this package's own is what lets a flag-built transport and a
-// YAML-built one be the same thing.
-type Transport struct {
-	config.ClientConfig
-
-	// Timeout bounds a metadata call.
-	Timeout time.Duration
-
-	// UploadTimeout bounds a request carrying a file, which crosses an
-	// office network with megabytes on it and deserves longer.
-	UploadTimeout time.Duration
-}
-
 // Options is what the generic flags supply.
 type Options struct {
 	// Layout is the resolved sheet geometry: the dataset's defaults with
@@ -164,6 +144,26 @@ type Options struct {
 	// Limit stops after that many importable rows. Zero means all of
 	// them.
 	Limit int
+}
+
+// Transport is what the connection flags supply: the same
+// fiber.client.* section a service loads from YAML, plus the two
+// deadlines a client does not set for itself.
+//
+// A dataset that writes over HTTP builds its client from this —
+// httpclient.New(&t.ClientConfig, httpclient.Options{...}) — and one that
+// writes anywhere else ignores it. Embedding the config type rather than
+// a shape of this package's own is what lets a flag-built transport and a
+// YAML-built one be the same thing.
+type Transport struct {
+	config.ClientConfig
+
+	// Timeout bounds a metadata call.
+	Timeout time.Duration
+
+	// UploadTimeout bounds a request carrying a file, which crosses an
+	// office network with megabytes on it and deserves longer.
+	UploadTimeout time.Duration
 }
 
 // Run is the state one import shares with its dataset.
@@ -287,18 +287,6 @@ var registry = map[string]func() Dataset{}
 // reads better grouped by when things were added than alphabetically.
 var order []string
 
-// touch registers a name, keeping first-use order.
-func (c *Counters) touch(name string) {
-	if c.values == nil {
-		c.values = make(map[string]int, 8)
-		c.always = make(map[string]bool, 8)
-	}
-	if _, seen := c.values[name]; !seen {
-		c.values[name] = 0
-		c.names = append(c.names, name)
-	}
-}
-
 // sortOutcomes orders the report by workbook row. The sort is stable, so
 // outcomes that share a row keep the order they were recorded in. The
 // slice is already almost ordered: only the parse failures, which Prepare
@@ -309,33 +297,12 @@ func sortOutcomes(out []Outcome) {
 	})
 }
 
-// Note appends a line to the row's notes.
-func (o *Outcome) Note(format string, args ...any) {
-	o.Notes = append(o.Notes, fmt.Sprintf(format, args...))
-}
-
 // Names lists the registered datasets in registration order.
 func Names() []string {
 	out := make([]string, len(order))
 	copy(out, order)
 	return out
 }
-
-// Extras returns the named counters in declaration order.
-func (c *Counters) Extras() []Counter {
-	out := make([]Counter, 0, len(c.names))
-	for _, n := range c.names {
-		out = append(out, Counter{
-			Name:   n,
-			Value:  c.values[n],
-			Always: c.always[n],
-		})
-	}
-	return out
-}
-
-// Value reads a named counter.
-func (c *Counters) Value(name string) int { return c.values[name] }
 
 // Only returns the single registered dataset's name, when there is
 // exactly one.
@@ -350,29 +317,6 @@ func Only() (string, bool) {
 	return order[0], true
 }
 
-// Failed reports whether the row needs attention, which is what the
-// summary lists and what decides the exit status.
-func (o Outcome) Failed() bool { return o.Status == StatusFailed }
-
-// Declare pins the order of a dataset's counters and marks them as
-// printed even at zero. Call it once, before the run, for the counters
-// whose absence is information: "files uploaded 0" says the scans were
-// not found, where a missing line says nothing at all.
-func (c *Counters) Declare(names ...string) {
-	for _, n := range names {
-		c.touch(n)
-		c.always[n] = true
-	}
-}
-
-// Set records one of the dataset's report fields.
-func (o *Outcome) Set(field, value string) {
-	if o.Fields == nil {
-		o.Fields = make(map[string]string, 4)
-	}
-	o.Fields[field] = value
-}
-
 // Lookup constructs the named dataset.
 func Lookup(name string) (Dataset, bool) {
 	newDataset, ok := registry[name]
@@ -381,16 +325,6 @@ func Lookup(name string) (Dataset, bool) {
 	}
 	return newDataset(), true
 }
-
-// Add adds n to a named counter.
-func (c *Counters) Add(name string, n int) {
-	c.touch(name)
-	c.values[name] += n
-}
-
-// Inc adds one to a named counter, declaring it on first use. A counter
-// that arrives this way is printed only when it is non-zero.
-func (c *Counters) Inc(name string) { c.Add(name, 1) }
 
 // Register adds a dataset under the given name. A duplicate name panics:
 // it is a programming error, and the alternative is one of the two
@@ -468,4 +402,70 @@ func Execute(
 
 	sortOutcomes(outcomes)
 	return outcomes, nil
+}
+
+// touch registers a name, keeping first-use order.
+func (c *Counters) touch(name string) {
+	if c.values == nil {
+		c.values = make(map[string]int, 8)
+		c.always = make(map[string]bool, 8)
+	}
+	if _, seen := c.values[name]; !seen {
+		c.values[name] = 0
+		c.names = append(c.names, name)
+	}
+}
+
+// Value reads a named counter.
+func (c *Counters) Value(name string) int { return c.values[name] }
+
+// Extras returns the named counters in declaration order.
+func (c *Counters) Extras() []Counter {
+	out := make([]Counter, 0, len(c.names))
+	for _, n := range c.names {
+		out = append(out, Counter{
+			Name:   n,
+			Value:  c.values[n],
+			Always: c.always[n],
+		})
+	}
+	return out
+}
+
+// Declare pins the order of a dataset's counters and marks them as
+// printed even at zero. Call it once, before the run, for the counters
+// whose absence is information: "files uploaded 0" says the scans were
+// not found, where a missing line says nothing at all.
+func (c *Counters) Declare(names ...string) {
+	for _, n := range names {
+		c.touch(n)
+		c.always[n] = true
+	}
+}
+
+// Add adds n to a named counter.
+func (c *Counters) Add(name string, n int) {
+	c.touch(name)
+	c.values[name] += n
+}
+
+// Inc adds one to a named counter, declaring it on first use. A counter
+// that arrives this way is printed only when it is non-zero.
+func (c *Counters) Inc(name string) { c.Add(name, 1) }
+
+// Note appends a line to the row's notes.
+func (o *Outcome) Note(format string, args ...any) {
+	o.Notes = append(o.Notes, fmt.Sprintf(format, args...))
+}
+
+// Failed reports whether the row needs attention, which is what the
+// summary lists and what decides the exit status.
+func (o Outcome) Failed() bool { return o.Status == StatusFailed }
+
+// Set records one of the dataset's report fields.
+func (o *Outcome) Set(field, value string) {
+	if o.Fields == nil {
+		o.Fields = make(map[string]string, 4)
+	}
+	o.Fields[field] = value
 }

@@ -74,16 +74,6 @@ var testCert = sync.OnceValues(func() (tls.Certificate, error) {
 	}, nil
 })
 
-// serverTLS is the relay's half of the certificate.
-func serverTLS(t *testing.T) *tls.Config {
-	t.Helper()
-	cert, err := testCert()
-	if err != nil {
-		t.Fatal(err)
-	}
-	return &tls.Config{Certificates: []tls.Certificate{cert}}
-}
-
 // trust makes s accept the test certificate, as a relay whose certificate
 // comes from a real authority is accepted.
 func trust(t *testing.T, s *Service) {
@@ -97,18 +87,14 @@ func trust(t *testing.T, s *Service) {
 	s.tlsConf.RootCAs = pool
 }
 
-// tlsRelay starts a relay speaking mode, starttls or implicit, with the
-// test certificate and a PLAIN login for notif that it offers only once
-// the connection is encrypted, as a submission server does.
-func tlsRelay(t *testing.T, mode string) *relay {
+// serverTLS is the relay's half of the certificate.
+func serverTLS(t *testing.T) *tls.Config {
 	t.Helper()
-	return (&relay{
-		tlsConf:      serverTLS(t),
-		implicit:     mode == config.EmailTLSImplicit,
-		mechs:        []string{"PLAIN"},
-		users:        map[string]string{"notif": "rahasia"},
-		authAfterTLS: true,
-	}).start(t)
+	cert, err := testCert()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &tls.Config{Certificates: []tls.Certificate{cert}}
 }
 
 // overTLS returns a config change that selects mode and logs in as notif,
@@ -125,6 +111,20 @@ func overTLS(
 			change(c)
 		}
 	}
+}
+
+// tlsRelay starts a relay speaking mode, starttls or implicit, with the
+// test certificate and a PLAIN login for notif that it offers only once
+// the connection is encrypted, as a submission server does.
+func tlsRelay(t *testing.T, mode string) *relay {
+	t.Helper()
+	return (&relay{
+		tlsConf:      serverTLS(t),
+		implicit:     mode == config.EmailTLSImplicit,
+		mechs:        []string{"PLAIN"},
+		users:        map[string]string{"notif": "rahasia"},
+		authAfterTLS: true,
+	}).start(t)
 }
 
 // The relay offers AUTH only once the connection is encrypted, as a

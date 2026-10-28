@@ -8,27 +8,6 @@ import (
 	"github.com/jmoiron/sqlx"
 )
 
-// WithTx executes fn inside a database transaction using the background
-// context and the server's default isolation level.
-//
-// This is the shortcut form of WithTxContext, for a caller that holds no
-// context to pass on. A caller that DOES hold a request context should call
-// WithTxContext instead — see there for what a real context buys.
-//
-// fn receives a *sqlx.Tx (not sqlx.ExtContext) so that repository
-// implementations can call their own .WithTx(tx) method to return a
-// transaction-scoped copy of themselves:
-//
-//	err := database.WithTx(db, func(tx *sqlx.Tx) error {
-//	    if err := repoA.WithTx(tx).Delete(id); err != nil {
-//	        return err
-//	    }
-//	    return repoB.WithTx(tx).Delete(id)
-//	})
-func WithTx(db *sqlx.DB, fn func(tx *sqlx.Tx) error) error {
-	return WithTxContext(context.Background(), db, nil, fn)
-}
-
 // WithTxContext is WithTx with an explicit context and isolation level,
 // mirroring the Begin / BeginTx split in database/sql.
 //
@@ -210,4 +189,25 @@ func WithTxContext(
 	// work or from the commit. If that ever needs answering, wrap here rather
 	// than at fn — a prefix leaves errors.Is intact.
 	return tx.Commit()
+}
+
+// WithTx executes fn inside a database transaction using the background
+// context and the server's default isolation level.
+//
+// This is the shortcut form of WithTxContext, for a caller that holds no
+// context to pass on. A caller that DOES hold a request context should call
+// WithTxContext instead — see there for what a real context buys.
+//
+// fn receives a *sqlx.Tx (not sqlx.ExtContext) so that repository
+// implementations can call their own .WithTx(tx) method to return a
+// transaction-scoped copy of themselves:
+//
+//	err := database.WithTx(db, func(tx *sqlx.Tx) error {
+//	    if err := repoA.WithTx(tx).Delete(id); err != nil {
+//	        return err
+//	    }
+//	    return repoB.WithTx(tx).Delete(id)
+//	})
+func WithTx(db *sqlx.DB, fn func(tx *sqlx.Tx) error) error {
+	return WithTxContext(context.Background(), db, nil, fn)
 }

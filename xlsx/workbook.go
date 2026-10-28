@@ -85,8 +85,9 @@ type Column struct {
 	// Captions are the spellings this column accepts.
 	Captions []string
 
-	// Purpose is a short phrase naming what the column is read for. It
-	// appears in a LayoutError and nowhere else.
+	// Purpose is a short phrase naming what the column is read for.
+	// String names the column by it, in a LayoutError and in what an
+	// importer reports of a cell.
 	Purpose string
 }
 
@@ -127,13 +128,6 @@ type File struct {
 // link, of a cell nobody looked at.
 var ErrClosed = errors.New("workbook is closed")
 
-// contains reports whether a 1-based row and column index fall inside the
-// range.
-func (m mergedRange) contains(row, col int) bool {
-	return row >= m.minRow && row <= m.maxRow &&
-		col >= m.minCol && col <= m.maxCol
-}
-
 // uses1904 reports whether the workbook counts dates from 1904 rather
 // than 1900.
 //
@@ -150,33 +144,6 @@ func uses1904(f *excelize.File) bool {
 		return false
 	}
 	return *props.Date1904
-}
-
-// mergedValue returns the value of the merged block covering a cell, or
-// "" when the cell is not part of one.
-func (w *File) mergedValue(row int, col string) string {
-	idx, ok := ColumnIndex(col)
-	if !ok {
-		return ""
-	}
-	for _, m := range w.merges {
-		if m.contains(row, idx) {
-			return m.value
-		}
-	}
-	return ""
-}
-
-// captionAt reads one header cell, falling back to the merged block it
-// belongs to.
-func (w *File) captionAt(row int, col string) string {
-	if row < 1 {
-		return ""
-	}
-	if v := Trim(w.Cell(row, col)); v != "" {
-		return v
-	}
-	return Trim(w.mergedValue(row, col))
 }
 
 // normaliseCaption lowercases a caption and collapses runs of whitespace
@@ -353,36 +320,6 @@ func readRows(f *excelize.File, sheet string) ([][]string, int, error) {
 	return rows[:last], reached, nil
 }
 
-// openPath is Open without the path its errors lead with, which Open puts
-// in front of every one of them, so no return here can leave it out.
-func openPath(path string, layout Layout) (*File, error) {
-	src, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = src.Close() }()
-
-	info, err := src.Stat()
-	if err != nil {
-		return nil, err
-	}
-	arc, err := inspect(src, info.Size())
-	if err != nil {
-		return nil, err
-	}
-	f, err := excelize.OpenFile(path)
-	if err != nil {
-		closeFailed(f)
-		return nil, err
-	}
-
-	dir, err := filepath.Abs(filepath.Dir(path))
-	if err != nil {
-		dir = filepath.Dir(path)
-	}
-	return load(f, arc, layout, dir)
-}
-
 // load reads the sheet the layout names out of an opened workbook, and
 // holds the reading against what the archive says of that sheet. It
 // closes f when it fails.
@@ -423,6 +360,196 @@ func load(
 		date1904: uses1904(f),
 		macros:   arc.macros,
 	}, nil
+}
+
+// openPath is Open without the path its errors lead with, which Open puts
+// in front of every one of them, so no return here can leave it out.
+func openPath(path string, layout Layout) (*File, error) {
+	src, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = src.Close() }()
+
+	info, err := src.Stat()
+	if err != nil {
+		return nil, err
+	}
+	arc, err := inspect(src, info.Size())
+	if err != nil {
+		return nil, err
+	}
+	f, err := excelize.OpenFile(path)
+	if err != nil {
+		closeFailed(f)
+		return nil, err
+	}
+
+	dir, err := filepath.Abs(filepath.Dir(path))
+	if err != nil {
+		dir = filepath.Dir(path)
+	}
+	return load(f, arc, layout, dir)
+}
+
+// ColumnIndex returns the 1-based number of a column letter, "A" being 1,
+// in either letter case, and false for text that names no column a sheet
+// can have: anything but letters, or a column past XFD.
+//
+// It is the one reading of a letter in this package. Cell and Caption
+// look a column up through it, so a letter it refuses reads as an empty
+// cell on every row, and importer's Table.Validate holds a column table
+// to it for exactly that reason.
+//
+// The index is checked as well as the error. excelize's parser does not
+// bound the length of the letters it sums, so a long enough run overflows
+// int and can come back negative with no error, which names no column.
+func ColumnIndex(col string) (int, bool) {
+	idx, err := excelize.ColumnNameToNumber(col)
+	return idx, err == nil && idx >= 1
+}
+
+// ColumnsFromA lays a contract out from captions alone: the first is
+// column A's, the second column B's, and so on, each the one spelling
+// its column accepts.
+//
+// It is for a sheet a program writes, whose columns stand side by side
+// from A in an order that does not vary and whose captions nobody
+// respells. A sheet kept by hand wants its Columns written out, with
+// every spelling seen in the wild.
+//
+// Purpose is left empty, the caption being the only name such a column
+// has, and a LayoutError then names the column by its letter alone.
+// Captions past XFD, the last column a sheet has, are left out.
+func ColumnsFromA(captions ...string) []Column {
+	out := make([]Column, 0, len(captions))
+	for i, caption := range captions {
+		col, err := excelize.ColumnNumberToName(i + 1)
+		if err != nil {
+			break
+		}
+		out = append(out, Column{Col: col, Captions: []string{caption}})
+	}
+	return out
+}
+
+// Open opens the file, resolves the sheet, and reads every row.
+//
+// The whole sheet is read into memory at once rather than handed over a
+// row at a time. What is kept of it is the text of its cells and
+// nothing else, so the cost is what the sheet holds, and it buys a much
+// simpler shape: a random-access grid the header check and the row loop
+// can both index into, with one place where a read can fail.
+//
+// The reading is held against the sheet's own XML before it is
+// returned. A sheet that could not be read to its end fails with a
+// *TruncatedError rather than coming back as its first rows; see
+// sheetScan for how that can happen and how it is told.
+//
+// A formula cell yields its CACHED result rather than the formula text,
+// which matters for every generated column. A workbook saved by a script
+// rather than by Excel carries no cached values at all, and those cells
+// read as empty — worth knowing before treating a blank as a missing
+// value in the source data.
+//
+// It fails with ErrNotWorkbook for a file that is no workbook, and with
+// ErrTooLarge for one that would expand past MaxUnzippedBytes. Both are
+// decided before excelize is handed the file: the cap on the ZIP
+// directory alone, and the sheets on the three small parts that say
+// which there are and where.
+//
+// Every error leads with path, those two included. What is safe to show
+// whoever sent the workbook is the error errors.Is or errors.As finds
+// inside, and not the message around it.
+func Open(path string, layout Layout) (*File, error) {
+	w, err := openPath(path, layout)
+	if err != nil {
+		return nil, fmt.Errorf("opening %s: %w", path, err)
+	}
+	return w, nil
+}
+
+// OpenBytes is Open for a workbook held in memory, which is where an
+// upload is: nothing has to be written to disk for it to be read.
+//
+// data is not kept, and is not changed. Excelize makes a copy of its
+// own to read from, and unpacks a sheet of more than 16 MiB of XML into
+// a file in the system's temporary directory, which Close removes.
+//
+// The File has no directory. Dir is empty, and Link leaves a relative
+// target relative.
+//
+// No error names a path on the host unless excelize's own does, which
+// only its failure to write that temporary file would. The three this
+// package raises here are safe to show whoever sent the workbook:
+// ErrNotWorkbook, ErrTooLarge and *TruncatedError.
+func OpenBytes(data []byte, layout Layout) (*File, error) {
+	arc, err := inspect(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		return nil, err
+	}
+	f, err := excelize.OpenReader(bytes.NewReader(data))
+	if err != nil {
+		closeFailed(f)
+		return nil, fmt.Errorf("opening the workbook: %w", err)
+	}
+	return load(f, arc, layout, "")
+}
+
+// contains reports whether a 1-based row and column index fall inside the
+// range.
+func (m mergedRange) contains(row, col int) bool {
+	return row >= m.minRow && row <= m.maxRow &&
+		col >= m.minCol && col <= m.maxCol
+}
+
+// Error renders every mismatch, one per line.
+func (e *LayoutError) Error() string {
+	where := fmt.Sprintf("captions read from row %d", e.HeaderRow)
+	if e.GroupRow > 0 {
+		where = fmt.Sprintf("sub-captions read from row %d, group"+
+			" captions from row %d", e.HeaderRow, e.GroupRow)
+	}
+	return fmt.Sprintf("sheet %q does not match the expected layout"+
+		" (%s):\n  %s",
+		e.Sheet, where, strings.Join(e.Problems, "\n  "))
+}
+
+// String names the column as a report names it: "column C (amount)", or
+// "column C" for a column with no stated purpose, its expected caption
+// being all there is to say of it.
+func (c Column) String() string {
+	if c.Purpose == "" {
+		return "column " + c.Col
+	}
+	return fmt.Sprintf("column %s (%s)", c.Col, c.Purpose)
+}
+
+// mergedValue returns the value of the merged block covering a cell, or
+// "" when the cell is not part of one.
+func (w *File) mergedValue(row int, col string) string {
+	idx, ok := ColumnIndex(col)
+	if !ok {
+		return ""
+	}
+	for _, m := range w.merges {
+		if m.contains(row, idx) {
+			return m.value
+		}
+	}
+	return ""
+}
+
+// captionAt reads one header cell, falling back to the merged block it
+// belongs to.
+func (w *File) captionAt(row int, col string) string {
+	if row < 1 {
+		return ""
+	}
+	if v := Trim(w.Cell(row, col)); v != "" {
+		return v
+	}
+	return Trim(w.mergedValue(row, col))
 }
 
 // Dir returns the absolute directory holding the workbook. A relative
@@ -476,35 +603,6 @@ func (w *File) Cell(row int, col string) string {
 		return ""
 	}
 	return cellAt(w.rows, row, idx)
-}
-
-// ColumnIndex returns the 1-based number of a column letter, "A" being 1,
-// in either letter case, and false for text that names no column a sheet
-// can have: anything but letters, or a column past XFD.
-//
-// It is the one reading of a letter in this package. Cell and Caption
-// look a column up through it, so a letter it refuses reads as an empty
-// cell on every row, and importer's Table.Validate holds a column table
-// to it for exactly that reason.
-//
-// The index is checked as well as the error. excelize's parser does not
-// bound the length of the letters it sums, so a long enough run overflows
-// int and can come back negative with no error, which names no column.
-func ColumnIndex(col string) (int, bool) {
-	idx, err := excelize.ColumnNameToNumber(col)
-	return idx, err == nil && idx >= 1
-}
-
-// Error renders every mismatch, one per line.
-func (e *LayoutError) Error() string {
-	where := fmt.Sprintf("captions read from row %d", e.HeaderRow)
-	if e.GroupRow > 0 {
-		where = fmt.Sprintf("sub-captions read from row %d, group"+
-			" captions from row %d", e.HeaderRow, e.GroupRow)
-	}
-	return fmt.Sprintf("sheet %q does not match the expected layout"+
-		" (%s):\n  %s",
-		e.Sheet, where, strings.Join(e.Problems, "\n  "))
 }
 
 // Hyperlink returns the hyperlink target attached to a cell, or "" when
@@ -652,93 +750,6 @@ func (w *File) Caption(col string) string {
 	return w.captionAt(w.GroupRow(), col)
 }
 
-// ColumnsFromA lays a contract out from captions alone: the first is
-// column A's, the second column B's, and so on, each the one spelling
-// its column accepts.
-//
-// It is for a sheet a program writes, whose columns stand side by side
-// from A in an order that does not vary and whose captions nobody
-// respells. A sheet kept by hand wants its Columns written out, with
-// every spelling seen in the wild.
-//
-// Purpose is left empty, the caption being the only name such a column
-// has, and a LayoutError then names the column by its letter alone.
-// Captions past XFD, the last column a sheet has, are left out.
-func ColumnsFromA(captions ...string) []Column {
-	out := make([]Column, 0, len(captions))
-	for i, caption := range captions {
-		col, err := excelize.ColumnNumberToName(i + 1)
-		if err != nil {
-			break
-		}
-		out = append(out, Column{Col: col, Captions: []string{caption}})
-	}
-	return out
-}
-
-// Open opens the file, resolves the sheet, and reads every row.
-//
-// The whole sheet is read into memory at once rather than handed over a
-// row at a time. What is kept of it is the text of its cells and
-// nothing else, so the cost is what the sheet holds, and it buys a much
-// simpler shape: a random-access grid the header check and the row loop
-// can both index into, with one place where a read can fail.
-//
-// The reading is held against the sheet's own XML before it is
-// returned. A sheet that could not be read to its end fails with a
-// *TruncatedError rather than coming back as its first rows; see
-// sheetScan for how that can happen and how it is told.
-//
-// A formula cell yields its CACHED result rather than the formula text,
-// which matters for every generated column. A workbook saved by a script
-// rather than by Excel carries no cached values at all, and those cells
-// read as empty — worth knowing before treating a blank as a missing
-// value in the source data.
-//
-// It fails with ErrNotWorkbook for a file that is no workbook, and with
-// ErrTooLarge for one that would expand past MaxUnzippedBytes. Both are
-// decided before excelize is handed the file: the cap on the ZIP
-// directory alone, and the sheets on the three small parts that say
-// which there are and where.
-//
-// Every error leads with path, those two included. What is safe to show
-// whoever sent the workbook is the error errors.Is or errors.As finds
-// inside, and not the message around it.
-func Open(path string, layout Layout) (*File, error) {
-	w, err := openPath(path, layout)
-	if err != nil {
-		return nil, fmt.Errorf("opening %s: %w", path, err)
-	}
-	return w, nil
-}
-
-// OpenBytes is Open for a workbook held in memory, which is where an
-// upload is: nothing has to be written to disk for it to be read.
-//
-// data is not kept, and is not changed. Excelize makes a copy of its
-// own to read from, and unpacks a sheet of more than 16 MiB of XML into
-// a file in the system's temporary directory, which Close removes.
-//
-// The File has no directory. Dir is empty, and Link leaves a relative
-// target relative.
-//
-// No error names a path on the host unless excelize's own does, which
-// only its failure to write that temporary file would. The three this
-// package raises here are safe to show whoever sent the workbook:
-// ErrNotWorkbook, ErrTooLarge and *TruncatedError.
-func OpenBytes(data []byte, layout Layout) (*File, error) {
-	arc, err := inspect(bytes.NewReader(data), int64(len(data)))
-	if err != nil {
-		return nil, err
-	}
-	f, err := excelize.OpenReader(bytes.NewReader(data))
-	if err != nil {
-		closeFailed(f)
-		return nil, fmt.Errorf("opening the workbook: %w", err)
-	}
-	return load(f, arc, layout, "")
-}
-
 // VerifyHeaders checks that every column carries the caption it is
 // expected to, and reports all mismatches at once.
 //
@@ -765,15 +776,9 @@ func (w *File) VerifyHeaders(cols []Column) error {
 		if caption == "" {
 			found = "an empty cell"
 		}
-		// A column with no stated purpose is named by its letter alone,
-		// its expected caption being all there is to say of it.
-		column := fmt.Sprintf("column %-2s (%s)", spec.Col, spec.Purpose)
-		if spec.Purpose == "" {
-			column = "column " + spec.Col
-		}
 		problems = append(problems, fmt.Sprintf(
 			"%s: expected %s, found %s",
-			column, quoteAny(spec.Captions), found))
+			spec, quoteAny(spec.Captions), found))
 	}
 	if len(problems) == 0 {
 		return nil

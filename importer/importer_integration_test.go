@@ -82,12 +82,11 @@ func writeSheet(t *testing.T, captions []string, rows int) string {
 	return xlsxtest.WriteWorkbook(t, "book.xlsx",
 		func(t *testing.T, f *excelize.File) {
 			for i, caption := range captions {
-				xlsxtest.SetCell(t, f, fmt.Sprintf("%c1", 'A'+i), caption)
+				setCellAt(t, f, i, 1, caption)
 			}
 			for row := 2; row <= rows+1; row++ {
 				for i := range captions {
-					xlsxtest.SetCell(t, f, fmt.Sprintf("%c%d", 'A'+i, row),
-						fmt.Sprintf("v%d-%d", row, i))
+					setCellAt(t, f, i, row, fmt.Sprintf("v%d-%d", row, i))
 				}
 			}
 		})

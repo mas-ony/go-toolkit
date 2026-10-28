@@ -3,10 +3,10 @@ package xlsx
 // Tests for value.go: the separator rules and scientific notation in
 // Decimal, the strict notation of DecimalDotGrouped, both epochs and every
 // text layout in Date along with the serials no DATE column can hold and
-// the month names of both languages, the range guards in Int, the
-// byte-measured cap in StrMax, the emptiness rules in Str and Trim, the
-// escapes Unescape decodes, and a date that keeps its day through
-// datetime's Value.
+// the month names of both languages, the range guards in Int, the wording
+// Int and Decimal share for a refusal, the byte-measured cap in StrMax, the
+// emptiness rules in Str and Trim, the escapes Unescape decodes, and a
+// date that keeps its day through datetime's Value.
 
 import (
 	"strconv"
@@ -320,6 +320,27 @@ func TestIntRejectsNonFiniteAndOutOfRangeValues(t *testing.T) {
 	}
 }
 
+// Int and Decimal word a refusal alike, with the cell quoted as it was
+// typed: one cell holds no number, and another's does not fit.
+func TestNumberRefusalsShareTheirWording(t *testing.T) {
+	read := map[string]func(string) error{
+		"Int":     func(s string) error { _, err := Int(s); return err },
+		"Decimal": func(s string) error { _, err := Decimal(s); return err },
+	}
+	for _, c := range []struct{ reader, in, want string }{
+		{"Int", "abc", `"abc" is not a number`},
+		{"Int", "NaN", `"NaN" is not a number`},
+		{"Int", "1e308", `"1e308" is out of range`},
+		{"Decimal", "Rp", `"Rp" is not a number`},
+		{"Decimal", "1E+999", `"1E+999" is out of range`},
+	} {
+		err := read[c.reader](c.in)
+		if err == nil || err.Error() != c.want {
+			t.Errorf("%s(%q) = %v, want %q", c.reader, c.in, err, c.want)
+		}
+	}
+}
+
 // StrMax refuses a value longer than its column, and accepts one exactly
 // as long.
 func TestStrMaxRejectsOverlongValue(t *testing.T) {
@@ -621,6 +642,37 @@ func TestUnescape(t *testing.T) {
 	} {
 		if got := Unescape(in); got != want {
 			t.Errorf("Unescape(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// TestCode reads dotted codes as the number their digits spell, empty as
+// nil, and refuses anything but digits and dots, or a code past
+// MaxCodeDigits digits.
+func TestCode(t *testing.T) {
+	for in, want := range map[string]string{
+		"5.1.02.01.01.0024":  "510201010024",
+		" 1.02.01.2.001.01 ": "102012001" + "01",
+		"0024":               "24",
+		"":                   "nil",
+		" .. ":               "nil",
+	} {
+		got, err := Code(in)
+		text := "nil"
+		if got != nil {
+			text = strconv.Itoa(*got)
+		}
+		if err != nil || text != want {
+			t.Errorf("Code(%q) = %s, %v; want %s", in, text, err,
+				want)
+		}
+	}
+	for _, in := range []string{
+		"5.1.x", "-1", "1,2", strings.Repeat("9", MaxCodeDigits+1),
+	} {
+		if got, err := Code(in); got != nil || err == nil {
+			t.Errorf("Code(%q) = %v, %v; want an error", in, got,
+				err)
 		}
 	}
 }

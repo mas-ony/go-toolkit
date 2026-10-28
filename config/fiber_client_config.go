@@ -211,12 +211,9 @@ func NewClientConfig(v *viper.Viper) *ClientConfig {
 // Every check appends rather than returning early, so one restart surfaces
 // every fiber.client.* problem at once.
 func (c *ClientConfig) Validate() error {
-	// errs is declared before the nil check only so the two statements read in
-	// the same order in all Validate implementations; the nil check is what
-	// must come first, since every line after it dereferences c.
 	var errs []error
 	if c == nil {
-		return errors.New("fiber.client config was not initialised")
+		return upstream.NotInitialised("fiber.client")
 	}
 
 	// A STATED base URL is checked, an absent one is not. The two are
@@ -310,7 +307,7 @@ func (c *ClientConfig) Validate() error {
 // apart would be silent about exactly the setting worth reading it for.
 func (c *ClientConfig) String() string {
 	if c == nil {
-		return "<nil ClientConfig>"
+		return nilLabel("ClientConfig")
 	}
 
 	token := setOrNone(c.Token != "")

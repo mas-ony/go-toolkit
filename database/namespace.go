@@ -303,19 +303,6 @@ func Qualify(namespace, table string) string {
 	return qualify(namespace, table, QuoteIdent)
 }
 
-// Qualify is Qualify in the grammar d rather than the selected one.
-//
-// Only the QUOTING differs between the two grammars. Which names need
-// quoting does not: needsQuoting answers for both engines at once, so a
-// name is quoted on MySQL because T-SQL reserves it and the other way
-// round, and the same table resolves under either grammar.
-//
-// d is read only when the name needs quoting, matching Qualify, so a plain
-// name is joined without d having to be a grammar at all.
-func (d Dialect) Qualify(namespace, table string) string {
-	return qualify(namespace, table, d.QuoteIdent)
-}
-
 // NamespaceForYear rewrites the database segment of a prefix to name year:
 //
 //	SQL Server  "app2026.dbo" + 2025  ->  "app2025.dbo"
@@ -354,4 +341,17 @@ func NamespaceForYear(namespace string, year int) string {
 		return database
 	}
 	return database + "." + schema
+}
+
+// Qualify is Qualify in the grammar d rather than the selected one.
+//
+// Only the QUOTING differs between the two grammars. Which names need
+// quoting does not: needsQuoting answers for both engines at once, so a
+// name is quoted on MySQL because T-SQL reserves it and the other way
+// round, and the same table resolves under either grammar.
+//
+// d is read only when the name needs quoting, matching Qualify, so a plain
+// name is joined without d having to be a grammar at all.
+func (d Dialect) Qualify(namespace, table string) string {
+	return qualify(namespace, table, d.QuoteIdent)
 }

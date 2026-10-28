@@ -1,12 +1,13 @@
 // Package upstream holds what the packages that reach another server share
 // with the configuration sections that describe one: how a section left
-// out is told from one filled in wrong, the checks a base URL has to pass
-// and the form it is trimmed to, the range a port has to fall in, the
-// masking that keeps a credential out of a message about a URL and the
-// mark it leaves in the credential's place, the rule for when a credential
-// may cross in clear text, the form an HTTP method is compared in, the
-// statuses an answer succeeds with and how much of one is kept, and the
-// wording of an error that names the step of an exchange it ended.
+// out is told from one filled in wrong, the wording of a key left unset
+// and of a section never built, the checks a base URL has to pass and the
+// form it is trimmed to, the range a port has to fall in, the masking that
+// keeps a credential out of a message about a URL and the mark it leaves
+// in the credential's place, the rule for when a credential may cross in
+// clear text, the form an HTTP method is compared in, the statuses an
+// answer succeeds with and how much of one is kept, and the wording of an
+// error that names the step of an exchange it ended.
 //
 // They live in one place because the callers have to agree, not merely
 // resemble each other. A base URL config.ClientConfig.Validate accepts has
@@ -21,7 +22,11 @@
 // the methods the service's router serves. Each is a rule about a value
 // rather than about a peer, and lives here because a package that reaches
 // a peer applies it too: database refuses database.port by the first, and
-// httpclient matches the method of every request by the second.
+// httpclient matches the method of every request by the second. The two
+// wordings reach further, to every key config requires and every section
+// it builds, and live here for the same reason: httpclient.New refuses an
+// absent base URL and a nil client section, and database.New a nil app
+// section, in the words config refuses its own in.
 //
 // The package is internal because none of it is a contract with a
 // service. It is the toolkit agreeing with itself, and its API moves

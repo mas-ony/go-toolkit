@@ -171,12 +171,6 @@ func OKList[T any](msg string, items []T) Response {
 // error response; if additional context is needed, encode it in msg or add
 // a new envelope field.
 //
-// Success is left as its zero value rather than written as
-// `Success: false`. That is correct but invisible, and it is the one field
-// a reader might expect to see set explicitly in a constructor named Fail —
-// worth knowing before someone "fixes" the omission and assumes it changed
-// behaviour.
-//
 // A framework-level error handler is typically the largest caller. The
 // pattern that keeps this path safe is to pass the framework error's own
 // message through for recognised failures and a fixed string such as

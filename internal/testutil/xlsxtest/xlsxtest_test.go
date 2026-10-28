@@ -2,11 +2,15 @@ package xlsxtest
 
 // Tests for xlsxtest.go: a workbook written to a path, or handed over in
 // memory, opens again in excelize, holding Sheet and what the fill put
-// there with SetCell.
+// there with SetCell and MergeCell, and still does once Rebuild has
+// written it again, with what an edit changed and each entry it added.
 
 import (
+	"archive/zip"
 	"bytes"
 	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 
 	"github.com/xuri/excelize/v2"
@@ -56,4 +60,66 @@ func TestWorkbookBytes(t *testing.T) {
 		t.Fatalf("OpenReader: %v", err)
 	}
 	wantKept(t, f)
+}
+
+// The block MergeCell joins is one merged range of Sheet, holding the
+// value of its top-left cell.
+func TestMergeCell(t *testing.T) {
+	t.Parallel()
+	book := WorkbookBytes(t, func(t *testing.T, f *excelize.File) {
+		SetCell(t, f, "B2", "kept")
+		MergeCell(t, f, "B2", "C3")
+	})
+	f, err := excelize.OpenReader(bytes.NewReader(book))
+	if err != nil {
+		t.Fatalf("OpenReader: %v", err)
+	}
+	defer func() { _ = f.Close() }()
+	merged, err := f.GetMergeCells(Sheet)
+	if err != nil || len(merged) != 1 {
+		t.Fatalf("merged ranges = %v, %v, want one", merged, err)
+	}
+	m := merged[0]
+	if m.GetStartAxis() != "B2" || m.GetEndAxis() != "C3" ||
+		m.GetCellValue() != "kept" {
+		t.Errorf("merged %s:%s holding %q, want B2:C3 holding kept",
+			m.GetStartAxis(), m.GetEndAxis(), m.GetCellValue())
+	}
+}
+
+// Without an edit the rebuilt workbook reads as the one it was built from,
+// with each extra entry added to it; with one, an entry holds what the edit
+// returned for it.
+func TestRebuild(t *testing.T) {
+	t.Parallel()
+	book := WorkbookBytes(t, keep)
+
+	kept := Rebuild(t, book, nil, "xl/extra.bin")
+	zr, err := zip.NewReader(bytes.NewReader(kept), int64(len(kept)))
+	if err != nil {
+		t.Fatalf("NewReader: %v", err)
+	}
+	if !slices.ContainsFunc(zr.File, func(e *zip.File) bool {
+		return e.Name == "xl/extra.bin"
+	}) {
+		t.Error("the extra entry is not in the rebuilt archive")
+	}
+	f, err := excelize.OpenReader(bytes.NewReader(kept))
+	if err != nil {
+		t.Fatalf("OpenReader: %v", err)
+	}
+	wantKept(t, f)
+
+	edited := Rebuild(t, book, func(_, content string) string {
+		return strings.ReplaceAll(content, ">kept<", ">made<")
+	})
+	f, err = excelize.OpenReader(bytes.NewReader(edited))
+	if err != nil {
+		t.Fatalf("OpenReader: %v", err)
+	}
+	defer func() { _ = f.Close() }()
+	if got, err := f.GetCellValue(Sheet, "B2"); err != nil ||
+		got != "made" {
+		t.Errorf("B2 = %q, %v, want the edit's made", got, err)
+	}
 }

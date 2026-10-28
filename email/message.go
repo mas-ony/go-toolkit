@@ -112,11 +112,11 @@ const maxFilename = 255
 // blank reports whether s holds nothing but white space.
 func blank(s string) bool { return strings.TrimSpace(s) == "" }
 
-// empty reports whether m has nothing to deliver: no subject, no body and
-// no attachment. White space alone counts as nothing.
-func (m Message) empty() bool {
-	return blank(m.Subject) && blank(m.Text) && blank(m.HTML) &&
-		len(m.Attachments) == 0
+// validUTF8 returns s with each run of bytes that is not UTF-8 replaced by
+// one U+FFFD, so the text, the subject and an attachment's name can all go
+// out under the charset they declare.
+func validUTF8(s string) string {
+	return strings.ToValidUTF8(s, string(utf8.RuneError))
 }
 
 // base64Lines encodes data as base64 in lines of base64Line characters
@@ -207,7 +207,7 @@ func textPart(subtype, s string) part {
 	w := quotedprintable.NewWriter(&b)
 	// quotedprintable reports only its writer's errors, and a
 	// bytes.Buffer has none to report.
-	_, _ = w.Write([]byte(strings.ToValidUTF8(s, "\uFFFD")))
+	_, _ = w.Write([]byte(validUTF8(s)))
 	_ = w.Close()
 
 	h := make(textproto.MIMEHeader)
@@ -241,7 +241,7 @@ func attachmentType(given, name string) (string, map[string]string) {
 // a character boundary with its extension kept, and an empty name becomes
 // "attachment", which clients show better than a part with no name.
 func attachmentName(name string) string {
-	name = strings.ToValidUTF8(name, "\uFFFD")
+	name = validUTF8(name)
 	if i := strings.LastIndexAny(name, `/\`); i >= 0 {
 		name = name[i+1:]
 	}
@@ -407,7 +407,7 @@ func compose(
 		writeHeader(&b, "Reply-To", env.replyTo.String())
 	}
 	writeHeader(&b, "Subject", mime.QEncoding.Encode("utf-8",
-		strings.ToValidUTF8(m.Subject, "\uFFFD")))
+		validUTF8(m.Subject)))
 	writeHeader(&b, "Date", date.Format(time.RFC1123Z))
 	writeHeader(&b, "Message-ID", id)
 	// RFC 3834. A vacation responder or ticket system that honours it
@@ -425,4 +425,11 @@ func compose(
 	b.WriteString("\r\n")
 	b.Write(root.body)
 	return b.Bytes(), nil
+}
+
+// empty reports whether m has nothing to deliver: no subject, no body and
+// no attachment. White space alone counts as nothing.
+func (m Message) empty() bool {
+	return blank(m.Subject) && blank(m.Text) && blank(m.HTML) &&
+		len(m.Attachments) == 0
 }

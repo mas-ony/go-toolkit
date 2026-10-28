@@ -16,6 +16,23 @@ import (
 	"github.com/mas-ony/go-toolkit/internal/bytesize"
 )
 
+// listedSheet is one sheet the workbook lists: its name, and the entry
+// its XML is in, which is nil when the package holds no such entry.
+type listedSheet struct {
+	name string
+	part *zip.File
+}
+
+// relationships is the content of a .rels part: what each id used in
+// the part beside it points at.
+type relationships struct {
+	Items []struct {
+		ID     string `xml:"Id,attr"`
+		Type   string `xml:"Type,attr"`
+		Target string `xml:"Target,attr"`
+	} `xml:"Relationship"`
+}
+
 // archive is the ZIP package a workbook is stored as, read beside
 // excelize for what excelize does not report: what the package would
 // expand to, whether it carries macros, where a sheet's XML really
@@ -33,23 +50,6 @@ type archive struct {
 	// one is kept in by custom, xl/vbaProject.bin, or a part under any
 	// name that the workbook's relationships say is one.
 	macros bool
-}
-
-// listedSheet is one sheet the workbook lists: its name, and the entry
-// its XML is in, which is nil when the package holds no such entry.
-type listedSheet struct {
-	name string
-	part *zip.File
-}
-
-// relationships is the content of a .rels part: what each id used in
-// the part beside it points at.
-type relationships struct {
-	Items []struct {
-		ID     string `xml:"Id,attr"`
-		Type   string `xml:"Type,attr"`
-		Target string `xml:"Target,attr"`
-	} `xml:"Relationship"`
 }
 
 // sheetScan is fed a sheet's XML from start to end and keeps two things
@@ -142,6 +142,20 @@ const (
 	maxPartBytes = 16 << 20
 )
 
+// rowNumber matches the r attribute of a row's start tag, which
+// carries the row's number.
+var rowNumber = regexp.MustCompile(`\sr\s*=\s*["']([0-9]+)["']`)
+
+// mergeRef matches a mergeCell start tag, with or without a prefix, up
+// to its ref attribute, which carries the merged range.
+var mergeRef = regexp.MustCompile(
+	`<(?:[\w.\-]+:)?mergeCell(?:\s[^<>]*?)?\sref\s*=\s*["']([^"']*)["']`)
+
+// errNoSheet is ErrNotWorkbook for an archive whose workbook lists no
+// sheet. inspect returns it when the archive's own listing is empty and
+// load when excelize's is, so both readings refuse in one wording.
+var errNoSheet = fmt.Errorf("%w: it holds no sheet", ErrNotWorkbook)
+
 // MaxUnzippedBytes caps what a workbook may expand to: the sum of the
 // uncompressed sizes its ZIP directory declares, 1 GiB unless a caller
 // sets another. Zero or negative disables the cap and leaves
@@ -176,20 +190,6 @@ var (
 	// MaxUnzippedBytes.
 	ErrTooLarge = errors.New("workbook too large")
 )
-
-// errNoSheet is ErrNotWorkbook for an archive whose workbook lists no
-// sheet. inspect returns it when the archive's own listing is empty and
-// load when excelize's is, so both readings refuse in one wording.
-var errNoSheet = fmt.Errorf("%w: it holds no sheet", ErrNotWorkbook)
-
-// rowNumber matches the r attribute of a row's start tag, which
-// carries the row's number.
-var rowNumber = regexp.MustCompile(`\sr\s*=\s*["']([0-9]+)["']`)
-
-// mergeRef matches a mergeCell start tag, with or without a prefix, up
-// to its ref attribute, which carries the merged range.
-var mergeRef = regexp.MustCompile(
-	`<(?:[\w.\-]+:)?mergeCell(?:\s[^<>]*?)?\sref\s*=\s*["']([^"']*)["']`)
 
 // partName returns the name of a ZIP entry as entries are matched:
 // with forward slashes, no leading one, and in lower case.
@@ -447,6 +447,15 @@ func (a *archive) part(sheet string) *zip.File {
 	return nil
 }
 
+// finish settles what the scan found once the XML has ended. XML that
+// never closed its sheetData ends with whatever row came last.
+func (s *sheetScan) finish() {
+	if !s.past {
+		s.last = lastRowNumber(s.buf)
+	}
+	s.buf = nil
+}
+
 // scan reads the XML of the named sheet for the number of its last row
 // and the ranges it merges; see sheetScan.
 //
@@ -470,15 +479,6 @@ func (a *archive) scan(sheet string) (int, []string, error) {
 	}
 	s.finish()
 	return s.last, s.merges, nil
-}
-
-// finish settles what the scan found once the XML has ended. XML that
-// never closed its sheetData ends with whatever row came last.
-func (s *sheetScan) finish() {
-	if !s.past {
-		s.last = lastRowNumber(s.buf)
-	}
-	s.buf = nil
 }
 
 // Write takes the next stretch of the sheet's XML. It never fails.

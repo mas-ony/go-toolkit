@@ -39,22 +39,6 @@ import (
 	"github.com/spf13/viper"
 )
 
-// DefaultTelegramAPIURL is the hosted Bot API, which an empty
-// notification.telegram.api_url stands for.
-//
-// NewTelegramConfig leaves the field empty and the telegram package applies
-// this, so a TelegramConfig that nothing supplied stays equal to the zero
-// value, which is how Configured, and through it telegram.New, tells "not
-// configured" from "configured halfway".
-const DefaultTelegramAPIURL = "https://api.telegram.org"
-
-// telegramToken is the shape BotFather issues: the bot's numeric id, a
-// colon, then the secret.
-//
-// It checks the shape and nothing more. Whether Telegram issued this token,
-// or has since revoked it, is only ever answered by a send.
-var telegramToken = regexp.MustCompile(`^[0-9]+:[A-Za-z0-9_-]+$`)
-
 // TelegramConfig holds the bot Telegram notifications are sent as, and how
 // its requests are made. String omits the token; see the note there on what
 // it prints in its place.
@@ -114,6 +98,22 @@ type TelegramConfig struct {
 	// hand a send to a goroutine without it reading freed request memory.
 	Async bool
 }
+
+// DefaultTelegramAPIURL is the hosted Bot API, which an empty
+// notification.telegram.api_url stands for.
+//
+// NewTelegramConfig leaves the field empty and the telegram package applies
+// this, so a TelegramConfig that nothing supplied stays equal to the zero
+// value, which is how Configured, and through it telegram.New, tells "not
+// configured" from "configured halfway".
+const DefaultTelegramAPIURL = "https://api.telegram.org"
+
+// telegramToken is the shape BotFather issues: the bot's numeric id, a
+// colon, then the secret.
+//
+// It checks the shape and nothing more. Whether Telegram issued this token,
+// or has since revoked it, is only ever answered by a send.
+var telegramToken = regexp.MustCompile(`^[0-9]+:[A-Za-z0-9_-]+$`)
 
 // NewTelegramConfig reads TelegramConfig fields from the provided Viper
 // instance.
@@ -175,18 +175,15 @@ func (c *TelegramConfig) Configured() bool { return configured(c) }
 // Every check appends rather than returning early, so one restart surfaces
 // every notification.telegram.* problem at once.
 func (c *TelegramConfig) Validate() error {
-	// errs is declared before the nil check only so the two statements read
-	// in the same order in all Validate implementations; the nil check is
-	// what must come first, since every line after it dereferences c.
 	var errs []error
 	if c == nil {
-		return errors.New("notification.telegram config was not initialised")
+		return upstream.NotInitialised("notification.telegram")
 	}
 
 	switch token := strings.TrimSpace(c.Token); {
 	case token == "":
-		errs = append(errs, errors.New(
-			"notification.telegram.token is required"))
+		errs = append(errs,
+			upstream.Required("notification.telegram.token", ""))
 	case !telegramToken.MatchString(token):
 		errs = append(errs, errors.New("notification.telegram.token is not "+
 			"a bot token (the value is withheld): want what BotFather "+
@@ -246,7 +243,7 @@ func (c *TelegramConfig) Validate() error {
 // String called on a configuration that did not start.
 func (c *TelegramConfig) String() string {
 	if c == nil {
-		return "<nil TelegramConfig>"
+		return nilLabel("TelegramConfig")
 	}
 
 	token := setOrNone(c.Token != "")

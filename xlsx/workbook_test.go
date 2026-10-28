@@ -23,6 +23,28 @@ import (
 	"github.com/xuri/excelize/v2"
 )
 
+// writeFixture builds a workbook with the shape this package exists to
+// read, and returns its path:
+//
+//	     B        C     D     E      F       G        H
+//	 5   Location (B5:D5)            Extra   Checks (G5:H5)
+//	 6   Cabinet (B6:C6)   No.  Link
+//	 7   1        2     3     4
+//	 8
+//	 9   B-2      24    7     1      -> a real hyperlink
+//	10   C-4      25    8            -> a HYPERLINK() formula
+//	11                                  (a value in Z and nowhere else)
+//	12   D-1      26    9     2
+//
+// Every path Caption can take is represented: a caption written where it
+// is (B and D), one merged across from a neighbour (C), one with no group
+// above it (E), one that exists only on the group row (F), and one that is
+// both merged and on the group row (G).
+func writeFixture(t *testing.T) string {
+	t.Helper()
+	return xlsxtest.WriteWorkbook(t, "fixture.xlsx", fillFixture)
+}
+
 // openWorkbook opens path with layout and closes it when the test ends.
 func openWorkbook(t *testing.T, path string, layout Layout) *File {
 	t.Helper()
@@ -46,6 +68,13 @@ func openBytes(t *testing.T, book []byte, layout Layout) *File {
 	return w
 }
 
+// openFixture writes the fixture and opens it under layout, closing it when
+// the test ends.
+func openFixture(t *testing.T, layout Layout) *File {
+	t.Helper()
+	return openWorkbook(t, writeFixture(t), layout)
+}
+
 // fixtureLayout is the geometry every test but the header ones uses.
 func fixtureLayout() Layout {
 	return Layout{HeaderRow: 6, FirstRow: 9}
@@ -65,26 +94,24 @@ func fixtureColumns() []Column {
 	}
 }
 
-// writeFixture builds a workbook with the shape this package exists to
-// read, and returns its path:
-//
-//	     B        C     D     E      F       G        H
-//	 5   Location (B5:D5)            Extra   Checks (G5:H5)
-//	 6   Cabinet (B6:C6)   No.  Link
-//	 7   1        2     3     4
-//	 8
-//	 9   B-2      24    7     1      -> a real hyperlink
-//	10   C-4      25    8            -> a HYPERLINK() formula
-//	11                                  (a value in Z and nowhere else)
-//	12   D-1      26    9     2
-//
-// Every path Caption can take is represented: a caption written where it
-// is (B and D), one merged across from a neighbour (C), one with no group
-// above it (E), one that exists only on the group row (F), and one that is
-// both merged and on the group row (G).
-func writeFixture(t *testing.T) string {
+// setLink writes a hyperlink to target into cell of xlsxtest.Sheet, the
+// form Hyperlink reads from the sheet's relationships, and fails the test
+// if excelize refuses it, as xlsxtest.SetCell does for a value.
+func setLink(t *testing.T, f *excelize.File, cell, target string) {
 	t.Helper()
-	return xlsxtest.WriteWorkbook(t, "fixture.xlsx", fillFixture)
+	err := f.SetCellHyperLink(xlsxtest.Sheet, cell, target, "External")
+	if err != nil {
+		t.Fatalf("SetCellHyperLink %s: %v", cell, err)
+	}
+}
+
+// setFormula writes formula into cell of xlsxtest.Sheet, stored without a
+// cached result, and fails the test if excelize refuses it.
+func setFormula(t *testing.T, f *excelize.File, cell, formula string) {
+	t.Helper()
+	if err := f.SetCellFormula(xlsxtest.Sheet, cell, formula); err != nil {
+		t.Fatalf("SetCellFormula %s: %v", cell, err)
+	}
 }
 
 // fillFixture writes the layout writeFixture draws into f.
@@ -98,9 +125,7 @@ func fillFixture(t *testing.T, f *excelize.File) {
 	merge := func(from, to, value string) {
 		t.Helper()
 		set(from, value)
-		if err := f.MergeCell(xlsxtest.Sheet, from, to); err != nil {
-			t.Fatalf("MergeCell %s:%s: %v", from, to, err)
-		}
+		xlsxtest.MergeCell(t, f, from, to)
 	}
 
 	merge("B5", "D5", "Location")
@@ -120,20 +145,12 @@ func fillFixture(t *testing.T, f *excelize.File) {
 	set("C9", "24")
 	set("D9", "7")
 	set("E9", "1")
-	err := f.SetCellHyperLink(
-		xlsxtest.Sheet, "E9", "documents/1.pdf", "External")
-	if err != nil {
-		t.Fatalf("SetCellHyperLink: %v", err)
-	}
+	setLink(t, f, "E9", "documents/1.pdf")
 
 	set("B10", "C-4")
 	set("C10", "25")
 	set("D10", "8")
-	err = f.SetCellFormula(
-		xlsxtest.Sheet, "E10", `HYPERLINK("documents/2.pdf","1")`)
-	if err != nil {
-		t.Fatalf("SetCellFormula: %v", err)
-	}
+	setFormula(t, f, "E10", `HYPERLINK("documents/2.pdf","1")`)
 
 	set("Z11", "a note in a column nobody reads")
 
@@ -141,13 +158,6 @@ func fillFixture(t *testing.T, f *excelize.File) {
 	set("C12", "26")
 	set("D12", "9")
 	set("E12", "2")
-}
-
-// openFixture writes the fixture and opens it under layout, closing it when
-// the test ends.
-func openFixture(t *testing.T, layout Layout) *File {
-	t.Helper()
-	return openWorkbook(t, writeFixture(t), layout)
 }
 
 // An empty Layout.Sheet reads the first sheet, and the File reports that
@@ -278,9 +288,7 @@ func TestCaptionResolvesThroughAMergeDownTheHeader(t *testing.T) {
 		} {
 			xlsxtest.SetCell(t, f, cell, value)
 		}
-		if err := f.MergeCell(xlsxtest.Sheet, "A1", "A3"); err != nil {
-			t.Fatal(err)
-		}
+		xlsxtest.MergeCell(t, f, "A1", "A3")
 	})
 
 	wb := openBytes(t, book, Layout{HeaderRow: 3, FirstRow: 4})
@@ -723,8 +731,7 @@ func TestCloseLetsGoOfTheWorkbook(t *testing.T) {
 func TestHasMacros(t *testing.T) {
 	plain := fixtureBytes(t)
 	with := func(name string) []byte {
-		keep := func(_, content string) string { return content }
-		return rebuild(t, plain, keep, name)
+		return xlsxtest.Rebuild(t, plain, nil, name)
 	}
 	const end = "</Relationships>"
 	renamed := replaced(t, plain, relsXML, end, `<Relationship `+
@@ -790,7 +797,7 @@ func TestColumnsFromA(t *testing.T) {
 	err := wb.VerifyHeaders([]Column{{Col: "D", Captions: []string{
 		"Nomor"}, Purpose: "number"}})
 	if !errors.As(err, &le) || !slices.Equal(le.Problems, []string{
-		`column D  (number): expected "Nomor", found "No."`}) {
+		`column D (number): expected "Nomor", found "No."`}) {
 		t.Errorf("a column with a purpose reads %v", err)
 	}
 }
@@ -819,5 +826,17 @@ func TestRepeatedTextIsShared(t *testing.T) {
 		unsafe.StringData(second) != unsafe.StringData(third) {
 		t.Error("equal cells in one column, one under the other, " +
 			"hold their text apart")
+	}
+}
+
+// TestColumnString names a column by its letter and purpose, and by its
+// letter alone when it states none.
+func TestColumnString(t *testing.T) {
+	if got := (Column{Col: "C", Purpose: "amount"}).String(); got !=
+		"column C (amount)" {
+		t.Errorf("named %q", got)
+	}
+	if got := (Column{Col: "AB"}).String(); got != "column AB" {
+		t.Errorf("named %q", got)
 	}
 }

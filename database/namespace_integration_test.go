@@ -14,6 +14,7 @@ import (
 
 	"github.com/go-sql-driver/mysql"
 	"github.com/jmoiron/sqlx"
+	"github.com/mas-ony/go-toolkit/internal/testutil/dbtest"
 )
 
 // serverReservedWords returns the words this server refuses as a bare
@@ -99,14 +100,14 @@ func TestIntegrationQualifiedNamesParse(t *testing.T) {
 		for _, name := range names {
 			qualified := Qualify(ns, name)
 			bare := Qualify("", name)
-			mustExec(t, db,
+			dbtest.Exec(t, db,
 				"DROP TABLE IF EXISTS "+qualified,
 				"CREATE TABLE "+qualified+" (id INT NOT NULL)",
 			)
 			t.Cleanup(func() {
 				_, _ = db.Exec("DROP TABLE IF EXISTS " + qualified)
 			})
-			mustExec(t, db,
+			dbtest.Exec(t, db,
 				"INSERT INTO "+qualified+" (id) VALUES (1)",
 				"INSERT INTO "+bare+" (id) VALUES (2)",
 				"UPDATE "+bare+" SET id = 3 WHERE id = 2",

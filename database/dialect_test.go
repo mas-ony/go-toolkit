@@ -90,6 +90,14 @@ func mustPanic(t *testing.T, name string, f func()) {
 	}
 }
 
+// withoutDialect clears the selection until the test ends.
+func withoutDialect(t *testing.T) {
+	t.Helper()
+	prev := selectedDialect.Load()
+	t.Cleanup(func() { selectedDialect.Store(prev) })
+	selectedDialect.Store(0)
+}
+
 // withDialect selects d until the test ends and then restores the previous
 // selection, including no selection. The selection is package-wide, so a
 // test that calls it must not run in parallel. withoutDialect arranges the
@@ -98,14 +106,6 @@ func withDialect(t *testing.T, d Dialect) {
 	t.Helper()
 	withoutDialect(t)
 	SetDialect(d)
-}
-
-// withoutDialect clears the selection until the test ends.
-func withoutDialect(t *testing.T) {
-	t.Helper()
-	prev := selectedDialect.Load()
-	t.Cleanup(func() { selectedDialect.Store(prev) })
-	selectedDialect.Store(0)
 }
 
 // ParseDialect accepts every spelling of both drivers in any case and

@@ -58,6 +58,18 @@ var loopbackHosts = map[string]bool{
 	"::1":       true,
 }
 
+// withoutURL returns err without the *url.Error that net/url and net/http
+// wrap a failure in. That wrapper carries the whole URL, and the URL can
+// carry a credential: userinfo, or a bot token in the path. What it wraps
+// is returned as it is, so errors.Is still reaches a context error or a
+// timeout underneath.
+func withoutURL(err error) error {
+	if ue, ok := errors.AsType[*url.Error](err); ok {
+		return ue.Err
+	}
+	return err
+}
+
 // IsLoopback reports whether host is one of the three spellings a
 // credential may cross to in clear text; see loopbackHosts.
 //
@@ -99,6 +111,30 @@ func NormaliseMethod(method string) string {
 	return strings.ToUpper(method)
 }
 
+// Required is the error for a key left unset: "<key> is required",
+// followed by why as written. why carries its own opening, ": " before a
+// reason or a condition such as " when ...", and is empty where the
+// requirement needs no reason of its own.
+//
+// config words every key it requires with it, CheckPort an absent port,
+// and httpclient.New an absent base URL, so a setting nobody supplied is
+// reported in one wording wherever it is read.
+func Required(key, why string) error {
+	return errors.New(key + " is required" + why)
+}
+
+// NotInitialised is the error for a section that was never built: a nil
+// pointer to one, or a wrapper whose embedded middleware config is nil.
+// section names what the section stands for, the prefix its keys share
+// where the caller names keys, and a plain word where it names none.
+//
+// Every Validate in config opens with it, database.New refuses a nil app
+// section with it and httpclient.New a nil client section, so a section
+// nobody built is refused in one wording whichever of them is handed it.
+func NotInitialised(section string) error {
+	return errors.New(section + " config was not initialised")
+}
+
 // CheckPort reports a port key that is unset or outside 1..65535. Zero is
 // the value an absent key reads as, so it is reported as required rather
 // than as out of range.
@@ -110,7 +146,7 @@ func NormaliseMethod(method string) string {
 func CheckPort(key string, port int) error {
 	switch {
 	case port == 0:
-		return errors.New(key + " is required")
+		return Required(key, "")
 	case port < 0 || port > 65535:
 		return fmt.Errorf("%s must be between 1 and 65535 (got %d)",
 			key,
@@ -164,19 +200,6 @@ func RedactUserinfo(raw string) string {
 		prefix = raw[:i+len("://")]
 	}
 	return prefix + Masked + raw[at:]
-}
-
-// withoutURL returns err without the *url.Error that net/url and net/http
-// wrap a failure in. That wrapper carries the whole URL, and the URL can
-// carry a credential: userinfo, or a bot token in the path. What it wraps
-// is returned as it is, so errors.Is still reaches a context error or a
-// timeout underneath.
-func withoutURL(err error) error {
-	var ue *url.Error
-	if errors.As(err, &ue) {
-		return ue.Err
-	}
-	return err
 }
 
 // ParseCause returns what url.Parse objected to, without any of the input

@@ -17,15 +17,14 @@ import (
 	"github.com/spf13/viper"
 )
 
-// SectionConfig is what every configuration section implements, and
-// requiring both halves in one interface is what lets an application
-// validate and log its sections from a single list. A section that can be
-// logged can be validated and the reverse, so neither use can carry an entry
-// the other cannot.
-type SectionConfig interface {
-	fmt.Stringer
-	Validate() error
-}
+// Supplied names the sections some source actually supplied a key for.
+//
+// NIL MEANS EVERY SECTION. SuppliedSections always returns a map, so a nil
+// one is evidence of a value that did not come from it — a test's literal, a
+// caller's — which has no record of what any source held and therefore
+// cannot justify skipping anything. A nil map reports every section as
+// configured, so such a value is validated in full.
+type Supplied map[string]bool
 
 // AbsentSection stands in for a section no source supplied a key for.
 //
@@ -64,14 +63,15 @@ type Section struct {
 	Value SectionConfig
 }
 
-// Supplied names the sections some source actually supplied a key for.
-//
-// NIL MEANS EVERY SECTION. SuppliedSections always returns a map, so a nil
-// one is evidence of a value that did not come from it — a test's literal, a
-// caller's — which has no record of what any source held and therefore
-// cannot justify skipping anything. A nil map reports every section as
-// configured, so such a value is validated in full.
-type Supplied map[string]bool
+// SectionConfig is what every configuration section implements, and
+// requiring both halves in one interface is what lets an application
+// validate and log its sections from a single list. A section that can be
+// logged can be validated and the reverse, so neither use can carry an entry
+// the other cannot.
+type SectionConfig interface {
+	fmt.Stringer
+	Validate() error
+}
 
 // envKey turns the dots in a key into the underscores of its environment
 // spelling: database.max_open_conns becomes database_max_open_conns, and
@@ -104,31 +104,6 @@ func sectionOf(prefixes map[string]string, key, sep string) string {
 	return name
 }
 
-// NewViper returns a Viper instance configured the way every section in
-// this package assumes.
-//
-// Two settings, and each is what one half of the documented contract rests on.
-// The key replacer turns a dotted key into its environment spelling —
-// database.max_open_conns becomes DATABASE_MAX_OPEN_CONNS — and AutomaticEnv
-// makes an environment variable of that name override the file.
-//
-// A caller that builds its own instance with viper.New() loses both, and
-// what it loses is invisible: every documented variable is ignored, the
-// file's value or a zero stands in for it, and nothing reports that the
-// override was never wired. That is why the configuration lives here rather
-// than being left for each application to reproduce.
-//
-// Reading the file is left to the caller — SetConfigFile, then ReadInConfig
-// — because where configuration lives is a deployment decision. AllowEmptyEnv
-// is left at its default of off, so an exported-but-empty variable does not
-// blank a value the file supplies; SuppliedSections relies on that too.
-func NewViper() *viper.Viper {
-	v := viper.New()
-	v.SetEnvKeyReplacer(envKey)
-	v.AutomaticEnv()
-	return v
-}
-
 // EnvName returns the environment variable that overrides key on a Viper
 // built by NewViper: the key upper-cased, with every dot an underscore, so
 // fiber.limiter.max is FIBER_LIMITER_MAX.
@@ -141,13 +116,6 @@ func NewViper() *viper.Viper {
 // changes.
 func EnvName(key string) string {
 	return strings.ToUpper(envKey.Replace(key))
-}
-
-// Configured reports whether some source supplied a key for the named
-// section. See the type's own documentation for why a nil map means every
-// section rather than none.
-func (s Supplied) Configured(name string) bool {
-	return s == nil || s[name]
 }
 
 // SuppliedSections names every section some source supplied at least one key
@@ -233,6 +201,38 @@ func SuppliedSections(v *viper.Viper, sections []Section) Supplied {
 		}
 	}
 	return supplied
+}
+
+// NewViper returns a Viper instance configured the way every section in
+// this package assumes.
+//
+// Two settings, and each is what one half of the documented contract rests on.
+// The key replacer turns a dotted key into its environment spelling —
+// database.max_open_conns becomes DATABASE_MAX_OPEN_CONNS — and AutomaticEnv
+// makes an environment variable of that name override the file.
+//
+// A caller that builds its own instance with viper.New() loses both, and
+// what it loses is invisible: every documented variable is ignored, the
+// file's value or a zero stands in for it, and nothing reports that the
+// override was never wired. That is why the configuration lives here rather
+// than being left for each application to reproduce.
+//
+// Reading the file is left to the caller — SetConfigFile, then ReadInConfig
+// — because where configuration lives is a deployment decision. AllowEmptyEnv
+// is left at its default of off, so an exported-but-empty variable does not
+// blank a value the file supplies; SuppliedSections relies on that too.
+func NewViper() *viper.Viper {
+	v := viper.New()
+	v.SetEnvKeyReplacer(envKey)
+	v.AutomaticEnv()
+	return v
+}
+
+// Configured reports whether some source supplied a key for the named
+// section. See the type's own documentation for why a nil map means every
+// section rather than none.
+func (s Supplied) Configured(name string) bool {
+	return s == nil || s[name]
 }
 
 // Validate reports nothing: a section no source supplied holds no value

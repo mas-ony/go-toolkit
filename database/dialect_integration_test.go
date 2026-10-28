@@ -74,16 +74,6 @@ func eachEngine(
 	})
 }
 
-// mustExec runs each statement and stops the test at the first error.
-func mustExec(t *testing.T, db *sqlx.DB, stmts ...string) {
-	t.Helper()
-	for _, s := range stmts {
-		if _, err := db.Exec(s); err != nil {
-			t.Fatalf("%v\n%s", err, s)
-		}
-	}
-}
-
 // onEngine returns mysql or sqlserver, whichever the selected grammar needs.
 func onEngine(mysql, sqlserver string) string {
 	if activeDialect() == DialectMySQL {
@@ -132,7 +122,7 @@ func TestIntegrationInsertReturningID(t *testing.T) {
 			// MySQL has no such rule, and creating a trigger there needs
 			// SUPER when binary logging is on, so it is skipped.
 			trigger := QuoteIdent(dbtest.Unique("dialect_trg_"))
-			mustExec(t, db, "CREATE TRIGGER "+trigger+" ON "+table+
+			dbtest.Exec(t, db, "CREATE TRIGGER "+trigger+" ON "+table+
 				" AFTER INSERT AS SET NOCOUNT ON;")
 		}
 
@@ -183,7 +173,7 @@ func TestIntegrationApplyLimitAndPageClause(t *testing.T) {
 		table := scratchTable(t, db, "paging",
 			"CREATE TABLE %s (id INT PRIMARY KEY, grp INT NOT NULL)")
 		for i := 1; i <= 25; i++ {
-			mustExec(t, db, fmt.Sprintf(
+			dbtest.Exec(t, db, fmt.Sprintf(
 				"INSERT INTO %s (id, grp) VALUES (%d, %d)", table, i, i%3))
 		}
 
@@ -288,7 +278,7 @@ func TestIntegrationRecursiveCTE(t *testing.T) {
 	forEachEngine(t, func(t *testing.T, db *sqlx.DB) {
 		table := scratchTable(t, db, "tree",
 			"CREATE TABLE %s (id INT PRIMARY KEY, parent_id INT NULL)")
-		mustExec(t, db, "INSERT INTO "+table+" (id, parent_id) VALUES "+
+		dbtest.Exec(t, db, "INSERT INTO "+table+" (id, parent_id) VALUES "+
 			"(1, NULL), (2, 1), (3, 2), (4, 3), (5, NULL)")
 
 		query := RecursiveCTE("tree") +
@@ -330,7 +320,7 @@ func TestIntegrationQuoteIdentAndNowExpr(t *testing.T) {
 			"CREATE TABLE %s ("+user+" INT, stamp DATETIME(0))",
 			"CREATE TABLE %s ("+user+" INT, stamp DATETIME2(0))",
 		))
-		mustExec(t, db, "INSERT INTO "+table+" ("+user+", stamp) "+
+		dbtest.Exec(t, db, "INSERT INTO "+table+" ("+user+", stamp) "+
 			"VALUES (1, "+NowExpr()+")")
 
 		var got struct {

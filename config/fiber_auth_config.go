@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/mas-ony/go-toolkit/internal/upstream"
 	"github.com/spf13/viper"
 )
 
@@ -149,13 +150,9 @@ func (c *AuthConfig) IsJWT() bool {
 // Every check appends rather than returning early, so one restart surfaces
 // every fiber.auth.* problem at once.
 func (c *AuthConfig) Validate() error {
-	// errs is declared before the nil check only so the two statements
-	// read in the same order in all Validate implementations; the nil
-	// check is what must come first, since every line after it
-	// dereferences c.
 	var errs []error
 	if c == nil {
-		return errors.New("fiber.auth config was not initialised")
+		return upstream.NotInitialised("fiber.auth")
 	}
 
 	switch c.Mode {
@@ -185,7 +182,7 @@ func (c *AuthConfig) Validate() error {
 // description: "none" is not a value Validate accepts.
 func (c *AuthConfig) String() string {
 	if c == nil {
-		return "<nil AuthConfig>"
+		return nilLabel("AuthConfig")
 	}
 	mode := c.Mode
 	if mode == "" {

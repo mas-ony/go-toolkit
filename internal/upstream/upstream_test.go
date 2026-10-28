@@ -5,12 +5,13 @@ package upstream
 // What the helpers promise: a URL quoted in an error or a log line shows no
 // userinfo, whatever characters the credential holds; the cause url.Parse
 // reports keeps its meaning while repeating no part of the input; a base
-// URL is trimmed and refused the same way whoever asks; a port is held to
-// one range; a section left out is told from one filled in wrong, and
-// only the second is validated; the loopback rule is net/smtp's, spelling
-// for spelling; a success is a 2xx and nothing else; a method is compared
-// upper-cased; and an error naming a step still answers errors.Is for the
-// context that ended it.
+// URL is trimmed and refused the same way whoever asks; a key left unset
+// and a section never built are each refused in one wording; a port is
+// held to one range; a section left out is told from one filled in wrong,
+// and only the second is validated; the loopback rule is net/smtp's,
+// spelling for spelling; a success is a 2xx and nothing else; a method is
+// compared upper-cased; and an error naming a step still answers
+// errors.Is for the context that ended it.
 
 import (
 	"context"
@@ -19,6 +20,24 @@ import (
 	"strings"
 	"testing"
 )
+
+// section is an Optional that answers as the test sets it, and records
+// whether it was validated. A nil one reports itself absent, as a nil
+// pointer to one of config's sections does.
+type section struct {
+	supplied bool
+	invalid  error
+	asked    bool
+}
+
+// Configured reports what the test set, and false for a nil section.
+func (s *section) Configured() bool { return s != nil && s.supplied }
+
+// Validate records that it was asked and returns what the test set.
+func (s *section) Validate() error {
+	s.asked = true
+	return s.invalid
+}
 
 // Userinfo is masked in every shape a credential can take, including the
 // ones that make url.Parse fail, and a URL without one is left alone.
@@ -88,6 +107,37 @@ func TestParseCauseDropsTheInput(t *testing.T) {
 	}
 }
 
+// The reason a key is required follows the key as written: a condition
+// opens with a space, a reason with a colon, and none leaves the bare
+// requirement.
+func TestRequired(t *testing.T) {
+	t.Parallel()
+	for why, want := range map[string]string{
+		"":              "x.key is required",
+		": a reason":    "x.key is required: a reason",
+		" when x is on": "x.key is required when x is on",
+	} {
+		if got := Required("x.key", why).Error(); got != want {
+			t.Errorf("Required(%q) = %q, want %q", why, got, want)
+		}
+	}
+}
+
+// A section never built is named as the caller names it, a prefix or a
+// plain word, and the message says nothing about any value in it.
+func TestNotInitialised(t *testing.T) {
+	t.Parallel()
+	for section, want := range map[string]string{
+		"x.section": "x.section config was not initialised",
+		"client":    "client config was not initialised",
+	} {
+		if got := NotInitialised(section).Error(); got != want {
+			t.Errorf("NotInitialised(%q) = %q, want %q",
+				section, got, want)
+		}
+	}
+}
+
 // A port is required, held to 1..65535, and reported once whatever is
 // wrong with it.
 func TestCheckPort(t *testing.T) {
@@ -110,24 +160,6 @@ func TestCheckPort(t *testing.T) {
 			t.Errorf("CheckPort(%d) = %v, want %q", c.port, err, c.mention)
 		}
 	}
-}
-
-// section is an Optional that answers as the test sets it, and records
-// whether it was validated. A nil one reports itself absent, as a nil
-// pointer to one of config's sections does.
-type section struct {
-	supplied bool
-	invalid  error
-	asked    bool
-}
-
-// Configured reports what the test set, and false for a nil section.
-func (s *section) Configured() bool { return s != nil && s.supplied }
-
-// Validate records that it was asked and returns what the test set.
-func (s *section) Validate() error {
-	s.asked = true
-	return s.invalid
 }
 
 // An absent section is answered with the caller's sentinel and is not

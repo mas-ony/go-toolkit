@@ -168,6 +168,21 @@ func configFromDSN(
 	return cfg, app, nil
 }
 
+// mustOpen calls New and closes the pool when the test ends.
+func mustOpen(
+	t *testing.T,
+	cfg *config.DatabaseConfig,
+	app *config.AppConfig,
+) *sqlx.DB {
+	t.Helper()
+	db, err := New(cfg, app)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	return db
+}
+
 // forEachEngineConfig is forEachEngine for tests that need to call New
 // themselves rather than be handed an open pool. fn receives a config pair
 // it may mutate before opening anything.
@@ -198,21 +213,6 @@ func forEachEnginePool(t *testing.T, fn func(t *testing.T, db *sqlx.DB)) {
 	) {
 		fn(t, mustOpen(t, cfg, app))
 	})
-}
-
-// mustOpen calls New and closes the pool when the test ends.
-func mustOpen(
-	t *testing.T,
-	cfg *config.DatabaseConfig,
-	app *config.AppConfig,
-) *sqlx.DB {
-	t.Helper()
-	db, err := New(cfg, app)
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-	return db
 }
 
 // A pool New opens answers a query, and carries the open limit it was
@@ -280,7 +280,7 @@ func TestIntegrationUpdateReportsRowsMatched(t *testing.T) {
 			"CREATE TABLE %s (id INT PRIMARY KEY, label VARCHAR(20))",
 			"CREATE TABLE %s (id INT PRIMARY KEY, label NVARCHAR(20))",
 		))
-		mustExec(t, db,
+		dbtest.Exec(t, db,
 			"INSERT INTO "+table+" (id, label) VALUES (1, 'same')")
 
 		for _, c := range []struct {
@@ -346,7 +346,7 @@ func TestIntegrationOffsetlessColumnsCarryAppLocation(t *testing.T) {
 			"CREATE TABLE %s (stamp DATETIME(0) NOT NULL)",
 			"CREATE TABLE %s (stamp DATETIME2(0) NOT NULL)",
 		))
-		mustExec(t, db, "INSERT INTO "+table+
+		dbtest.Exec(t, db, "INSERT INTO "+table+
 			" (stamp) VALUES ("+NowExpr()+")")
 
 		var got time.Time

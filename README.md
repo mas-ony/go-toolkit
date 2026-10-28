@@ -31,7 +31,7 @@ go get github.com/mas-ony/go-toolkit
 | `email`      | Sends mail with attachments through an SMTP relay  |
 | `fileutil`   | Upload paths, safe names, type allowlist, writes   |
 | `httpclient` | JSON client with retries and typed errors          |
-| `importer`   | Drives one spreadsheet import, row by row          |
+| `importer`   | Drives a spreadsheet import, a file or an upload   |
 | `logger`     | zerolog configured per environment                 |
 | `request`    | Fiber route and query parameter helpers            |
 | `response`   | The JSON envelope every handler returns            |
@@ -47,7 +47,8 @@ A rule more than one package applies is written once, under `internal/`:
 `internal/upstream` for checking, trimming and quoting the address of a
 server the toolkit talks to, the mark a masked credential leaves, the
 form an HTTP method is compared in, the statuses its answers succeed
-with and how much of one is kept, the range a port falls in, and how a
+with and how much of one is kept, the range a port falls in, the words a
+key left unset and a section never built are refused in, and how a
 section left out is told from one filled in wrong;
 `internal/strlist` for comma-separated lists and the form a configured
 word is read in; `internal/dbdriver` for the driver names and encrypt
@@ -432,6 +433,21 @@ Neither nests. Calling one inside `fn` checks out a second connection,
 which then waits on the locks the first still holds until the lock
 timeout. Pass the `*sqlx.Tx` down instead, as above.
 
+### Refused rows
+
+```go
+_, err = tx.ExecContext(ctx, query, args...)
+return database.Rejected(err)
+```
+
+`Rejected` wraps a statement's error in `ErrRejected` when the table
+refused the row for its values — a NULL in a NOT NULL column, a value
+too long, out of range or of the wrong type, or a duplicate key — on
+either engine, told by the error's number. Every other error comes back
+as it was, and nil stays nil. An import records an `ErrRejected` against
+its row and goes on; any other error is the database's own, and the next
+row would fail the same way.
+
 ## HTTP
 
 ### request
@@ -698,6 +714,42 @@ registered twice panics.
 
 Keep the report `WriteReport` produces. For a dataset whose re-run
 duplicates, its id column is the only record of what the run created.
+
+#### Uploads
+
+A service that imports an uploaded export rather than a file holds an
+`UploadDataset` per kind of export: its `Name`, the `UploadLayout` of
+its sheet, and `Import`, which stores one record. `OpenUpload` reads the
+upload's bytes against the layout and hands back its rows, each read by
+the caption of its column.
+
+```go
+sheet, err := importer.OpenUpload(data, ds.Layout())
+if err != nil {
+    // ErrMacros, xlsx's own refusals, or an *xlsx.LayoutError for a
+    // header row that is not the layout's.
+    return err
+}
+for _, row := range sheet.Rows() {
+    err := ds.Import(ctx, []*importer.Row{row})
+    if errors.Is(err, database.ErrRejected) {
+        row.Fail(err.Error())
+    } else if err != nil {
+        return err
+    }
+}
+```
+
+An `UploadLayout` is for a sheet a program exports: the `xlsx.Layout` of
+its header and data, the captions of its header row from column A, the
+ones a row cannot be stored without, and the closing row that is not
+data. A dataset reads a cell with `Text`, `Int`, `Code`, `Decimal`,
+`DecimalDotGrouped` or `Date`, which note what will not read by the rule
+`Table.Apply` follows: a required cell fails the row, and any other is
+left nil with a warning. `Fail`, `FailCell` and `FailEmpty` fail a row
+for what the readers cannot see, and `Peek`, `PeekAbove` and `Probe` look
+at a row without noting anything on it. Reading a caption the layout does
+not list panics, and `UploadLayout.Check` belongs at startup.
 
 ## Files
 

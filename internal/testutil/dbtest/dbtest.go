@@ -24,14 +24,14 @@ type Engine struct {
 	DSNEnv string
 }
 
+// seq keeps scratch table names unique within one run.
+var seq atomic.Int64
+
 // Engines lists the servers a suite can run against, MySQL first.
 var Engines = []Engine{
 	{Driver: dbdriver.MySQL, DSNEnv: "DB_TEST_MYSQL_DSN"},
 	{Driver: dbdriver.SQLServer, DSNEnv: "DB_TEST_SQLSERVER_DSN"},
 }
-
-// seq keeps scratch table names unique within one run.
-var seq atomic.Int64
 
 // Each runs fn as a subtest for every engine whose DSN variable is set,
 // handing it that DSN, and skips t when none is set.
@@ -77,15 +77,25 @@ func Unique(prefix string) string {
 		seq.Add(1))
 }
 
-// ScratchTable runs ddl, in which %s stands for name, and drops the table
-// when the test ends. name is used as given, so the caller quotes it as
-// its engine needs; it is returned for the caller's queries.
+// Exec runs each of stmts on db in turn, and stops the test at the first
+// one the server refuses, printing the statement under the server's own
+// error so the failure names what was sent.
+func Exec(t *testing.T, db *sqlx.DB, stmts ...string) {
+	t.Helper()
+	for _, stmt := range stmts {
+		if _, err := db.Exec(stmt); err != nil {
+			t.Fatalf("%v\n%s", err, stmt)
+		}
+	}
+}
+
+// ScratchTable runs ddl, in which %s stands for name, through Exec, and
+// drops the table when the test ends. name is used as given, so the
+// caller quotes it as its engine needs; it is returned for the caller's
+// queries.
 func ScratchTable(t *testing.T, db *sqlx.DB, name, ddl string) string {
 	t.Helper()
-	stmt := fmt.Sprintf(ddl, name)
-	if _, err := db.Exec(stmt); err != nil {
-		t.Fatalf("%v\n%s", err, stmt)
-	}
+	Exec(t, db, fmt.Sprintf(ddl, name))
 	t.Cleanup(func() { _, _ = db.Exec("DROP TABLE " + name) })
 	return name
 }

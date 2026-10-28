@@ -4,21 +4,30 @@ package config
 // that has to be set and at least a second, the timeout that bounds a
 // notification send, a number that may be zero but not negative, a value
 // that has to be one of a fixed few, whether a section was supplied at
-// all, and what a String prints in place of a secret or of a value left to
-// a default. Each section still names its keys and says why a value is
-// wrong for it; what lives here is the part of the check, and of the
-// message, that would otherwise be written out again in every section that
-// holds such a key. A rule the database package applies as well, the range
-// a port has to fall in, is upstream.CheckPort, and the form a configured
-// word is compared in is strlist.Normalise. It is a file of its own for
-// the reason splitlist.go is: a section file is the authoritative list of
-// one section's keys and nothing else.
+// all, what String prints for a section that was never built, and what a
+// String prints in place of a secret or of a value left to a default.
+// Each section still names its keys and says why a value is wrong for it;
+// what lives here is the part of the check, and of the message, that would
+// otherwise be written out again in every section that holds such a key.
+//
+// A rule another package applies as well is internal/upstream's instead.
+// The range a port has to fall in is upstream.CheckPort, the error for a
+// key left unset is upstream.Required, and the one for a section never
+// built is upstream.NotInitialised. Every Validate opens with the last,
+// since every line after it dereferences the receiver, and one that
+// collects findings declares its errs slice just above it, so all of them
+// open with the same two statements in the same order. The form a
+// configured word is compared in is strlist.Normalise.
+//
+// It is a file of its own for the reason splitlist.go is: a section file
+// is the authoritative list of one section's keys and nothing else.
 
 import (
-	"errors"
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/mas-ony/go-toolkit/internal/upstream"
 )
 
 // loggedCredential is why a credential cannot sit in a URL key: every
@@ -47,6 +56,20 @@ func configured[T comparable](c *T) bool {
 	return c != nil && *c != zero
 }
 
+// nilLabel is what a String prints for a nil receiver; typeName is the
+// section's type. It is in angle brackets, as uninitialisedLabel is, so
+// the startup line cannot be read as carrying a value somebody wrote.
+func nilLabel(typeName string) string {
+	return "<nil " + typeName + ">"
+}
+
+// uninitialisedLabel is what a String prints for a wrapper whose embedded
+// middleware config is nil, the other case upstream.NotInitialised
+// reports.
+func uninitialisedLabel(typeName string) string {
+	return "<uninitialised " + typeName + ">"
+}
+
 // underASecond is the error for a duration key set below one second.
 //
 // why says what such a value does to the thing the key configures, or is
@@ -72,17 +95,16 @@ func underASecond(key string, got time.Duration, why string) error {
 // the rule for a duration with no default worth inheriting and no meaning
 // below a second.
 //
-// unset follows "<key> is required" in the message for an absent key, and
-// is empty where the requirement needs no reason of its own; short is the
-// why underASecond is given. A negative value is under a second like any
-// other, which is the right answer for every key it reaches. A key whose
-// middleware reads a negative value differently from a short one, as
-// fiber.session's timeouts do, reports a negative value itself and leaves
-// the rest to this.
+// unset is the why upstream.Required is given for an absent key, and short
+// the why underASecond is given. A negative value is under a second like
+// any other, which is the right answer for every key it reaches. A key
+// whose middleware reads a negative value differently from a short one,
+// as fiber.session's timeouts do, reports a negative value itself and
+// leaves the rest to this.
 func checkDuration(key string, d time.Duration, unset, short string) error {
 	switch {
 	case d == 0:
-		return errors.New(key + " is required" + unset)
+		return upstream.Required(key, unset)
 	case d < time.Second:
 		return underASecond(key, d, short)
 	}

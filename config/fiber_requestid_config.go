@@ -18,6 +18,7 @@ import (
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/gofiber/fiber/v3/middleware/requestid"
+	"github.com/mas-ony/go-toolkit/internal/upstream"
 	"github.com/spf13/viper"
 )
 
@@ -221,12 +222,9 @@ func NewRequestIDConfig(v *viper.Viper) *RequestIDConfig {
 // Every check appends rather than returning early, so one restart surfaces
 // every fiber.requestid.* problem at once.
 func (c *RequestIDConfig) Validate() error {
-	// errs is declared before the nil check only so the two statements read in
-	// the same order in all Validate implementations; the nil check is what
-	// must come first, since every line after it dereferences c.
 	var errs []error
 	if c == nil || c.Config == nil {
-		return errors.New("fiber.requestid config was not initialised")
+		return upstream.NotInitialised("fiber.requestid")
 	}
 
 	// Required rather than defaulted, because an empty value here still
@@ -234,11 +232,12 @@ func (c *RequestIDConfig) Validate() error {
 	// a broken response but a configuration that does not describe one. See
 	// the field comment in NewRequestIDConfig.
 	if c.Header == "" {
-		errs = append(errs, fmt.Errorf("fiber.requestid.header is required: "+
-			"it names a header written to every response, and leaving it "+
-			"empty serves %q anyway — from the middleware's own fallback, "+
-			"where neither config.yaml nor a startup log line will show it",
-			DefaultRequestIDHeader))
+		errs = append(errs, upstream.Required("fiber.requestid.header",
+			fmt.Sprintf(": it names a header written to every response, "+
+				"and leaving it empty serves %q anyway — from the "+
+				"middleware's own fallback, where neither config.yaml "+
+				"nor a startup log line will show it",
+				DefaultRequestIDHeader)))
 	} else if !isHTTPFieldName(c.Header) {
 		errs = append(errs, fmt.Errorf("fiber.requestid.header must be a "+
 			"valid HTTP field name — letters, digits, or any of %s, with no "+
@@ -289,10 +288,10 @@ func (c *RequestIDConfig) Validate() error {
 // of them prints func() string, which distinguishes nothing.
 func (c *RequestIDConfig) String() string {
 	if c == nil {
-		return "<nil RequestIDConfig>"
+		return nilLabel("RequestIDConfig")
 	}
 	if c.Config == nil {
-		return "<uninitialised RequestIDConfig>"
+		return uninitialisedLabel("RequestIDConfig")
 	}
 
 	generator := "custom"

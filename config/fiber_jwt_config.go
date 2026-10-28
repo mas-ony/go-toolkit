@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/mas-ony/go-toolkit/internal/upstream"
 	"github.com/spf13/viper"
 )
 
@@ -116,13 +117,9 @@ func NewJWTConfig(v *viper.Viper) *JWTConfig {
 // Every check appends rather than returning early, so one restart surfaces
 // every fiber.jwt.* problem at once.
 func (c *JWTConfig) Validate() error {
-	// errs is declared before the nil check only so the two statements
-	// read in the same order in all Validate implementations; the nil
-	// check is what must come first, since every line after it
-	// dereferences c.
 	var errs []error
 	if c == nil {
-		return errors.New("fiber.jwt config was not initialised")
+		return upstream.NotInitialised("fiber.jwt")
 	}
 
 	// A switch rather than two ifs, so an absent key produces one error
@@ -131,8 +128,7 @@ func (c *JWTConfig) Validate() error {
 	// where 0 is the absent value.
 	switch {
 	case c.Secret == "":
-		errs = append(errs,
-			errors.New("fiber.jwt.secret is required"+whenJWT))
+		errs = append(errs, upstream.Required("fiber.jwt.secret", whenJWT))
 	case len(c.Secret) < minJWTSecretBytes:
 		errs = append(errs, fmt.Errorf("fiber.jwt.secret must be at least "+
 			"%d bytes (got %d)",
@@ -164,7 +160,7 @@ func (c *JWTConfig) Validate() error {
 // its way into the environment, without printing any of it.
 func (c *JWTConfig) String() string {
 	if c == nil {
-		return "<nil JWTConfig>"
+		return nilLabel("JWTConfig")
 	}
 	return fmt.Sprintf("Expiry=%s "+
 		"SecretLen=%d",

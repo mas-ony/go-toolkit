@@ -1688,10 +1688,10 @@ func TestRegisterContainerDeclaresANewContainer(t *testing.T) {
 func TestRegisteringAnArchiveTypeDefeatsTheException(t *testing.T) {
 	restoreExts(t)
 
-	RegisterExts(OfficeExts)
-	RegisterExt(".zip", "application/zip")
-
 	const zip = "application/zip"
+	RegisterExts(OfficeExts)
+	RegisterExt(".zip", zip)
+
 	if got := DetectContentType("letter.docx", zipBytes); got != zip {
 		t.Errorf(
 			"DetectContentType: got %q, want %q — an accepted sniff wins",
