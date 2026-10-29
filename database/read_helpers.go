@@ -373,3 +373,30 @@ func (f SortField) Direction() string {
 	}
 	return "ASC"
 }
+
+// Insert runs a named INSERT of one row and returns the driver's result:
+//
+//	INSERT INTO table (cols)
+//	VALUES (vals)
+//
+// table, cols and vals are what InsertReturningID takes: the target
+// already qualified, the column list, and the VALUES list whose :name
+// placeholders bind from arg as in sqlx.NamedExecContext, all three
+// written in code. It is for a row whose key the caller supplies, which
+// leaves nothing to fetch back; a key the database generates comes back
+// through InsertReturningID instead.
+//
+// It is here rather than beside InsertReturningID because both engines
+// spell it alike. It is also the statement InsertReturningID sends on
+// MySQL before it reads the key, so a row is written one way whichever of
+// the two a repository calls.
+func Insert(
+	ctx context.Context,
+	ext sqlx.ExtContext,
+	table, cols, vals string,
+	arg any,
+) (sql.Result, error) {
+	query := "INSERT INTO " + table + " (" + cols + ")" +
+		"\nVALUES (" + vals + ")"
+	return sqlx.NamedExecContext(ctx, ext, query, arg)
+}

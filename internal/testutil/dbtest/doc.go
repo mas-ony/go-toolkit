@@ -2,10 +2,11 @@
 // server share: which servers a suite can run against, the variable each
 // one's DSN is read from, how a test runs once per server whose DSN is set
 // and skips when none is, how a statement is run against it, and how a
-// scratch table is named and dropped.
+// scratch table is named and dropped, including one whose name only a
+// quoted identifier can hold.
 //
-// The database and datetime suites read the same two variables, so one
-// scratch server serves both:
+// The database, crud and datetime suites read the same two variables, so
+// one scratch server serves all three:
 //
 //	DB_TEST_MYSQL_DSN
 //		user:pass@tcp(host:3306)/scratch?parseTime=true&loc=Asia%2FJakarta
@@ -13,7 +14,7 @@
 //		sqlserver://user:pass@host?database=scratch&timezone=Asia%2FJakarta
 //
 // The zone parameters are for datetime, which needs them to name the zone
-// the test process runs in; database passes with or without them.
+// the test process runs in; database and crud pass with or without them.
 //
 // The suites create and drop their own tables. Point the DSNs at a scratch
 // database, never at one that holds data.

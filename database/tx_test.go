@@ -20,23 +20,8 @@ import (
 
 	"github.com/jmoiron/sqlx"
 	"github.com/mas-ony/go-toolkit/internal/testutil"
+	"github.com/mas-ony/go-toolkit/internal/testutil/sqltest"
 )
-
-// connBase supplies the two methods a driver.Conn must have that neither
-// fake uses. Prepare refuses, because every statement reaches a fake
-// through QueryContext or BeginTx instead, and Close releases nothing,
-// because a fake holds nothing to release. Both conns embed it.
-type connBase struct{}
-
-// connectorBase supplies the Driver method of both connectors, which
-// belong to fakeDriver alike. Both connectors embed it.
-type connectorBase struct{}
-
-// fakeDriver is the driver.Driver behind both fakes in this package's
-// tests: fakeConnector's here, and queryConnector's in
-// read_helpers_test.go. Its Open refuses, because each fake is reached
-// only through its connector.
-type fakeDriver struct{}
 
 // fakeDB is the shared state behind the connector, connections and
 // transactions below. Every field is guarded by mu because database/sql calls
@@ -59,9 +44,10 @@ type fakeDB struct {
 }
 
 // fakeConnector hands out connections to one fakeDB, so that sql.OpenDB can
-// use the fake without registering a driver name.
+// use the fake without registering a driver name. Its Driver is
+// sqltest's, as is the Driver of queryConnector in read_helpers_test.go.
 type fakeConnector struct {
-	connectorBase
+	sqltest.ConnectorBase
 	db *fakeDB
 }
 
@@ -69,9 +55,10 @@ type fakeConnector struct {
 // point: database/sql only forwards the context and the isolation options to a
 // driver that implements the Tx variant, so a conn with a bare Begin would
 // make half the assertions in this file untestable — and, on a real driver,
-// would silently drop the very options WithTxContext exists to pass.
+// would silently drop the very options WithTxContext exists to pass. The
+// Prepare and Close it never uses are sqltest's.
 type fakeConn struct {
-	connBase
+	sqltest.ConnBase
 	db *fakeDB
 }
 
@@ -107,19 +94,6 @@ func newFakeDB() *fakeDB {
 	return &fakeDB{rolledBack: make(chan struct{}, 8)}
 }
 
-// openFake returns a *sqlx.DB over c, bound as driverName, and closes it
-// when the test ends. Both fakes in this package's tests open this way.
-//
-// sql.OpenDB with a custom connector avoids sql.Register, which is a
-// process-global map: registering per test would either collide or force a
-// unique name scheme, and both are worse than passing the connector directly.
-func openFake(t *testing.T, c driver.Connector, driverName string) *sqlx.DB {
-	t.Helper()
-	db := sqlx.NewDb(sql.OpenDB(c), driverName)
-	t.Cleanup(func() { _ = db.Close() })
-	return db
-}
-
 // assertConnectionsReturned is the leak check that motivates the panic guard.
 //
 // It polls rather than reading once, because database/sql returns a connection
@@ -141,10 +115,11 @@ func assertConnectionsReturned(t *testing.T, db *sqlx.DB) {
 	}
 }
 
-// open returns a *sqlx.DB backed by this fake.
+// open returns a *sqlx.DB backed by this fake, through sqltest.Open, as
+// both fakes in this package's tests are opened.
 func (f *fakeDB) open(t *testing.T) *sqlx.DB {
 	t.Helper()
-	return openFake(t, &fakeConnector{db: f}, "fake")
+	return sqltest.Open(t, &fakeConnector{db: f}, "fake")
 }
 
 // snapshot copies the fake's state under its lock, so a test can read it
@@ -257,23 +232,6 @@ func (t *fakeTx) Rollback() error {
 	}
 	return err
 }
-
-// Open refuses: the fake is reachable only through its connector.
-func (fakeDriver) Open(string) (driver.Conn, error) {
-	return nil, errors.New(
-		"fake: this driver is only reachable through its connector")
-}
-
-// Driver returns the driver both connectors belong to.
-func (connectorBase) Driver() driver.Driver { return fakeDriver{} }
-
-// Prepare refuses: no fake here is handed a statement to prepare.
-func (connBase) Prepare(string) (driver.Stmt, error) {
-	return nil, errors.New("fake: statements are not supported")
-}
-
-// Close releases nothing; the fake holds no resources.
-func (connBase) Close() error { return nil }
 
 // These tests run against a fake driver defined at the top of this file
 // rather than against a real SQL Server, for two reasons.

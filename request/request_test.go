@@ -1,11 +1,12 @@
 package request
 
 // Tests for request.go, each driven through a real Fiber router so the
-// values under test are the ones a handler receives: ID and QueryID and the
-// one 400 they return, the junk-skipping in IDs, the paging defaults and
-// ceiling, Sort and Cols, the three answers of each pointer helper, and the
-// cloning of every string that leaves the package. Buffer reuse across
-// requests needs a real listener and is in request_integration_test.go.
+// values under test are the ones a handler receives: ID, QueryID and Date
+// and the one 400 they return, the junk-skipping in IDs, the paging
+// defaults and ceiling, Sort and Cols, the answers of each pointer helper,
+// and the cloning of every string that leaves the package. Buffer reuse
+// across requests needs a real listener and is in
+// request_integration_test.go.
 
 import (
 	"errors"
@@ -21,9 +22,9 @@ import (
 	"github.com/mas-ony/go-toolkit/database"
 )
 
-// probe sends one GET through an app whose two routes, /items and
-// /items/:id, both call fn with the request context, and returns the
-// response.
+// probe sends one GET through an app whose three routes, /items,
+// /items/:id and /days/:day, all call fn with the request context, and
+// returns the response.
 func probe(t *testing.T, target string, fn func(c fiber.Ctx)) *http.Response {
 	t.Helper()
 	app := fiber.New()
@@ -33,6 +34,7 @@ func probe(t *testing.T, target string, fn func(c fiber.Ctx)) *http.Response {
 	}
 	app.Get("/items", route)
 	app.Get("/items/:id", route)
+	app.Get("/days/:day", route)
 
 	resp, err := app.Test(httptest.NewRequest(http.MethodGet, target, nil))
 	if err != nil {
@@ -94,6 +96,37 @@ func TestQueryID(t *testing.T) {
 			if id != 0 || code != fiber.StatusBadRequest ||
 				msg != "invalid unit_id" {
 				t.Errorf("%s: id, err = %d, %v", target, id, err)
+			}
+		})
+	}
+}
+
+// Date reads a route parameter in time.DateOnly's layout, and answers a
+// missing one, or one in any other shape, with the same 400 naming the
+// parameter.
+func TestDate(t *testing.T) {
+	for _, day := range []string{"2026-01-02", "2024-02-29"} {
+		probe(t, "/days/"+day, func(c fiber.Ctx) {
+			got, err := Date(c, "day")
+			if got != day || err != nil {
+				t.Errorf("%s: day, err = %q, %v", day, got, err)
+			}
+		})
+	}
+
+	// A missing segment, an unpadded date, a day the month lacks, a time
+	// of day, a signed year and another order are one mistake each, and
+	// all get the same answer.
+	for _, target := range []string{"/items", "/days/2026-1-2",
+		"/days/2026-13-01", "/days/2026-02-30", "/days/2025-02-29",
+		"/days/2026-01-02T00:00:00", "/days/-026-01-02",
+		"/days/02-01-2026", "/days/garbage"} {
+		probe(t, target, func(c fiber.Ctx) {
+			got, err := Date(c, "day")
+			code, msg := badRequest(err)
+			if got != "" || code != fiber.StatusBadRequest ||
+				msg != "invalid day" {
+				t.Errorf("%s: day, err = %q, %v", target, got, err)
 			}
 		})
 	}
@@ -286,6 +319,27 @@ func TestIntPtr(t *testing.T) {
 	})
 }
 
+// DatePtr trims the value and keeps it when it is in time.DateOnly's
+// layout; every other spelling, a blank and an absent parameter are nil.
+func TestDatePtr(t *testing.T) {
+	probe(t, "/items?a=2026-01-02&b=%202024-02-29%20&c=2026-1-2"+
+		"&d=2026-02-30&e=2026-01-02T00:00:00&f=garbage&g=",
+		func(c fiber.Ctx) {
+			want := map[string]string{"a": "2026-01-02", "b": "2024-02-29"}
+			for key, day := range want {
+				if got := DatePtr(c, key); got == nil || *got != day {
+					t.Errorf("%s = %v, want %s", key, got, day)
+				}
+			}
+			for _, key := range []string{"c", "d", "e", "f", "g",
+				"absent"} {
+				if got := DatePtr(c, key); got != nil {
+					t.Errorf("%s = %q, want nil", key, *got)
+				}
+			}
+		})
+}
+
 // BoolPtr reads true, 1 and yes, and false, 0 and no, in any case; every
 // other spelling, and an absent parameter, is nil.
 func TestBoolPtr(t *testing.T) {
@@ -313,7 +367,8 @@ func TestBoolPtr(t *testing.T) {
 // handler returns. Whatever the helpers keep has to be a copy, which is
 // checked here by comparing the string data pointers.
 func TestQueryValuesAreCloned(t *testing.T) {
-	probe(t, "/items?code=alpha&cols=alpha&sort=alpha", func(c fiber.Ctx) {
+	target := "/items?code=alpha&cols=alpha&sort=alpha&from=2026-01-02"
+	probe(t, target, func(c fiber.Ctx) {
 		raw := c.Query("code")
 		if unsafe.StringData(raw) != unsafe.StringData(c.Query("code")) {
 			t.Skip("this app copies query values already")
@@ -332,6 +387,26 @@ func TestQueryValuesAreCloned(t *testing.T) {
 			unsafe.StringData(got[0].Col) ==
 				unsafe.StringData(c.Query("sort")) {
 			t.Error("Sort kept the request buffer")
+		}
+		if got := DatePtr(c, "from"); got == nil ||
+			unsafe.StringData(*got) ==
+				unsafe.StringData(c.Query("from")) {
+			t.Error("DatePtr kept the request buffer")
+		}
+	})
+}
+
+// A route parameter points into the same buffer as a query value, so Date
+// copies what it returns as well.
+func TestRouteValuesAreCloned(t *testing.T) {
+	probe(t, "/days/2026-01-02", func(c fiber.Ctx) {
+		got, err := Date(c, "day")
+		if err != nil {
+			t.Errorf("Date: %v", err)
+			return
+		}
+		if unsafe.StringData(got) == unsafe.StringData(c.Params("day")) {
+			t.Error("Date kept the request buffer")
 		}
 	})
 }

@@ -45,12 +45,11 @@ func rowCount(t *testing.T, db *sqlx.DB, table string) int {
 	return n
 }
 
-// insertID inserts one row through whatever ext it is given, so the same
-// line serves a transaction and a pool.
+// insertID inserts one row through Insert and whatever ext it is given,
+// so the same line serves a transaction and a pool.
 func insertID(ctx context.Context, ext sqlx.ExtContext,
 	table string, id int) error {
-	_, err := sqlx.NamedExecContext(ctx, ext,
-		"INSERT INTO "+table+" (id) VALUES (:id)",
+	_, err := Insert(ctx, ext, table, "id", ":id",
 		map[string]any{"id": id})
 	return err
 }

@@ -208,6 +208,44 @@ func TestIntegrationSortColumnsSurviveBufferReuse(t *testing.T) {
 	})
 }
 
+// Date reads the path and DatePtr the query string, and each clones what
+// it returns, so a date held past its request keeps the value that
+// request sent.
+func TestIntegrationDatesSurviveBufferReuse(t *testing.T) {
+	var path, query capture
+
+	app := fiber.New()
+	app.Get("/d/:tgl", func(c fiber.Ctx) error {
+		tgl, err := Date(c, "tgl")
+		if err != nil {
+			return err
+		}
+		path.add(tgl)
+		if p := DatePtr(c, "from"); p != nil {
+			query.add(*p)
+		} else {
+			query.add("<nil>")
+		}
+		return c.SendString("ok")
+	})
+
+	// One distinct day per request, so a value overwritten by a later
+	// request cannot pass for its own.
+	day := func(i int) string {
+		return time.Date(2026, time.January, 1+i, 0, 0, 0, 0, time.UTC).
+			Format(time.DateOnly)
+	}
+	h := serve(t, app)
+	for i := 0; i < requests; i++ {
+		h.get(t, "/d/"+day(i)+"?from="+day(requests-i))
+	}
+
+	path.check(t, "Date", day)
+	query.check(t, "DatePtr", func(i int) string {
+		return day(requests - i)
+	})
+}
+
 // The helpers that return integers, or pointers to fresh locals, cannot be
 // corrupted. Pinning that is worth as much as the tests above: it is why
 // they carry no strings.Clone, and why adding one would be noise rather

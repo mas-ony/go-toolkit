@@ -142,6 +142,9 @@
 // lets a repository take part in a transaction without knowing that it is
 // in one.
 //
+// Package crud implements this shape once, as BaseRepo, with ext()
+// exported as Ext for the statements a repository still writes itself.
+//
 // # Where the engine differences live
 //
 // No query builder outside dialect.go branches on the configured engine.
@@ -177,7 +180,7 @@
 //	column names in GROUP BY   GroupClause, through its allowlist
 //	namespace and table names  Qualify, from literals in each repository
 //	row caps                   ApplyLimit, from an int the repository passes
-//	insert targets             InsertReturningID, from literals
+//	insert targets             Insert and InsertReturningID, from literals
 //	LIKE columns               LikePredicate, from literals
 //	CTE names                  RecursiveCTE, from literals
 //	subqueries and aliases     ExistsFlag, from literals

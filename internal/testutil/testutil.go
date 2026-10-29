@@ -50,6 +50,16 @@ func CapturePanic(fn func()) (recovered any) {
 	return nil
 }
 
+// MustPanic runs fn and reports an error naming it as name unless fn
+// panics. The test goes on either way, so one test can hold several calls
+// to panicking and hear about every one that did not.
+func MustPanic(t testing.TB, name string, fn func()) {
+	t.Helper()
+	if CapturePanic(fn) == nil {
+		t.Errorf("%s did not panic", name)
+	}
+}
+
 // Glob returns the files in the test's working directory that match
 // pattern, and fails the test when the pattern is malformed or matches
 // nothing.

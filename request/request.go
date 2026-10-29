@@ -4,6 +4,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/mas-ony/go-toolkit/database"
@@ -36,6 +37,15 @@ func positiveID(id int, param string) (int, error) {
 		return 0, fiber.NewError(fiber.StatusBadRequest, "invalid "+param)
 	}
 	return id, nil
+}
+
+// isDate reports whether s is a calendar date spelled exactly as
+// time.DateOnly spells one: four digits of year, two of month and two of
+// day, joined by hyphens, naming a day its month has. Date and DatePtr
+// share it, so the two cannot drift apart on what a date is.
+func isDate(s string) bool {
+	_, err := time.Parse(time.DateOnly, s)
+	return err == nil
 }
 
 // ID reads a route parameter, as in /items/:id, as a positive integer:
@@ -99,6 +109,30 @@ func IDs(c fiber.Ctx, param string) []int {
 // "do not filter" rather than as a mistake.
 func QueryID(c fiber.Ctx, param string) (int, error) {
 	return positiveID(fiber.Query[int](c, param), param)
+}
+
+// Date reads a route parameter, as in /holidays/:tgl, as a plain calendar
+// date, and returns it as text in time.DateOnly's layout:
+//
+//	tgl, err := Date(c, "tgl")
+//	if err != nil {
+//		return err
+//	}
+//
+// A missing value, or one in any other shape — "2026-1-2", a time of day,
+// the thirtieth of February — yields "" and a *fiber.Error carrying 400
+// and the parameter's name, the answer ID gives. A route parameter names
+// the row to act on, so a date that does not parse has no substitute.
+//
+// The text comes back rather than a time.Time because the text is what a
+// repository binds; see the package documentation on dates. A query
+// parameter that bounds a list belongs in DatePtr instead.
+func Date(c fiber.Ctx, param string) (string, error) {
+	raw := c.Params(param)
+	if !isDate(raw) {
+		return "", fiber.NewError(fiber.StatusBadRequest, "invalid "+param)
+	}
+	return strings.Clone(raw), nil
 }
 
 // Cols reads ?cols= into the column names a repository restricts its
@@ -225,6 +259,23 @@ func BoolPtr(c fiber.Ctx, key string) *bool {
 	case "false", "0", "no":
 		f := false
 		return &f
+	}
+	return nil
+}
+
+// DatePtr returns a query value that is a plain calendar date, as Date
+// reads one, or nil when the parameter is absent, empty or spelled any
+// other way. It reads the value through StringPtr and keeps it only when
+// it is a date, so the white space around it is trimmed and the date is
+// copied out of the request exactly as StringPtr does both.
+//
+// It is for the bounds of a date range a list is filtered by, where nil
+// means what it means for every pointer here: do not filter. A malformed
+// bound therefore widens the result rather than failing the request, the
+// trade IntPtr makes for a malformed number.
+func DatePtr(c fiber.Ctx, key string) *string {
+	if v := StringPtr(c, key); v != nil && isDate(*v) {
+		return v
 	}
 	return nil
 }

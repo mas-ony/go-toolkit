@@ -87,8 +87,8 @@ func onEngine(mysql, sqlserver string) string {
 // it doubles as a check that a quoted identifier works in DDL and DML.
 func scratchTable(t *testing.T, db *sqlx.DB, base, ddl string) string {
 	t.Helper()
-	name := QuoteIdent(dbtest.Unique("dialect " + base + "`] "))
-	return dbtest.ScratchTable(t, db, name, ddl)
+	return QuoteIdent(
+		dbtest.QuotedScratchTable(t, db, QuoteIdent, "dialect "+base, ddl))
 }
 
 // forEachEngine runs fn as a subtest for every engine with a DSN, with that

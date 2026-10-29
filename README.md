@@ -1,9 +1,10 @@
 # go-toolkit
 
 Shared Go packages for the HTTP services in this stack: typed
-configuration, a SQL layer that speaks both MySQL and SQL Server,
-spreadsheet reading and import, upload handling, and the request and
-response shapes every service uses.
+configuration, a SQL layer that speaks both MySQL and SQL Server, the
+repository and service bases built on it, spreadsheet reading and
+import, upload handling, and the request and response shapes every
+service uses.
 
 Everything here, `examples/` aside, is a library. Nothing starts a server
 or reads a config file, and the only process-wide state is the handful of
@@ -16,7 +17,7 @@ go get github.com/mas-ony/go-toolkit
 ## Requirements
 
 - Go 1.27.3 or newer.
-- MySQL / MariaDB, or SQL Server / Azure SQL, for `database`.
+- MySQL / MariaDB, or SQL Server / Azure SQL, for `database` and `crud`.
 - No cgo. The SQLite store behind `whatsapp` is pure Go, built from
   Wasm, so there is no gcc at build time.
 
@@ -25,6 +26,7 @@ go get github.com/mas-ony/go-toolkit
 | Package      | What it does                                       |
 | ------------ | -------------------------------------------------- |
 | `config`     | Typed `config.yaml` sections, validated at start   |
+| `crud`       | Repository and service bases over `database`       |
 | `database`   | sqlx setup, MySQL/T-SQL grammar, clause builders   |
 | `datetime`   | Time type that parses many formats, JSON and SQL   |
 | `document`   | One-pass index of a document directory             |
@@ -336,7 +338,10 @@ touching global state.
 row agrees only because the escape is `!`: a backslash cannot be written
 the same way on both, so `LikeArg` escapes a search term and
 `LikePredicate` declares the matching `ESCAPE`. Anything else a query
-builder writes has to be spelled identically on both.
+builder writes has to be spelled identically on both. `Insert` is one
+such statement: the plain `INSERT` of a row whose key the caller
+supplies, the one `InsertReturningID` sends on MySQL before it reads the
+generated key back.
 
 A few more helpers keep a query portable where the obvious spelling is
 not. `AsText` casts a numeric column for a `LIKE` search, which SQL
@@ -448,6 +453,57 @@ as it was, and nil stays nil. An import records an `ErrRejected` against
 its row and goes on; any other error is the database's own, and the next
 row would fail the same way.
 
+### Repositories and services
+
+`crud` is the layer a service would otherwise write again for every
+table. A `TableSpec` describes the table, `BaseRepo` derives its
+`INSERT`, `UPDATE`, `DELETE` and `SELECT` from that description, and
+`BaseService` implements the `Service` contract over any repository
+whose key the database generates.
+
+```go
+var unitSpec = crud.TableSpec[Unit, int]{
+    Name:        "m_unit",
+    Alias:       "u",
+    Key:         "id",
+    Cols:        map[string]string{"id": "u.id", "nama": "u.nama"},
+    DefaultCols: []string{"id", "nama"},
+    Writable:    []string{"nama"},
+    SearchCols:  []string{"u.nama"},
+    SortCols:    []string{"u.nama"},
+    DefaultSort: "u.id",
+}
+
+type unitRepository struct {
+    crud.BaseRepo[Unit, int, UnitRepository]
+}
+
+func (r *unitRepository) Read(
+    ctx context.Context, opt UnitReadOption,
+) (crud.ReadResult[Unit], error) {
+    q, filter := r.Begin(opt.ReadOption)
+    if filter {
+        crud.AndEq(q, "u.jenis_id", "jenis_id", opt.JenisID)
+    }
+    return r.Fetch(ctx, q, opt.ListOption)
+}
+```
+
+The repository embeds `BaseRepo` by value and is handed `Create`,
+`Update`, `Patch` and `Delete`, and the scoped copies `WithTx`,
+`WithNamespace` and `WithYear`; what a `TableSpec` cannot describe it
+writes itself, with the same builders. `Begin` turns the shared read
+option into a lookup by key or a search, and `Fetch` runs the statement
+as a lookup, a page that is counted first, or a plain list.
+
+Nothing in `crud` logs a failure. Every error a repository returns names
+its table and method, as `m_unit.Update: <cause>`, except the
+`sql.ErrNoRows` of a write that matched no row, which comes back as is.
+On MySQL that count is the rows matched only under `ClientFoundRows`,
+which `database.New` sets; a pool opened any other way must set it too.
+Column names a statement writes are quoted when they are reserved on
+either engine, as table names are.
+
 ## HTTP
 
 ### request
@@ -457,21 +513,29 @@ Parameter helpers for Fiber v3 handlers.
 ```go
 id, err := request.ID(c, "id")          // /items/:id, positive int
 unit, err := request.QueryID(c, "unit") // ?unit=3, same rule as ID
+day, err := request.Date(c, "day")      // /days/:day, 2026-01-02
 ids := request.IDs(c, "ids")            // ?ids=1,2,3, junk skipped
 page, limit := request.Page(c)          // ?page=2&limit=50
 cols := request.Cols(c)                 // ?cols=code,name
 sort := request.Sort(c)                 // ?sort=t.code:desc,t.id
 name := request.StringPtr(c, "name")    // nil when absent or empty
 year := request.IntPtr(c, "year")       // nil unless a positive int
+from := request.DatePtr(c, "from")      // nil unless a 2026-01-02 date
 paid := request.BoolPtr(c, "paid")      // nil unless true/false/yes/no/1/0
 ```
 
-`ID` and `QueryID` are the two that can fail, each with a `*fiber.Error`
-carrying 400 that the caller returns unchanged. The rest correct bad
-input rather than reject it: a junk id is skipped, an unknown column is
-dropped by the repository's allowlist, and a `limit` outside
-`1..MaxLimit` becomes `DefaultLimit` — not the ceiling, so a client that
-asked for too much notices.
+`ID`, `QueryID` and `Date` are the three that can fail, each with a
+`*fiber.Error` carrying 400 that the caller returns unchanged. The rest
+correct bad input rather than reject it: a junk id is skipped, an
+unknown column is dropped by the repository's allowlist, a date bound in
+any other shape is no bound at all, and a `limit` outside `1..MaxLimit`
+becomes `DefaultLimit` — not the ceiling, so a client that asked for too
+much notices.
+
+`Date` and `DatePtr` return the date as text in `time.DateOnly`'s layout,
+because that text is what a repository binds and the engine compares; a
+looser spelling would reach SQL Server as a conversion error and come
+back as a 500.
 
 `DefaultPage`, `DefaultLimit` and `MaxLimit` are package variables. A
 service that serves wider pages assigns them at startup, before the first
@@ -1003,8 +1067,8 @@ goroutines, which only the race detector can hold them to:
 go test -race -tags integration -run Integration ./...
 ```
 
-`database` and `datetime` share two DSN variables, and each test runs
-once per engine whose DSN is set, skipping when neither is:
+`database`, `crud` and `datetime` share two DSN variables, and each
+test runs once per engine whose DSN is set, skipping when neither is:
 
 ```
 DB_TEST_MYSQL_DSN
@@ -1016,7 +1080,7 @@ DB_TEST_SQLSERVER_DSN
 The zone parameters are for `datetime`, and they have to name the zone
 the test process runs in (set `TZ` to be sure); a mismatch fails that
 suite, since it is the misconfiguration the package exists to expose.
-`database` passes with or without them.
+`database` and `crud` pass with or without them.
 
 These tests create and drop their own tables. Point the DSNs at a scratch
 database, never at one holding data.

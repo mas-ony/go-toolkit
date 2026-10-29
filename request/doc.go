@@ -1,6 +1,6 @@
 // Package request parses route parameters and query strings into the
-// shapes a service layer takes: ids, paging, sorting, column selection and
-// optional filters.
+// shapes a service layer takes: ids, dates, paging, sorting, column
+// selection and optional filters.
 //
 // Every helper takes a fiber.Ctx and returns a plain Go value. Nothing is
 // cached, nothing is stored, and no helper depends on another, so a handler
@@ -18,15 +18,16 @@
 //
 // # Bad input is not an error
 //
-// Every helper but ID and QueryID corrects or ignores what it cannot use —
-// an unknown sort column, a non-numeric entry in an id list, a page size
-// above the ceiling — and the request goes on.
+// Every helper but ID, QueryID and Date corrects or ignores what it cannot
+// use — an unknown sort column, a non-numeric entry in an id list, a page
+// size above the ceiling, a date bound in the wrong shape — and the
+// request goes on.
 //
 // Only a parameter that names the row to act on is worth a 400, because
 // nothing can stand in for it. A filter that cannot be parsed has an
 // obvious substitute, which is not to filter; a page size that cannot be
-// parsed has a default. An id does not: guessing one would act on the
-// wrong row.
+// parsed has a default. An id does not, nor does a date that keys a row:
+// guessing either would act on the wrong row.
 //
 // The cost is that a typo never shows. ?cols=nonsense drops every name and
 // the client receives more columns than it asked for rather than an error.
@@ -35,8 +36,9 @@
 //
 // # Nothing here writes a response
 //
-// ID and QueryID return a *fiber.Error, the caller returns it unchanged,
-// and the application's error handler renders one body from it.
+// ID, QueryID and Date return a *fiber.Error, the caller returns it
+// unchanged, and the application's error handler renders one body from
+// it.
 //
 // Writing the response here instead does not work, and the way it fails is
 // quiet. Fiber's JSON returns nil whenever encoding succeeds, so
@@ -47,21 +49,40 @@
 //
 // # What leaves this package is cloned
 //
-// A query value points into the request buffer, which Fiber reuses once
-// the handler returns unless the application is configured as immutable.
-// Anything that outlives the request — a value captured by a goroutine,
-// cached, or queued for a retry — would otherwise read whatever the next
-// request put there.
+// A query value or a route parameter points into the request buffer,
+// which Fiber reuses once the handler returns unless the application is
+// configured as immutable. Anything that outlives the request — a value
+// captured by a goroutine, cached, or queued for a retry — would otherwise
+// read whatever the next request put there.
 //
-// So Cols, Sort and StringPtr clone. IDs and IntPtr do not need to: they
-// return integers, which are copies already. BoolPtr returns a pointer to
-// a fresh local.
+// So Cols, Sort, StringPtr, Date and DatePtr clone. IDs and IntPtr do not
+// need to: they return integers, which are copies already. BoolPtr returns
+// a pointer to a fresh local.
 //
 // This is the rule most likely to be broken by a helper added later, and
 // the one whose breakage is least visible in a test: a single-request test
 // never reuses the buffer, so a missing clone passes everything until two
 // requests arrive in sequence under load. request_integration_test.go
 // exists for exactly that case.
+//
+// # Dates travel as text
+//
+// Date and DatePtr hand back "2026-01-02" as a string rather than as a
+// time.Time, because a repository binds the value as text and the engine
+// compares it as it stands. A time.Time would carry a time of day and a
+// zone, and each driver would pick its own way to send them. The layout
+// is time.DateOnly and nothing looser for the same reason: a looser parse
+// would pass on a spelling that MySQL compares only with a warning and
+// SQL Server refuses to convert at all, failing the whole statement with a
+// 500 for what was a malformed request.
+//
+// The check is of shape, not of range or of meaning. SQL Server's datetime
+// and smalldatetime refuse a day before 1753 and 1900 respectively when a
+// comparison converts it, and read this layout through the session's
+// DATEFORMAT, which a language with day-first order turns into
+// year-day-month. date and datetime2 read it as year-month-day in every
+// session. A column of the older types needs logins whose language keeps
+// month-first order, as us_english does.
 //
 // # Paging defaults are package state
 //
@@ -92,7 +113,8 @@
 // built by a real router, rather than a hand-made one, so the values under
 // test are the values a handler would actually receive: the defaults and
 // the ceiling, the junk-skipping in IDs, the three-way distinction in
-// BoolPtr, and the 400 shape from ID and QueryID.
+// BoolPtr, the shapes Date and DatePtr accept, and the 400 shape from ID,
+// QueryID and Date.
 //
 // request_integration_test.go covers the buffer-reuse rule, which a
 // single-request test cannot reach by construction. It fires requests in

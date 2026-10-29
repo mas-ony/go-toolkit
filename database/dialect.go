@@ -193,16 +193,15 @@ func unsupportedDriver(driver string) error {
 	return fmt.Errorf("%w: %q", ErrUnsupportedDriver, driver)
 }
 
-// insertMySQL is the MySQL half of InsertReturningID.
+// insertMySQL is the MySQL half of InsertReturningID: Insert, then the
+// key LastInsertId reports for the row.
 func insertMySQL(
 	ctx context.Context,
 	ext sqlx.ExtContext,
 	table, cols, vals string,
 	arg any,
 ) (int64, error) {
-	query := "INSERT INTO " + table + " (" + cols + ")" +
-		"\nVALUES (" + vals + ")"
-	res, err := sqlx.NamedExecContext(ctx, ext, query, arg)
+	res, err := Insert(ctx, ext, table, cols, vals, arg)
 	if err != nil {
 		return 0, err
 	}
@@ -360,7 +359,8 @@ func NowExpr() string {
 }
 
 // InsertReturningID inserts one row and returns the integer key the
-// database generated for it.
+// database generated for it. A row whose key the caller supplies has
+// nothing to fetch back, and is written with Insert.
 //
 // table is the target, already qualified; cols is the comma-separated
 // column list and vals the matching VALUES list, whose :name placeholders

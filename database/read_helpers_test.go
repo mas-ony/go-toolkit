@@ -2,74 +2,70 @@ package database
 
 // Tests for read_helpers.go.
 //
-// The clause builders inspect strings and open nothing. GetOne, CountQuery
-// and SelectList reach a driver, so they are exercised twice: here against
-// the fake at the top of this file, which is what makes their contract
-// hold on a plain `go test`, and in read_helpers_integration_test.go
-// against real servers, which is what shows the SQL they build is accepted.
+// The clause builders inspect strings and open nothing. GetOne,
+// CountQuery, SelectList and Insert reach a driver, so they are exercised
+// twice: here against the fake at the top of this file, which is what
+// makes their contract hold on a plain `go test`, and against real
+// servers, in read_helpers_integration_test.go and, for Insert, in the
+// transaction suite, which is what shows the SQL they build is accepted.
 
 import (
 	"context"
 	"database/sql/driver"
 	"errors"
-	"io"
 	"strings"
 	"sync"
 	"testing"
 
 	"github.com/jmoiron/sqlx"
+	"github.com/mas-ony/go-toolkit/internal/testutil"
+	"github.com/mas-ony/go-toolkit/internal/testutil/sqltest"
 )
 
-// seenQuery is one query as the driver received it, after BindNamed.
-type seenQuery struct {
-	query string
-	args  []driver.NamedValue
-}
-
 // queryDB is a driver that answers every query with the same canned result
-// and records what it was asked.
+// and every other statement, which only Insert sends, with one row
+// written, and records what it was asked.
 //
 // It is a second fake rather than a reuse of tx_test.go's, which serves
 // begin, commit and rollback and refuses statements outright. The two want
 // opposite things from a connection, and one fake doing both would make
 // each set of tests read around the other's scaffolding. What they do
-// share is what neither uses: a connector's Driver, from connectorBase,
-// and a conn's Prepare and Close, from connBase, both in tx_test.go.
+// share is what neither uses, a connector's Driver and a conn's Prepare
+// and Close, and the way they are opened, all of which are sqltest's. The
+// Log the statements are kept in is sqltest's as well, the one crud's
+// query fake keeps its statements in.
 //
-// Recording the query TEXT is half the point. These three helpers hand
-// their SQL to BindNamed before it reaches a driver, and what that rewrites
-// — the placeholders, and in CountQuery's case the wrapper around the whole
-// statement — is otherwise invisible until a server rejects it.
+// Recording the query TEXT is half the point. The helpers that reach a
+// driver hand their SQL to BindNamed before it does, and what that
+// rewrites — the placeholders, and in CountQuery's case the wrapper
+// around the whole statement — is otherwise invisible until a server
+// rejects it.
 type queryDB struct {
+	sqltest.Log
+
 	mu   sync.Mutex
 	cols []string
 	rows [][]driver.Value
 	err  error
-	seen []seenQuery
 }
 
 // queryConnector hands out connections to one queryDB, so that sql.OpenDB
 // can use the fake without registering a driver name.
 type queryConnector struct {
-	connectorBase
+	sqltest.ConnectorBase
 	db *queryDB
 }
 
-// queryConn implements driver.QueryerContext, which is what lets
-// database/sql skip Prepare entirely and hand the statement over in one
-// call, so connBase's refusing Prepare is never reached. A conn with only
-// Prepare would work too, at the cost of a Stmt type whose sole job is to
-// carry the query text to the same place.
+// queryConn implements driver.QueryerContext and driver.ExecerContext,
+// which is what lets database/sql skip Prepare entirely and hand the
+// statement over in one call, so sqltest's refusing Prepare is never
+// reached. A conn with only Prepare would work too, at the cost of a Stmt
+// type whose sole job is to carry the query text to the same place. No
+// helper here starts a transaction, so the Begin is sqltest's refusing
+// one as well.
 type queryConn struct {
-	connBase
+	sqltest.ConnBase
 	db *queryDB
-}
-
-// queryRows replays a canned result set, one row per Next.
-type queryRows struct {
-	cols []string
-	rows [][]driver.Value
-	i    int
 }
 
 // oneRow is the shape a single-row lookup scans into.
@@ -94,44 +90,16 @@ var (
 	testSortCols    = []string{"t.code", "t.title", "u.name"}
 )
 
-// selected joins expressions the way SelectClause does, so the cases below
-// read as column lists rather than as escaped strings.
-func selected(exprs ...string) string {
-	return strings.Join(exprs, ",\n       ")
-}
-
 // open returns a *sqlx.DB backed by this fake, bound as driverName.
 //
-// driverName never reaches a registry: openFake hands sql.OpenDB the
+// driverName never reaches a registry: sqltest.Open hands sql.OpenDB the
 // connector directly, so no mysql or sqlserver driver is involved and the
 // name's only job is to pick the placeholder style through sqlx.BindType.
 // That is exactly the coupling buildDSN's doc comment describes, which is
 // why the tests below run under both names.
 func (q *queryDB) open(t *testing.T, driverName string) *sqlx.DB {
 	t.Helper()
-	return openFake(t, &queryConnector{db: q}, driverName)
-}
-
-// lastQuery returns the most recent query, or a zero value if none ran.
-func (q *queryDB) lastQuery() seenQuery {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	if len(q.seen) == 0 {
-		return seenQuery{}
-	}
-	return q.seen[len(q.seen)-1]
-}
-
-// count returns how many queries reached the driver.
-func (q *queryDB) count() int {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	return len(q.seen)
-}
-
-// Begin refuses: the read helpers never start a transaction.
-func (c *queryConn) Begin() (driver.Tx, error) {
-	return nil, errors.New("fake: transactions are not supported")
+	return sqltest.Open(t, &queryConnector{db: q}, driverName)
 }
 
 // QueryContext records the query as the driver received it and answers
@@ -142,32 +110,35 @@ func (c *queryConn) QueryContext(
 	args []driver.NamedValue,
 ) (driver.Rows, error) {
 	q := c.db
+	q.Record(query, args)
 	q.mu.Lock()
-	q.seen = append(q.seen, seenQuery{query: query, args: args})
 	cols, rows, err := q.cols, q.rows, q.err
 	q.mu.Unlock()
 
 	if err != nil {
 		return nil, err
 	}
-	return &queryRows{cols: cols, rows: rows}, nil
+	return &sqltest.Rows{Cols: cols, Values: rows}, nil
 }
 
-// Columns returns the canned column names.
-func (r *queryRows) Columns() []string { return r.cols }
+// ExecContext records the statement as the driver received it and
+// reports one row written, or the canned error.
+func (c *queryConn) ExecContext(
+	_ context.Context,
+	query string,
+	args []driver.NamedValue,
+) (driver.Result, error) {
+	q := c.db
+	q.Record(query, args)
+	q.mu.Lock()
+	err := q.err
+	q.mu.Unlock()
 
-// Next copies the next canned row into dest, or reports io.EOF.
-func (r *queryRows) Next(dest []driver.Value) error {
-	if r.i >= len(r.rows) {
-		return io.EOF
+	if err != nil {
+		return nil, err
 	}
-	copy(dest, r.rows[r.i])
-	r.i++
-	return nil
+	return driver.RowsAffected(1), nil
 }
-
-// Close releases nothing; the rows live in memory.
-func (r *queryRows) Close() error { return nil }
 
 // Connect opens a connection onto the shared queryDB.
 func (c *queryConnector) Connect(context.Context) (driver.Conn, error) {
@@ -177,7 +148,7 @@ func (c *queryConnector) Connect(context.Context) (driver.Conn, error) {
 // SelectClause resolves a request the way activeCols does, emits each
 // expression once, and puts the key first when the request left it out.
 func TestSelectClause(t *testing.T) {
-	all := selected("t.id", "t.code", "t.title", "u.name AS unit_name")
+	all := sqltest.Selected("t.id", "t.code", "t.title", "u.name AS unit_name")
 	cases := []struct {
 		name string
 		cols []string
@@ -186,16 +157,16 @@ func TestSelectClause(t *testing.T) {
 		{"no request takes the defaults", nil, all},
 		{"empty request takes the defaults", []string{}, all},
 		{"a subset keeps the requested order", []string{"title", "code"},
-			selected("t.id", "t.title", "t.code")},
+			sqltest.Selected("t.id", "t.title", "t.code")},
 		{"unknown names are dropped", []string{"title", "bogus"},
-			selected("t.id", "t.title")},
+			sqltest.Selected("t.id", "t.title")},
 		{"all unknown falls back to the defaults", []string{"bogus"}, all},
 		{"the key is not repeated", []string{"id", "code"},
-			selected("t.id", "t.code")},
+			sqltest.Selected("t.id", "t.code")},
 		{"one expression appears once", []string{"key", "id", "code"},
-			selected("t.id", "t.code")},
+			sqltest.Selected("t.id", "t.code")},
 		{"a repeated name appears once", []string{"code", "code"},
-			selected("t.id", "t.code")},
+			sqltest.Selected("t.id", "t.code")},
 	}
 	for _, c := range cases {
 		got := SelectClause(c.cols, testAllowedCols, testDefaultCols, "id")
@@ -209,7 +180,7 @@ func TestSelectClause(t *testing.T) {
 // written in code, so it is the loud end of a misconfiguration.
 func TestSelectClausePanicsWhenNothingResolves(t *testing.T) {
 	allowed := map[string]string{"code": "t.code"}
-	mustPanic(t, "SelectClause with unknown defaults and pk", func() {
+	testutil.MustPanic(t, "SelectClause with unknown defaults and pk", func() {
 		SelectClause([]string{"bogus"}, allowed, []string{"missing"}, "gone")
 	})
 }
@@ -492,6 +463,11 @@ func TestReadHelpersRejectAnUnboundName(t *testing.T) {
 			return SelectList(context.Background(), db, query,
 				map[string]any{}, &dest)
 		}},
+		{"Insert", func(db *sqlx.DB) error {
+			_, err := Insert(context.Background(), db, "t", "id",
+				":missing", map[string]any{})
+			return err
+		}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			q := &queryDB{cols: []string{"id", "code"}}
@@ -500,8 +476,9 @@ func TestReadHelpersRejectAnUnboundName(t *testing.T) {
 			if err := c.run(db); err == nil {
 				t.Error("err = nil, want a binding failure")
 			}
-			if got := q.count(); got != 0 {
-				t.Errorf("%d queries reached the driver, want 0", got)
+			if got := len(q.Statements()); got != 0 {
+				t.Errorf("%d statements reached the driver, want 0",
+					got)
 			}
 		})
 	}
@@ -529,7 +506,7 @@ func TestCountQueryWrapsTheQueryInADerivedTable(t *testing.T) {
 
 	want := "\nSELECT COUNT(*)\nFROM (" +
 		strings.Replace(inner, ":min_grp", "?", 1) + ") sub"
-	if got := q.lastQuery().query; got != want {
+	if got := q.Last().Query; got != want {
 		t.Errorf("driver saw:\n%q\nwant:\n%q", got, want)
 	}
 }
@@ -547,12 +524,12 @@ func TestCountQueryIgnoresArgsTheTextDoesNotMention(t *testing.T) {
 		t.Fatalf("CountQuery: %v", err)
 	}
 
-	got := q.lastQuery().args
+	got := q.Last().Args
 	if len(got) != 1 {
 		t.Fatalf("driver saw %d args, want 1: %v", len(got), got)
 	}
-	if got[0].Value != int64(7) {
-		t.Errorf("arg = %v, want 7", got[0].Value)
+	if got[0] != int64(7) {
+		t.Errorf("arg = %v, want 7", got[0])
 	}
 	if len(args) != 3 {
 		t.Errorf("args map is now %v, want its three keys intact", args)
@@ -574,6 +551,49 @@ func TestSelectListLeavesANilSliceNil(t *testing.T) {
 	}
 	if dest != nil {
 		t.Errorf("dest = %v, want nil", dest)
+	}
+}
+
+// Insert hands the driver the plain INSERT, with the placeholders of the
+// driver name the pool was opened under and the values in column order,
+// and returns what the driver reported, or the driver's error.
+func TestInsert(t *testing.T) {
+	ctx := context.Background()
+	arg := map[string]any{"code": "A-1", "title": "first"}
+	for _, c := range []struct{ driver, want string }{
+		{"mysql", "INSERT INTO app.t (code, title)\nVALUES (?, ?)"},
+		{"sqlserver", "INSERT INTO app.t (code, title)" +
+			"\nVALUES (@p1, @p2)"},
+	} {
+		t.Run(c.driver, func(t *testing.T) {
+			q := &queryDB{}
+			db := q.open(t, c.driver)
+
+			res, err := Insert(ctx, db, "app.t", "code, title",
+				":code, :title", arg)
+			if err != nil {
+				t.Fatalf("Insert: %v", err)
+			}
+			if n, err := res.RowsAffected(); err != nil || n != 1 {
+				t.Errorf("RowsAffected = %d, %v; want 1", n, err)
+			}
+			got := q.Last()
+			if got.Query != c.want {
+				t.Errorf("driver saw %q, want %q", got.Query, c.want)
+			}
+			if len(got.Args) != 2 || got.Args[0] != "A-1" ||
+				got.Args[1] != "first" {
+				t.Errorf("args = %v, want [A-1 first]", got.Args)
+			}
+		})
+	}
+
+	boom := errors.New("boom")
+	q := &queryDB{err: boom}
+	_, err := Insert(ctx, q.open(t, "mysql"), "app.t", "code",
+		":code", arg)
+	if !errors.Is(err, boom) {
+		t.Errorf("err = %v, want the driver's error", err)
 	}
 }
 
@@ -600,7 +620,7 @@ func TestBindNamedFollowsTheDriverName(t *testing.T) {
 				map[string]any{"id": 1}, &dest); err != nil {
 				t.Fatalf("GetOne: %v", err)
 			}
-			if got := q.lastQuery().query; got != c.want {
+			if got := q.Last().Query; got != c.want {
 				t.Errorf("driver saw %q, want %q", got, c.want)
 			}
 		})

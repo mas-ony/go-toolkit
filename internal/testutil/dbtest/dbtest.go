@@ -99,3 +99,20 @@ func ScratchTable(t *testing.T, db *sqlx.DB, name, ddl string) string {
 	t.Cleanup(func() { _, _ = db.Exec("DROP TABLE " + name) })
 	return name
 }
+
+// QuotedScratchTable is ScratchTable for a name only a quoted identifier
+// can hold: the one Unique returns for prefix followed by a backtick, a
+// closing bracket and a space. The space keeps the name from parsing bare
+// on either engine, and the backtick and the bracket are what MySQL's
+// quoting and SQL Server's each have to escape, so a statement reaches
+// the table only when the code under test quotes the name, and quotes it
+// right. quote renders the name for the engine in use, and the name is
+// returned as it was before quoting.
+func QuotedScratchTable(
+	t *testing.T, db *sqlx.DB, quote func(string) string, prefix, ddl string,
+) string {
+	t.Helper()
+	name := Unique(prefix + "`] ")
+	ScratchTable(t, db, quote(name), ddl)
+	return name
+}

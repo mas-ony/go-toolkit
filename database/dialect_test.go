@@ -81,15 +81,6 @@ var dialectHelpers = []struct {
 	},
 }
 
-// mustPanic reports an error unless f panics. testutil.CapturePanic does
-// the recovering.
-func mustPanic(t *testing.T, name string, f func()) {
-	t.Helper()
-	if testutil.CapturePanic(f) == nil {
-		t.Errorf("%s did not panic", name)
-	}
-}
-
 // withoutDialect clears the selection until the test ends.
 func withoutDialect(t *testing.T) {
 	t.Helper()
@@ -169,7 +160,7 @@ func TestHelpersPanicWithoutDialect(t *testing.T) {
 		},
 	}
 	for name, f := range helpers {
-		mustPanic(t, name, f)
+		testutil.MustPanic(t, name, f)
 	}
 }
 
@@ -178,7 +169,8 @@ func TestHelpersPanicWithoutDialect(t *testing.T) {
 func TestSetDialectRejectsInvalidValues(t *testing.T) {
 	withoutDialect(t)
 	for _, d := range nonGrammars {
-		mustPanic(t, "SetDialect("+d.String()+")", func() { SetDialect(d) })
+		testutil.MustPanic(t, "SetDialect("+d.String()+")",
+			func() { SetDialect(d) })
 	}
 	if got := selectedDialect.Load(); got != 0 {
 		t.Errorf("a rejected SetDialect stored %d", got)
@@ -456,10 +448,10 @@ func TestDialectMethodsPanicOnANonGrammar(t *testing.T) {
 	withDialect(t, DialectMySQL)
 	for _, d := range nonGrammars {
 		for _, h := range dialectHelpers {
-			mustPanic(t, h.name+" on "+d.String(),
+			testutil.MustPanic(t, h.name+" on "+d.String(),
 				func() { _ = h.method(d) })
 		}
-		mustPanic(t, "InsertReturningID on "+d.String(), func() {
+		testutil.MustPanic(t, "InsertReturningID on "+d.String(), func() {
 			_, _ = d.InsertReturningID(context.Background(), nil,
 				"t", "a", ":a", "id", struct{}{})
 		})

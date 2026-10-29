@@ -251,9 +251,8 @@ func TestQualifyMethodResolvesTheGrammarLazily(t *testing.T) {
 		"app2026.invoice" {
 		t.Errorf("plain name = %q, want app2026.invoice", got)
 	}
-	mustPanic(t, "Qualify with a reserved name on Dialect(0)", func() {
-		_ = noGrammar.Qualify("app2026", "user")
-	})
+	testutil.MustPanic(t, "Qualify with a reserved name on Dialect(0)",
+		func() { _ = noGrammar.Qualify("app2026", "user") })
 
 	for _, c := range []struct {
 		d    Dialect

@@ -2,8 +2,9 @@ package testutil
 
 // Tests for testutil.go: a variable set for a test comes back when the
 // test ends, whether it was set to a new value or only snapshotted; a
-// panic arrives as a value; a recording of one entry hands it over and
-// any other count fails; a file lands where it was asked to, with its
+// panic arrives as a value; a call that should panic and returns is
+// reported by its name; a recording of one entry hands it over and any
+// other count fails; a file lands where it was asked to, with its
 // directories; a pattern lists the package's own files and fails naming
 // itself when it is malformed or lists none; a source file parses with
 // its comments, and one that does not parse fails naming its path; a mode
@@ -28,7 +29,8 @@ import (
 // fatal is a testing.TB whose Fatalf records the message and panics,
 // which is how a test can watch a helper fail without failing itself:
 // CapturePanic catches the panic, and the message is what the helper
-// would have reported.
+// would have reported. Its Errorf records the message and returns, as an
+// error a helper reports lets the test go on.
 type fatal struct {
 	testing.TB
 	msg string
@@ -45,6 +47,12 @@ func (f *fatal) Helper() {}
 func (f *fatal) Fatalf(format string, args ...any) {
 	f.msg = fmt.Sprintf(format, args...)
 	panic(f)
+}
+
+// Errorf records the message and returns, leaving the helper to go on the
+// way the real Errorf leaves a test to.
+func (f *fatal) Errorf(format string, args ...any) {
+	f.msg = fmt.Sprintf(format, args...)
 }
 
 // Set holds the new value for the life of the test and restores the old
@@ -78,6 +86,21 @@ func TestCapturePanic(t *testing.T) {
 	}
 	if got := CapturePanic(func() {}); got != nil {
 		t.Errorf("CapturePanic = %v, want nil", got)
+	}
+}
+
+// MustPanic says nothing of a call that panics, and reports one that
+// returns by the name it was given, without stopping the test.
+func TestMustPanic(t *testing.T) {
+	t.Parallel()
+	f := &fatal{TB: t}
+	MustPanic(f, "boom", func() { panic("boom") })
+	if f.msg != "" {
+		t.Errorf("MustPanic reported a call that panicked: %q", f.msg)
+	}
+	MustPanic(f, "quiet", func() {})
+	if want := "quiet did not panic"; f.msg != want {
+		t.Errorf("MustPanic reported %q, want %q", f.msg, want)
 	}
 }
 
