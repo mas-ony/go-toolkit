@@ -9,8 +9,9 @@ package testutil
 // itself when it is malformed or lists none; a source file parses with
 // its comments, and one that does not parse fails naming its path; a mode
 // set for a test comes back when it ends; the filesystem probe leaves
-// nothing behind; the root check skips exactly when it should; and the
-// fake token passes config's check of a real one.
+// nothing behind; the root check skips exactly when it should; a buffer
+// written from many goroutines keeps every write, and a copy of it keeps
+// what it held; and the fake token passes config's check of a real one.
 
 import (
 	"fmt"
@@ -20,6 +21,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -256,6 +258,30 @@ func TestChmod(t *testing.T) {
 	})
 	if got := mode(); got != before {
 		t.Errorf("mode = %o after the test, want %o", got, before)
+	}
+}
+
+// Writes from many goroutines all land whole, and a copy taken with Bytes
+// keeps what it held when a later write arrives. Run with -race, or the
+// first half proves little.
+func TestSyncBuffer(t *testing.T) {
+	t.Parallel()
+	const writers = 16
+	var b SyncBuffer
+	var wg sync.WaitGroup
+	for range writers {
+		wg.Go(func() { _, _ = b.Write([]byte("line\n")) })
+	}
+	wg.Wait()
+	if got := strings.Count(b.String(), "line\n"); got != writers {
+		t.Errorf("String holds %d lines, want %d", got, writers)
+	}
+
+	held := b.Bytes()
+	_, _ = b.Write([]byte("later\n"))
+	if got := strings.Count(string(held), "\n"); got != writers {
+		t.Errorf("the copy holds %d lines after a later write, want %d",
+			got, writers)
 	}
 }
 

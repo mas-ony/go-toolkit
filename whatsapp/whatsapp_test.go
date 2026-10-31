@@ -1,7 +1,6 @@
 package whatsapp
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"go/ast"
@@ -15,18 +14,6 @@ import (
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/types"
 )
-
-// safeBuffer is a zerolog sink that survives -race.
-//
-// Only Disconnect and the success paths log, and no test here reaches
-// either concurrently: against a nil client every send fails before its
-// success line. The mutex is here so that TestSendIsSafeForConcurrentUse
-// stays a test of the Service rather than of whether bytes.Buffer tolerates
-// concurrent writes, should a send path ever log on failure.
-type safeBuffer struct {
-	mu  sync.Mutex
-	buf bytes.Buffer
-}
 
 // Every test in this file drives a Service whose client field is a NIL
 // *whatsmeow.Client. That is not a shortcut around a missing fake — it is the
@@ -130,7 +117,7 @@ func assertPhoneInError(t *testing.T, err error, prefix, wantPhone string) {
 // assertNoOp checks the two signs that a send returned before reaching the
 // client: no error, which a nil client makes impossible on any path that
 // reaches it, and no log line.
-func assertNoOp(t *testing.T, err error, out *safeBuffer) {
+func assertNoOp(t *testing.T, err error, out *testutil.SyncBuffer) {
 	t.Helper()
 
 	if err != nil {
@@ -163,27 +150,20 @@ func sameError(a, b error) bool {
 // a test can see it; the levels this package emits are all Info, but a future
 // Debug line should be visible here without anyone having to work out why it
 // is not.
-func newTestService(t *testing.T) (*Service, *safeBuffer) {
+//
+// The buffer is a testutil.SyncBuffer, a sink that survives -race. Only
+// Disconnect and the success paths log, and no test here reaches either
+// concurrently: against a nil client every send fails before its success
+// line. The lock is there so that TestSendIsSafeForConcurrentUse stays a
+// test of the Service rather than of whether bytes.Buffer tolerates
+// concurrent writes, should a send path ever log on failure.
+func newTestService(t *testing.T) (*Service, *testutil.SyncBuffer) {
 	t.Helper()
-	out := &safeBuffer{}
+	out := &testutil.SyncBuffer{}
 	return &Service{
 		client: nil,
 		log:    zerolog.New(out).Level(zerolog.DebugLevel),
 	}, out
-}
-
-// Write appends p under the lock.
-func (b *safeBuffer) Write(p []byte) (int, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.Write(p)
-}
-
-// String returns everything written so far, under the lock.
-func (b *safeBuffer) String() string {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.String()
 }
 
 // TestNilClientIsTheTestingSeam pins the upstream nil guards this whole file

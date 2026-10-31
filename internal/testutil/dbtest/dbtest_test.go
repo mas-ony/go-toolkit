@@ -2,20 +2,28 @@ package dbtest
 
 // Tests for dbtest.go that need no server: the engines are the two the
 // database package opens, a suite runs once per DSN that is set and is
-// skipped when none is, scratch names do not repeat, and a scratch table
+// skipped when none is, a connection answers and is closed when the test
+// that opened it ends, scratch names do not repeat, and a scratch table
 // whose name has to be quoted is created and dropped under the quoted
 // name and handed back unquoted.
 
 import (
 	"context"
+	"database/sql"
 	"database/sql/driver"
 	"reflect"
 	"strings"
 	"testing"
 
+	"github.com/jmoiron/sqlx"
 	"github.com/mas-ony/go-toolkit/internal/dbdriver"
 	"github.com/mas-ony/go-toolkit/internal/testutil/sqltest"
 )
+
+// openDriver is a driver whose every connection is a recorder keeping to
+// a log nobody reads, so Connect has something to open and ping that needs
+// no server.
+type openDriver struct{}
 
 // recorderConnector opens recorders that all keep to one log.
 type recorderConnector struct {
@@ -30,6 +38,14 @@ type recorder struct {
 	log *sqltest.Log
 }
 
+// fakeEngine is the engine openDriver is registered as. It is registered
+// once per test binary, because database/sql panics on a second
+// registration of one name.
+var fakeEngine = func() Engine {
+	sql.Register("dbtest-fake", openDriver{})
+	return Engine{Driver: "dbtest-fake"}
+}()
+
 // Connect opens a recorder onto the connector's log.
 func (c recorderConnector) Connect(context.Context) (driver.Conn, error) {
 	return recorder{log: c.log}, nil
@@ -41,6 +57,11 @@ func (r recorder) ExecContext(
 ) (driver.Result, error) {
 	r.log.Record(query, args)
 	return driver.RowsAffected(0), nil
+}
+
+// Open opens a recorder onto a log of its own.
+func (openDriver) Open(string) (driver.Conn, error) {
+	return recorder{log: &sqltest.Log{}}, nil
 }
 
 // Both engines are listed, MySQL first, each under a driver name the
@@ -95,6 +116,25 @@ func TestEachRunsPerDSN(t *testing.T) {
 	})
 	if len(seen) != 1 || seen[0] != "mysql user:pass@tcp(db:3306)/scratch" {
 		t.Errorf("ran %v, want one mysql run with its DSN", seen)
+	}
+}
+
+// Connect hands over a connection that answers, and closes it once the
+// test that asked for it ends.
+func TestConnect(t *testing.T) {
+	t.Parallel()
+	var db *sqlx.DB
+	opened := t.Run("open", func(t *testing.T) {
+		db = Connect(t, fakeEngine, "")
+		if err := db.Ping(); err != nil {
+			t.Errorf("Ping inside the test: %v", err)
+		}
+	})
+	if !opened {
+		return
+	}
+	if err := db.Ping(); err == nil {
+		t.Error("the connection is still open after the test ended")
 	}
 }
 

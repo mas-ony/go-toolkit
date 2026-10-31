@@ -3,8 +3,9 @@
 Shared Go packages for the HTTP services in this stack: typed
 configuration, a SQL layer that speaks both MySQL and SQL Server, the
 repository and service bases built on it, spreadsheet reading and
-import, upload handling, and the request and response shapes every
-service uses.
+import, upload handling, the request and response shapes and the error
+handling every service uses, an HTTP client, logging, and email,
+Telegram and WhatsApp notifications.
 
 Everything here, `examples/` aside, is a library. Nothing starts a server
 or reads a config file, and the only process-wide state is the handful of
@@ -37,6 +38,7 @@ go get github.com/mas-ony/go-toolkit
 | `logger`     | zerolog configured per environment                 |
 | `request`    | Fiber route and query parameter helpers            |
 | `response`   | The JSON envelope every handler returns            |
+| `server`     | Error, panic and rate-limit handlers for Fiber     |
 | `telegram`   | Sends text or documents as a Telegram bot          |
 | `whatsapp`   | Pairs a device and sends text or documents         |
 | `xlsx`       | Reads a workbook against an expected layout        |
@@ -45,23 +47,39 @@ Each package is one directory, and each carries a `doc.go` holding the
 contract and the reasoning behind it. This file is the map; `doc.go` is
 the detail.
 
-A rule more than one package applies is written once, under `internal/`:
-`internal/upstream` for checking, trimming and quoting the address of a
-server the toolkit talks to, the mark a masked credential leaves, the
-form an HTTP method is compared in, the statuses its answers succeed
-with and how much of one is kept, the range a port falls in, the words a
-key left unset and a section never built are refused in, and how a
-section left out is told from one filled in wrong;
-`internal/strlist` for comma-separated lists and the form a configured
-word is read in; `internal/dbdriver` for the driver names and encrypt
-modes `config` validates and `database` connects with;
-`internal/basename` for the path elements that name no file, which
-`fileutil` folds onto its fallback name and `xlsx` refuses as a link
-target; and `internal/bytesize` for how a limit counted in bytes is named
-in a message, which `fileutil` names its upload cap by and `xlsx` its
-unzip cap. A service cannot import any of them; they are how the packages
-above agree with each other. Test helpers that the suites of more than
-one package use live the same way, under `internal/testutil`.
+A rule more than one package applies is written once, under `internal/`,
+so the packages that apply it cannot drift apart:
+
+- `internal/upstream`: checking, trimming and quoting the address of a
+  server the toolkit talks to, the hosts a credential may reach in clear
+  text, the mark a masked credential leaves, the form an HTTP method is
+  compared in, the statuses its answers succeed with and how much of one
+  is kept, how a failed step of an exchange is reported, the range a
+  port falls in, the words a key left unset and a section never built
+  are refused in, and how a section left out is told from one filled in
+  wrong.
+- `internal/strlist`: comma-separated lists, and the form a configured
+  word is read in.
+- `internal/dbdriver`: the driver names and encrypt modes `config`
+  validates and `database` connects with.
+- `internal/basename`: the path elements that name no file, which
+  `fileutil` folds onto its fallback name and `xlsx` refuses as a link
+  target.
+- `internal/bytesize`: how a limit counted in bytes is named in a
+  message, which `fileutil` names its upload cap by and `xlsx` its unzip
+  cap.
+
+A service cannot import any of them; they are how the packages above
+agree with each other.
+
+Test helpers follow the same rule: one that a single suite needs stays
+in that package's `_test.go` files, and one that two or more need lives
+under `internal/testutil`, so the copies cannot differ. `testutil` itself
+needs only the standard library; beneath it, `sqltest` fakes a
+`database/sql` driver, `dbtest` runs a suite against each real server
+whose DSN is set, `xlsxtest` builds workbooks with excelize, and
+`fibertest` serves an app on a loopback port. They are split by what
+they link, so a test binary carries only what its helpers need.
 
 ## Config
 
@@ -104,12 +122,13 @@ config type, so each drops straight into the call that takes it:
 JWT and Client are plain structs. Two carry a method for a value only the
 application holds — build the access logger from
 `cfg.Zerolog.WithLogger(log)` and the recover middleware from
-`cfg.Recover.WithStackTraceHandler(h)`. Skipping either is not an error:
-the middleware falls back to its own stderr writer, and the service logs
-in two formats. Fiber's `ErrorHandler` and Listen's `GracefulContext` are
-the application's as well, assigned on the copy it passes: without the
-first an error answers in plain text, and without the second
-`fiber.listen.shutdown_timeout` is read by nothing.
+`cfg.Recover.WithStackTraceHandler(h)`, with `h` from
+[`server`](#server). Skipping either is not an error: the middleware falls
+back to its own stderr writer, and the service logs in two formats.
+Fiber's `ErrorHandler`, which `server` supplies too, and Listen's
+`GracefulContext` are the application's as well, assigned on the copy it
+passes: without the first an error answers in plain text, and without the
+second `fiber.listen.shutdown_timeout` is read by nothing.
 
 Four of them configure the middleware every request passes through —
 Zerolog, RequestID, Recover and Limiter — and assume one order, outermost
@@ -118,9 +137,12 @@ carries: every request logged, a panic's stack trace carrying the request
 id, a panic in the limiter recovered.
 
 ```go
+field := cfg.Zerolog.RequestIDField()
+
 app.Use(fiberzerolog.New(cfg.Zerolog.WithLogger(log)))
 app.Use(requestid.New(*cfg.RequestID.Config))
-app.Use(fiberrecover.New(cfg.Recover.WithStackTraceHandler(onPanic)))
+app.Use(fiberrecover.New(cfg.Recover.WithStackTraceHandler(
+    server.StackTraceHandler(log, field))))
 app.Use(limiter.New(*cfg.Limiter.Config))
 ```
 
@@ -423,10 +445,10 @@ match on `sql.ErrNoRows`.
 
 ```go
 err := database.WithTx(db, func(tx *sqlx.Tx) error {
-    if err := repoA.WithTx(tx).Delete(id); err != nil {
+    if err := repoA.WithTx(tx).Delete(ctx, id); err != nil {
         return err
     }
-    return repoB.WithTx(tx).Delete(id)
+    return repoB.WithTx(tx).Delete(ctx, id)
 })
 ```
 
@@ -568,6 +590,38 @@ as `null` instead of `[]`.
 once for both directions: a handler encodes a `Response`, and a client
 decodes into `Envelope[T]` for the type it expects, which is what
 `httpclient.Envelope` names.
+
+### server
+
+The handlers that close over the application's logger, which is why
+`config` builds every `fiber.*` section and leaves these out.
+
+```go
+field := cfg.Zerolog.RequestIDField()
+
+fiberCfg := *cfg.Fiber.Config
+fiberCfg.ErrorHandler = server.ErrorHandler(log, field)
+app := fiber.New(fiberCfg)
+```
+
+`ErrorHandler` renders every error a route returns in `response`'s
+envelope. A `*fiber.Error` keeps its status and its message, which has to
+be safe to show; anything else is logged in full and answered 500 with
+`internal server error`, so a driver's text never reaches a client. A
+body over `fiber.body_limit` is logged as well: fasthttp refuses it
+before routing, so the access log reads 200, and this line is the only
+record of the 413.
+
+`StackTraceHandler` logs a recovered panic with its stack; the recover
+middleware calls it only under `fiber.recover.enable_stack_trace`.
+`LimitReached` goes on the copy of the limiter's config and answers a
+client over its quota with a 429 in the same envelope, where the
+limiter's own default is plain text; the `Retry-After` header is kept.
+
+Every line either handler logs carries the request id under `field`, the
+key the access log uses, with the method and the path, so it can be
+joined to the request's access log line. That needs `requestid` outside
+every route, in the order shown under [Config](#config).
 
 ### httpclient
 
@@ -1085,12 +1139,12 @@ suite, since it is the misconfiguration the package exists to expose.
 These tests create and drop their own tables. Point the DSNs at a scratch
 database, never at one holding data.
 
-`fileutil`'s suites, unit and integration alike, carry a `unix` build
-constraint, because the permission tests need `syscall.Umask`, so they run
-only on Unix-like systems. A test that needs what the machine cannot
-provide — a case-sensitive filesystem, an unprivileged user, symlinks, a
-zone other than UTC, a DSN — skips rather than fails, so a skip means the
-claim was not checked there.
+The suites for `fileutil.go`, unit and integration alike, carry a `unix`
+build constraint, because the permission tests need `syscall.Umask`, so
+they run only on Unix-like systems. A test that needs what the machine
+cannot provide — a case-sensitive filesystem, an unprivileged user,
+symlinks, a zone other than UTC, a DSN — skips rather than fails, so a
+skip means the claim was not checked there.
 
 An integration file here does not mean "the same tests, now with real
 I/O". The unit suites already write real workbooks, serve real HTTP and

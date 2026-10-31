@@ -5,17 +5,17 @@ go 1.27.3
 require (
 	github.com/bytedance/sonic v1.15.5
 	github.com/go-sql-driver/mysql v1.10.1
-	github.com/gofiber/contrib/v3/zerolog v1.1.8
+	github.com/gofiber/contrib/v3/zerolog v1.1.9
 	github.com/gofiber/fiber/v3 v3.6.1
 	github.com/jmoiron/sqlx v1.4.0
 	github.com/mdp/qrterminal/v3 v3.2.1
 	github.com/microsoft/go-mssqldb v1.11.2
-	github.com/ncruces/go-sqlite3 v0.35.6
+	github.com/ncruces/go-sqlite3 v0.36.0
 	github.com/rs/zerolog v1.35.1
 	github.com/shopspring/decimal v1.6.0
 	github.com/spf13/viper v1.21.0
 	github.com/xuri/excelize/v2 v2.11.0
-	go.mau.fi/whatsmeow v0.0.0-20261028111316-d24d079a3755
+	go.mau.fi/whatsmeow v0.0.0-20261030195514-56e5ad0581ce
 	google.golang.org/protobuf v1.36.12
 )
 
@@ -30,7 +30,7 @@ require (
 	github.com/fsnotify/fsnotify v1.10.1 // indirect
 	github.com/fxamacker/cbor/v2 v2.10.0 // indirect
 	github.com/go-viper/mapstructure/v2 v2.5.0 // indirect
-	github.com/gofiber/schema v1.9.1 // indirect
+	github.com/gofiber/schema v1.9.2 // indirect
 	github.com/gofiber/utils/v2 v2.6.3 // indirect
 	github.com/golang-sql/civil v0.0.0-20220223132316-b832511892a9 // indirect
 	github.com/golang-sql/sqlexp v0.1.0 // indirect
@@ -40,10 +40,10 @@ require (
 	github.com/mattn/go-colorable v0.1.16 // indirect
 	github.com/mattn/go-isatty v0.0.24 // indirect
 	github.com/molecule-man/go-brrr v1.3.1 // indirect
-	github.com/ncruces/go-sqlite3-wasm/v6 v6.3.35401 // indirect
+	github.com/ncruces/go-sqlite3-wasm/v6 v6.4.35401 // indirect
 	github.com/ncruces/julianday v1.0.0 // indirect
 	github.com/pelletier/go-toml/v2 v2.4.3 // indirect
-	github.com/petermattis/goid v0.0.0-20260918085751-abfca077860b // indirect
+	github.com/petermattis/goid v0.0.0-20261030104850-e60ce7d9a607 // indirect
 	github.com/philhofer/fwd v1.2.1 // indirect
 	github.com/richardlehane/mscfb v1.0.9 // indirect
 	github.com/richardlehane/msoleps v1.0.6 // indirect

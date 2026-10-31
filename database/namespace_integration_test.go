@@ -100,13 +100,9 @@ func TestIntegrationQualifiedNamesParse(t *testing.T) {
 		for _, name := range names {
 			qualified := Qualify(ns, name)
 			bare := Qualify("", name)
-			dbtest.Exec(t, db,
-				"DROP TABLE IF EXISTS "+qualified,
-				"CREATE TABLE "+qualified+" (id INT NOT NULL)",
-			)
-			t.Cleanup(func() {
-				_, _ = db.Exec("DROP TABLE IF EXISTS " + qualified)
-			})
+			dbtest.Exec(t, db, "DROP TABLE IF EXISTS "+qualified)
+			dbtest.ScratchTable(t, db, qualified,
+				"CREATE TABLE %s (id INT NOT NULL)")
 			dbtest.Exec(t, db,
 				"INSERT INTO "+qualified+" (id) VALUES (1)",
 				"INSERT INTO "+bare+" (id) VALUES (2)",

@@ -892,8 +892,7 @@ func TestWithReturnsScopedCopies(t *testing.T) {
 // NewBaseRepo copies the default namespace as it stands at the call, so a
 // later Configure leaves an existing repository alone.
 func TestNewBaseRepoCopiesTheDefaultNamespace(t *testing.T) {
-	prev := database.DefaultNamespace
-	t.Cleanup(func() { database.Configure(prev) })
+	testutil.Set(t, &database.DefaultNamespace, database.DefaultNamespace)
 
 	f := &fakeDB{}
 	db := f.open(t, "mysql")

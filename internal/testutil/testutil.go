@@ -1,13 +1,24 @@
 package testutil
 
 import (
+	"bytes"
 	"go/ast"
 	"go/parser"
 	"go/token"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 )
+
+// SyncBuffer is a bytes.Buffer one goroutine may write while another reads
+// it: the sink of a logger that a server's goroutine writes to and the test
+// driving the server reads, which has to hold under -race. Its zero value
+// is ready to use.
+type SyncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
 
 // BotToken is a Telegram bot token in the shape BotFather issues — the
 // bot's numeric id, a colon, then letters, digits, underscores and
@@ -160,4 +171,26 @@ func CaseSensitiveDir(t testing.TB, dir string) bool {
 	defer func() { _ = os.Remove(probe) }()
 	_, err := os.Stat(filepath.Join(dir, ".CASE-PROBE"))
 	return err != nil
+}
+
+// Write appends p under the lock.
+func (b *SyncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+// Bytes returns a copy of everything written so far, which later writes
+// leave as it is.
+func (b *SyncBuffer) Bytes() []byte {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return bytes.Clone(b.buf.Bytes())
+}
+
+// String returns everything written so far.
+func (b *SyncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }

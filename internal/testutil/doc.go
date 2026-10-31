@@ -1,7 +1,8 @@
 // Package testutil holds the test helpers more than one package of the
 // toolkit needs: a package variable set for one test and restored, a panic
 // caught as a value, a call that has to panic, what a fake server recorded
-// reduced to the one entry a test expects, a file written with the
+// reduced to the one entry a test expects, a buffer a logger writes from
+// another goroutine while the test reads it, a file written with the
 // directories above it, the files a suite that reads its own package's
 // source lists and each one parsed, a mode set for one test and restored,
 // the two things a filesystem test has to ask of the machine it runs on,

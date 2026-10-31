@@ -110,12 +110,7 @@ func open(t *testing.T, e dbtest.Engine, dsn string, found bool) *sqlx.DB {
 		cfg.ClientFoundRows = found
 		dsn = cfg.FormatDSN()
 	}
-	db, err := sqlx.Connect(e.Driver, dsn)
-	if err != nil {
-		t.Fatalf("connect: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-	return db
+	return dbtest.Connect(t, e, dsn)
 }
 
 // forEachEngine runs fn once per engine whose DSN is set, with a

@@ -51,18 +51,26 @@ func Each(t *testing.T, fn func(t *testing.T, e Engine, dsn string)) {
 	}
 }
 
-// ForEach is Each with the connection opened: fn is handed an open
-// database rather than a DSN. A server that refuses the connection fails
-// its subtest, and the connection is closed when the subtest ends.
+// Connect opens dsn with e's driver and checks that the server answers. A
+// server that refuses the connection fails the test, and the connection is
+// closed when the test ends. ForEach connects through it, and so does a
+// suite that has to change the DSN Each hands it before connecting.
+func Connect(t *testing.T, e Engine, dsn string) *sqlx.DB {
+	t.Helper()
+	db, err := sqlx.Connect(e.Driver, dsn)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	return db
+}
+
+// ForEach is Each with the connection opened through Connect: fn is
+// handed an open database rather than a DSN.
 func ForEach(t *testing.T, fn func(t *testing.T, e Engine, db *sqlx.DB)) {
 	t.Helper()
 	Each(t, func(t *testing.T, e Engine, dsn string) {
-		db, err := sqlx.Connect(e.Driver, dsn)
-		if err != nil {
-			t.Fatalf("connect: %v", err)
-		}
-		t.Cleanup(func() { _ = db.Close() })
-		fn(t, e, db)
+		fn(t, e, Connect(t, e, dsn))
 	})
 }
 
