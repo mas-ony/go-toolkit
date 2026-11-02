@@ -13,7 +13,7 @@ package config
 //
 // The app section is the vehicle here, because it is small and every
 // deployment has one. What is under test is the wiring, which is the same
-// for every section; the contract suite in sections_test.go separately
+// for every section; the contract suite in section_test.go separately
 // checks that each section's documented spellings follow the rule these
 // tests prove. Two cases need something the app section lacks: the
 // underscored-key case reads database.max_open_conns, since no app key has

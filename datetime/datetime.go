@@ -112,9 +112,9 @@ func parse(s string) (time.Time, error) {
 	// quotes are removed with a cutset rather than a JSON unquote:
 	// strings.Trim removes EVERY leading and trailing " character, not just
 	// one pair. That is deliberate laxity — it lets the same routine serve
-	// UnmarshalJSON, which receives a quoted JSON token, and Scan's string
-	// path, which receives a bare value that the caller has wrapped in quotes
-	// purely to reuse this code.
+	// UnmarshalJSON, which receives a quoted JSON token, and UnmarshalText,
+	// which receives bare text, from a query string or from Scan's text
+	// cases, and has no quotes to strip.
 	//
 	// The outer trim runs first so that whitespace OUTSIDE the quotes
 	// does not stop the cutset from reaching them. encoding/json never
@@ -241,12 +241,17 @@ func (d *Datetime) UnmarshalText(b []byte) error {
 //     configured to decode time columns natively: MySQL with
 //     parseTime=true, and go-mssqldb, which returns time.Time for its date
 //     and time column types.
-//   - []byte    → wrapped in double-quote bytes and delegated to
-//     UnmarshalJSON. Fallback for MySQL without parseTime=true, or for any
-//     driver that returns a raw byte slice for a time column.
-//   - string    → wrapped in double-quote bytes and delegated to
-//     UnmarshalJSON. Fallback for drivers or query results that stringify
-//     time columns, such as a character column holding ISO 8601 text.
+//   - []byte    → delegated to UnmarshalText, which reads bare text by
+//     the layouts UnmarshalJSON reads. Fallback for MySQL without
+//     parseTime=true, or for any driver that returns a raw byte slice for
+//     a time column.
+//   - string    → delegated to UnmarshalText the same way. Fallback for
+//     drivers or query results that stringify time columns, such as a
+//     character column holding ISO 8601 text.
+//
+// Both text cases read the value and keep nothing of it. A []byte may be
+// a scan buffer the driver refills for the next row, and nothing here
+// writes into it, past its length or within it.
 //
 // Any other type returns a descriptive error that includes the concrete
 // type, so a driver change is diagnosable from one log line rather than
@@ -261,26 +266,9 @@ func (d *Datetime) Scan(src any) error {
 		d.Time = v
 		return nil
 	case []byte:
-		// Wrap the raw bytes in double quotes so they satisfy JSON string
-		// syntax and can be forwarded to UnmarshalJSON without duplicating
-		// the layout-parsing logic.
-		//
-		// Build the quoted slice in a freshly-allocated buffer rather than
-		// appending into v: v is owned by the driver and may be a scan
-		// buffer it reuses for the next row, so appending '"' into it could
-		// write past len(v) into shared backing memory whenever
-		// cap(v) > len(v). Allocating len(v)+2 up front keeps both quote
-		// writes and the copy of v confined to our own buffer.
-		quoted := make([]byte, 0, len(v)+2)
-		quoted = append(quoted, '"')
-		quoted = append(quoted, v...)
-		quoted = append(quoted, '"')
-		return d.UnmarshalJSON(quoted)
+		return d.UnmarshalText(v)
 	case string:
-		// Safe to concatenate here, unlike the []byte case above: string is
-		// immutable and this allocates a new one regardless, so there is no
-		// driver-owned buffer to write into.
-		return d.UnmarshalJSON([]byte(`"` + v + `"`))
+		return d.UnmarshalText([]byte(v))
 	}
 	// Deliberately NOT handled: *time.Time and sql.RawBytes. Adding
 	// speculative cases for values no configured driver produces would hide

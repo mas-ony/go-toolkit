@@ -92,10 +92,21 @@
 // enforced rather than implied, that is a second type and not a flag on
 // this one.
 //
+// # Indonesian names
+//
+// MonthName and DayName give the Indonesian name of a month and of a
+// day, for writing a date out the way an Indonesian document does:
+// "Senin, 2 Februari 2026". They name and nothing more, so the layout
+// around them, a padded day or a time of day after it, stays the
+// caller's. Reading such a date back is package xlsx's, which reads the
+// month by the names MonthName gives and also knows the abbreviations
+// and the older spellings.
+//
 // # What the tests hold in place
 //
 // The unit suite needs no server and covers the layout table, the
-// emptiness collapse, both receiver forms and each Scan source type.
+// emptiness collapse, both receiver forms, each Scan source type, and
+// the Indonesian names.
 //
 // datetime_integration_test.go is the other half, and it exists because
 // the argument in Value's doc comment is about driver BEHAVIOUR rather

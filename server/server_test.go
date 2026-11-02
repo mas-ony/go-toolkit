@@ -18,9 +18,6 @@ import (
 	"github.com/rs/zerolog"
 )
 
-// line is one decoded log line.
-type line map[string]any
-
 // newApp returns an app with ErrorHandler and, under recover,
 // StackTraceHandler, logging into w, and with a body limit of 16 bytes.
 func newApp(w io.Writer) *fiber.App {
@@ -43,24 +40,6 @@ func newApp(w io.Writer) *fiber.App {
 	app.Get("/panic", func(fiber.Ctx) error { panic("boom") })
 	app.Post("/echo", func(c fiber.Ctx) error { return c.SendStatus(204) })
 	return app
-}
-
-// lines decodes every line in buf.
-func lines(t *testing.T, buf *bytes.Buffer) []line {
-	t.Helper()
-	var out []line
-	for _, raw := range bytes.Split(bytes.TrimSpace(buf.Bytes()),
-		[]byte("\n")) {
-		if len(raw) == 0 {
-			continue
-		}
-		var l line
-		if err := json.Unmarshal(raw, &l); err != nil {
-			t.Fatalf("log line is not JSON: %q", raw)
-		}
-		out = append(out, l)
-	}
-	return out
 }
 
 // send runs one request and returns its status and decoded envelope.
@@ -94,7 +73,7 @@ func TestErrorHandlerFiberError(t *testing.T) {
 		env["message"] != "item not found" {
 		t.Fatalf("got %d %v", status, env)
 	}
-	if got := lines(t, &buf); len(got) != 0 {
+	if got := testutil.LogLines(t, buf.Bytes()); len(got) != 0 {
 		t.Errorf("logged %v", got)
 	}
 }
@@ -106,7 +85,7 @@ func TestErrorHandlerOtherError(t *testing.T) {
 	if status != 500 || env["message"] != "internal server error" {
 		t.Fatalf("got %d %v", status, env)
 	}
-	got := lines(t, &buf)
+	got := testutil.LogLines(t, buf.Bytes())
 	if len(got) != 1 || got[0]["level"] != "error" ||
 		got[0]["error"] != "dial tcp: password=secret" ||
 		got[0]["path"] != "/bug" || got[0]["request_id"] == "" {
@@ -133,7 +112,7 @@ func TestErrorHandlerBodyLimit(t *testing.T) {
 	if resp.StatusCode != 413 || env["success"] != false {
 		t.Fatalf("got %d %v", resp.StatusCode, env)
 	}
-	got := lines(t, bytes.NewBuffer(buf.Bytes()))
+	got := testutil.LogLines(t, buf.Bytes())
 	if len(got) != 1 || got[0]["level"] != "warn" ||
 		got[0]["status"] != float64(413) {
 		t.Errorf("log = %v", got)
@@ -148,7 +127,7 @@ func TestStackTraceHandler(t *testing.T) {
 		t.Fatalf("got %d %v", status, env)
 	}
 	var panicked bool
-	for _, l := range lines(t, &buf) {
+	for _, l := range testutil.LogLines(t, buf.Bytes()) {
 		if l["message"] == "recovered panic" {
 			panicked = l["panic"] == "boom" && l["stack"] != nil &&
 				l["request_id"] != ""

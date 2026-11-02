@@ -2,6 +2,7 @@ package testutil
 
 import (
 	"bytes"
+	"encoding/json"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -36,6 +37,26 @@ func Only[T any](t testing.TB, what string, items []T) T {
 		t.Fatalf("saw %d %s, want 1", len(items), what)
 	}
 	return items[0]
+}
+
+// LogLines decodes what a JSON logger wrote, one object per line, and
+// fails the test at the first line that is not one. A blank line is
+// skipped, so data may end in the newline every line does, and data that
+// holds nothing yields no lines.
+func LogLines(t testing.TB, data []byte) []map[string]any {
+	t.Helper()
+	var out []map[string]any
+	for raw := range bytes.Lines(data) {
+		if len(bytes.TrimSpace(raw)) == 0 {
+			continue
+		}
+		var line map[string]any
+		if err := json.Unmarshal(raw, &line); err != nil {
+			t.Fatalf("log line is not JSON: %q", raw)
+		}
+		out = append(out, line)
+	}
+	return out
 }
 
 // Set assigns v to *p until the test ends, then puts back what *p held

@@ -11,6 +11,25 @@ import (
 	"github.com/mas-ony/go-toolkit/internal/strlist"
 )
 
+// Bounds reads the date bounds of one list with DateBound and keeps the
+// first failure, so a filter reads its bounds one per line and checks
+// once:
+//
+//	b := request.NewBounds(c)
+//	opt.TglAwal = b.Date("tgl_awal")
+//	opt.TglAkhir = b.Date("tgl_akhir")
+//	if err := b.Err(); err != nil {
+//		return opt, err
+//	}
+//
+// Once a bound has failed, every later Date returns nil without reading
+// its parameter, so the 400 names the first bad bound in the order they
+// were read.
+type Bounds struct {
+	c   fiber.Ctx
+	err error
+}
+
 // Paging defaults, and the ceiling on how many rows one page may hold.
 //
 // Variables rather than constants, because a page ceiling is a property of
@@ -29,12 +48,22 @@ var (
 	MaxLimit     = 100
 )
 
+// invalid is the one 400 every reader here that can fail answers with, a
+// *fiber.Error whose message is "invalid <param>": ID and QueryID for a
+// number that is not a positive one, Date and DateBound for a value that
+// is not a date. param names the parameter as the route or the query
+// string spells it, so a client learns which one it got wrong and nothing
+// of what it sent.
+func invalid(param string) error {
+	return fiber.NewError(fiber.StatusBadRequest, "invalid "+param)
+}
+
 // positiveID returns id, or the 400 ID and QueryID answer for a value that
 // is missing, non-numeric or not positive, all of which Fiber has already
 // read as 0 or less. param names the parameter in the error.
 func positiveID(id int, param string) (int, error) {
 	if id < 1 {
-		return 0, fiber.NewError(fiber.StatusBadRequest, "invalid "+param)
+		return 0, invalid(param)
 	}
 	return id, nil
 }
@@ -130,7 +159,7 @@ func QueryID(c fiber.Ctx, param string) (int, error) {
 func Date(c fiber.Ctx, param string) (string, error) {
 	raw := c.Params(param)
 	if !isDate(raw) {
-		return "", fiber.NewError(fiber.StatusBadRequest, "invalid "+param)
+		return "", invalid(param)
 	}
 	return strings.Clone(raw), nil
 }
@@ -272,10 +301,53 @@ func BoolPtr(c fiber.Ctx, key string) *bool {
 // It is for the bounds of a date range a list is filtered by, where nil
 // means what it means for every pointer here: do not filter. A malformed
 // bound therefore widens the result rather than failing the request, the
-// trade IntPtr makes for a malformed number.
+// trade IntPtr makes for a malformed number. DateBound makes the other
+// trade.
 func DatePtr(c fiber.Ctx, key string) *string {
 	if v := StringPtr(c, key); v != nil && isDate(*v) {
 		return v
 	}
 	return nil
+}
+
+// NewBounds returns a Bounds reading the query of c.
+func NewBounds(c fiber.Ctx) *Bounds {
+	return &Bounds{c: c}
+}
+
+// DateBound reads a query value as DatePtr does, with one difference: a
+// value that is there and is not a date fails the request instead of
+// being read as "do not filter". It yields nil and the 400 Date gives,
+// "invalid <key>". A parameter that is absent, empty or blank is nil
+// with no error, as with DatePtr.
+//
+// It is for the bound of a range whose loss changes what the answer
+// means, not only how long it is: a report or an export over a period,
+// where a range that quietly widened would come back looking right.
+// Bounds reads several of them with one error check.
+func DateBound(c fiber.Ctx, key string) (*string, error) {
+	v := StringPtr(c, key)
+	if v == nil {
+		return nil, nil
+	}
+	if !isDate(*v) {
+		return nil, invalid(key)
+	}
+	return v, nil
+}
+
+// Date returns the bound key as DateBound reads it, or nil once a bound
+// has failed.
+func (b *Bounds) Date(key string) *string {
+	if b.err != nil {
+		return nil
+	}
+	v, err := DateBound(b.c, key)
+	b.err = err
+	return v
+}
+
+// Err returns the 400 of the first bound that failed, or nil.
+func (b *Bounds) Err() error {
+	return b.err
 }

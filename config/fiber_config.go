@@ -84,9 +84,10 @@ package config
 // NewFiberConfig also reads app.name and app.version, which belong to another
 // section and are listed in app_config.go. They are the two halves of AppName
 // and are read here rather than passed in because every New*Config takes the
-// same one argument. Nothing else in this package reads outside its own
-// section; if a second case appears, passing *AppConfig is the change to make
-// rather than adding a third exception to this note.
+// same one argument. They are read through NewAppConfig, so the two keys are
+// spelled in app_config.go alone. Nothing else in this package reads outside
+// its own section; if a second case appears, passing *AppConfig is the change
+// to make rather than adding a third exception to this note.
 
 import (
 	"errors"
@@ -197,7 +198,8 @@ var buildTime string
 //
 // Adding any of them means Go code at a call site rather than a key here.
 func NewFiberConfig(v *viper.Viper) *FiberConfig {
-	appName := v.GetString("app.name") + " " + v.GetString("app.version")
+	app := NewAppConfig(v)
+	appName := app.Name + " " + app.Version
 	if buildTime != "" {
 		appName += "." + buildTime
 	}

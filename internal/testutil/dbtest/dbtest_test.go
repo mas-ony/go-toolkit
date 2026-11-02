@@ -25,12 +25,6 @@ import (
 // no server.
 type openDriver struct{}
 
-// recorderConnector opens recorders that all keep to one log.
-type recorderConnector struct {
-	sqltest.ConnectorBase
-	log *sqltest.Log
-}
-
 // recorder is a fake connection that keeps every statement it is handed
 // in its log, in order, and runs none of them.
 type recorder struct {
@@ -45,11 +39,6 @@ var fakeEngine = func() Engine {
 	sql.Register("dbtest-fake", openDriver{})
 	return Engine{Driver: "dbtest-fake"}
 }()
-
-// Connect opens a recorder onto the connector's log.
-func (c recorderConnector) Connect(context.Context) (driver.Conn, error) {
-	return recorder{log: c.log}, nil
-}
 
 // ExecContext keeps the statement and reports that it changed nothing.
 func (r recorder) ExecContext(
@@ -160,7 +149,8 @@ func TestUnique(t *testing.T) {
 func TestQuotedScratchTable(t *testing.T) {
 	t.Parallel()
 	var log sqltest.Log
-	db := sqltest.Open(t, recorderConnector{log: &log}, "mysql")
+	db := sqltest.Open(t,
+		func() driver.Conn { return recorder{log: &log} }, "mysql")
 	quote := func(name string) string { return "<" + name + ">" }
 
 	var name string

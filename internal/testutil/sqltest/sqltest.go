@@ -1,6 +1,7 @@
 package sqltest
 
 import (
+	"context"
 	"database/sql"
 	"database/sql/driver"
 	"errors"
@@ -13,15 +14,14 @@ import (
 	"github.com/jmoiron/sqlx"
 )
 
-// Driver is the driver.Driver behind every fake connector. Its Open
-// refuses, because a fake is reached only through its connector, which
-// Open hands to database/sql directly.
-type Driver struct{}
+// connector is the driver.Connector of every fake: each Connect opens the
+// connection the fake's own constructor returns, onto the fake's state.
+type connector func() driver.Conn
 
-// ConnectorBase supplies the Driver method of a fake driver.Connector,
-// which embeds it and adds the Connect that opens a connection onto the
-// fake's own state.
-type ConnectorBase struct{}
+// Driver is the driver.Driver behind the connector Open hands
+// database/sql. Its Open refuses, because a fake is reached only through
+// that connector.
+type Driver struct{}
 
 // ConnBase supplies the methods a driver.Conn must have whether a fake
 // uses them or not. Prepare refuses, because every statement reaches a
@@ -68,17 +68,24 @@ func Selected(exprs ...string) string {
 	return strings.Join(exprs, ",\n       ")
 }
 
-// Open returns a *sqlx.DB over c, bound as driverName, and closes it when
-// the test ends.
+// Open returns a *sqlx.DB whose every connection is one conn returns,
+// bound as driverName, and closes it when the test ends. conn opens a
+// connection onto the fake's own state, so every connection the pool
+// holds reaches the same fake; it is called from whichever goroutine
+// database/sql connects on.
 //
-// sql.OpenDB with the connector avoids sql.Register, which is a
+// sql.OpenDB with a connector avoids sql.Register, which is a
 // process-global map: registering per test would either collide or force
 // a unique name scheme, and both are worse than passing the connector
 // directly. driverName never reaches a registry, so its only job is to
 // pick sqlx's placeholder style: ? for "mysql", @p1 for "sqlserver".
-func Open(t testing.TB, c driver.Connector, driverName string) *sqlx.DB {
+func Open(
+	t testing.TB,
+	conn func() driver.Conn,
+	driverName string,
+) *sqlx.DB {
 	t.Helper()
-	db := sqlx.NewDb(sql.OpenDB(c), driverName)
+	db := sqlx.NewDb(sql.OpenDB(connector(conn)), driverName)
 	t.Cleanup(func() { _ = db.Close() })
 	return db
 }
@@ -89,8 +96,13 @@ func (Driver) Open(string) (driver.Conn, error) {
 		"fake: this driver is only reachable through its connector")
 }
 
-// Driver returns the driver every fake connector belongs to.
-func (ConnectorBase) Driver() driver.Driver { return Driver{} }
+// Connect opens a connection onto the fake.
+func (c connector) Connect(context.Context) (driver.Conn, error) {
+	return c(), nil
+}
+
+// Driver returns the driver every fake belongs to.
+func (connector) Driver() driver.Driver { return Driver{} }
 
 // Prepare refuses: no fake is handed a statement to prepare.
 func (ConnBase) Prepare(string) (driver.Stmt, error) {

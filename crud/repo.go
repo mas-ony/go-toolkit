@@ -11,6 +11,7 @@ import (
 
 	"github.com/jmoiron/sqlx"
 	"github.com/mas-ony/go-toolkit/database"
+	"github.com/rs/zerolog"
 )
 
 // BaseRepo holds everything the repositories of a service have in common:
@@ -31,8 +32,8 @@ import (
 // Read: Begin or Select starts the statement, the And helpers filter it,
 // and Fetch runs it.
 //
-// BaseRepo logs nothing; see the package documentation for where its
-// errors go instead.
+// BaseRepo logs nothing unless NewBaseRepo is given LogErrors or
+// OnError; see the package documentation for where its errors go.
 type BaseRepo[T any, K comparable, R any] struct {
 	// db is the connection pool. It runs the queries when tx is nil, and
 	// its driver decides the placeholder style either way.
@@ -49,6 +50,8 @@ type BaseRepo[T any, K comparable, R any] struct {
 	// embed turns a scoped copy of the base back into the repository, so
 	// the With* methods can return R.
 	embed func(BaseRepo[T, K, R]) R
+	// onError is the hook OnError sets, nil when there is none.
+	onError func(table, method string, err error)
 }
 
 // Scoped is the set of scoping methods every repository interface embeds.
@@ -67,8 +70,51 @@ type Scoped[R any] interface {
 	WithYear(year int) R
 }
 
-// errNilModel is the cause Create and Update report for a nil model.
-var errNilModel = errors.New("nil model")
+// options holds what the Options handed to NewBaseRepo chose.
+type options struct {
+	onError func(table, method string, err error)
+}
+
+// Option configures a BaseRepo as NewBaseRepo builds it.
+type Option func(*options)
+
+// ErrNilModel is the cause Create and Update report, through Wrap, for a
+// nil model. A write a repository writes itself reports it the same way,
+// so errors.Is finds it whichever method refused.
+var ErrNilModel = errors.New("nil model")
+
+// OnError returns an Option under which fn sees every error Wrap
+// returns, with the table and the method it names, before the caller
+// does. err is the error as Wrap returns it. sql.ErrNoRows is not handed
+// over: a write returns it when no row matched, which is an answer rather
+// than a failure.
+//
+// Every statement BaseRepo runs reports its failure through Wrap, and so
+// does a method a repository writes itself, so fn sees them all,
+// whichever method failed. WithTx, WithNamespace and WithYear copy it
+// with the rest of the base.
+//
+// fn runs on the goroutine of the call that failed, so it must be safe
+// for concurrent use and must not block.
+func OnError(fn func(table, method string, err error)) Option {
+	return func(o *options) { o.onError = fn }
+}
+
+// LogErrors returns an Option that logs every error OnError hands over,
+// at error level, as "db error" with the table and the method.
+//
+// That line is a second one. The caller still logs what the failure
+// meant to it; this one is for a service that wants every database
+// failure on record where it happened, a swallowed one included. See the
+// package documentation.
+func LogErrors(log zerolog.Logger) Option {
+	return OnError(func(table, method string, err error) {
+		log.Error().Err(err).
+			Str("table", table).
+			Str("method", method).
+			Msg("db error")
+	})
+}
 
 // RequireOneRow converts "statement succeeded but matched nothing" into
 // sql.ErrNoRows, so the service layer can map a missing key to a 404
@@ -99,20 +145,27 @@ func RequireOneRow(res sql.Result) error {
 //
 // embed puts a BaseRepo into the repository that embeds it, and is how
 // WithTx, WithNamespace and WithYear hand back R; the package
-// documentation shows one. NewBaseRepo panics when spec describes its key
+// documentation shows one. opts are applied in order; see OnError and
+// LogErrors. NewBaseRepo panics when spec describes its key
 // inconsistently: KeyOf must be set exactly when Writable lists the key,
 // a generated key needs K int, and Patchable must leave the key out.
 func NewBaseRepo[T any, K comparable, R any](
 	db *sqlx.DB,
 	spec *TableSpec[T, K],
 	embed func(BaseRepo[T, K, R]) R,
+	opts ...Option,
 ) BaseRepo[T, K, R] {
 	spec.check()
+	var o options
+	for _, opt := range opts {
+		opt(&o)
+	}
 	return BaseRepo[T, K, R]{
 		db:        db,
 		namespace: database.DefaultNamespace,
 		spec:      spec,
 		embed:     embed,
+		onError:   o.onError,
 	}
 }
 
@@ -166,7 +219,9 @@ func (b BaseRepo[T, K, R]) WithYear(year int) R {
 // Wrap returns err with the table and the method it failed in, as
 // "<table>.<method>: <err>", or nil when err is nil, so a repository
 // method can end in "return r.Wrap(...)". errors.Is and errors.As see
-// through it to the cause.
+// through it to the cause. The OnError hook, when there is one, sees
+// what Wrap returns before the caller does, unless the cause is
+// sql.ErrNoRows.
 //
 // Every error BaseRepo returns has this form, sql.ErrNoRows from a write
 // aside; a method a repository writes itself calls Wrap to match.
@@ -174,7 +229,11 @@ func (b BaseRepo[T, K, R]) Wrap(method string, err error) error {
 	if err == nil {
 		return nil
 	}
-	return fmt.Errorf("%s.%s: %w", b.spec.Name, method, err)
+	wrapped := fmt.Errorf("%s.%s: %w", b.spec.Name, method, err)
+	if b.onError != nil && !errors.Is(err, sql.ErrNoRows) {
+		b.onError(b.spec.Name, method, wrapped)
+	}
+	return wrapped
 }
 
 // Ext returns the transaction when one is set, the pool otherwise.
@@ -378,7 +437,7 @@ func (b BaseRepo[T, K, R]) Fetch(
 func (b BaseRepo[T, K, R]) Create(ctx context.Context, m *T) (K, error) {
 	var zero K
 	if m == nil {
-		return zero, b.Wrap("Create", errNilModel)
+		return zero, b.Wrap("Create", ErrNilModel)
 	}
 
 	w := b.spec.Writable
@@ -417,7 +476,7 @@ func (b BaseRepo[T, K, R]) Create(ctx context.Context, m *T) (K, error) {
 // key in matches no row.
 func (b BaseRepo[T, K, R]) Update(ctx context.Context, m *T) error {
 	if m == nil {
-		return b.Wrap("Update", errNilModel)
+		return b.Wrap("Update", ErrNilModel)
 	}
 
 	w := b.spec.Updatable

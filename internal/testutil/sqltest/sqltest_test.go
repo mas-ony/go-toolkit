@@ -17,22 +17,11 @@ import (
 	"github.com/jmoiron/sqlx"
 )
 
-// connector is the smallest fake the parts here make: every connection it
-// opens answers every query with the same canned rows.
-type connector struct {
-	ConnectorBase
-	rows Rows
-}
-
-// conn is a connection connector opens.
+// conn is the smallest fake the parts here make: a connection that
+// answers every query with the same canned rows.
 type conn struct {
 	ConnBase
 	rows Rows
-}
-
-// Connect opens a connection that answers with c's rows.
-func (c connector) Connect(context.Context) (driver.Conn, error) {
-	return conn{rows: c.rows}, nil
 }
 
 // QueryContext answers with a fresh copy of the canned rows.
@@ -47,10 +36,11 @@ func (c conn) QueryContext(
 // and answers through sqlx with the rows it holds, in order.
 func TestAFakeAnswersThroughSqlx(t *testing.T) {
 	t.Parallel()
-	db := Open(t, connector{rows: Rows{
+	rows := Rows{
 		Cols:   []string{"id", "code"},
 		Values: [][]driver.Value{{int64(1), "a"}, {int64(2), "b"}},
-	}}, "mysql")
+	}
+	db := Open(t, func() driver.Conn { return conn{rows: rows} }, "mysql")
 	if got := db.DriverName(); got != "mysql" {
 		t.Errorf("DriverName = %q, want mysql", got)
 	}
@@ -108,7 +98,7 @@ func TestUnusedPartsRefuse(t *testing.T) {
 	if err := (ConnBase{}).Close(); err != nil {
 		t.Errorf("Close = %v, want nil", err)
 	}
-	if d := (ConnectorBase{}).Driver(); d != (Driver{}) {
+	if d := connector(nil).Driver(); d != (Driver{}) {
 		t.Errorf("Driver = %#v, want Driver{}", d)
 	}
 }
@@ -154,7 +144,7 @@ func TestOpenClosesWhenTheTestEnds(t *testing.T) {
 	t.Parallel()
 	var db *sqlx.DB
 	t.Run("open", func(t *testing.T) {
-		db = Open(t, connector{}, "sqlserver")
+		db = Open(t, func() driver.Conn { return conn{} }, "sqlserver")
 		if err := db.Ping(); err != nil {
 			t.Fatalf("Ping inside the test: %v", err)
 		}

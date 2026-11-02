@@ -11,7 +11,7 @@ package config
 // Rule cases are built through NewDatabaseConfig from a Viper, the way a
 // deployment builds the section, so a passing case has exercised the key
 // name and the cast as well as the rule. Configured is held to the rule it
-// shares with the other sections that have it, in sections_test.go.
+// shares with the other sections that have it, in section_test.go.
 
 import (
 	"strings"

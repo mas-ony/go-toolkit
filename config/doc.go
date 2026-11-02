@@ -166,7 +166,7 @@
 //
 // # What the tests hold in place
 //
-// sections_test.go holds every section to the same contract at once, by
+// section_test.go holds every section to the same contract at once, by
 // parsing this package's own source: each file's header lists exactly the
 // keys its code reads, states the right count, and spells each variable
 // the way NewViper derives it; every constructor survives an empty Viper;
@@ -174,7 +174,8 @@
 // String prints a password, token or signing secret. It also holds each
 // section file to a name derived from its prefix and each Validate to that
 // prefix when it reports a section never built, and a section missing from
-// the test table fails there too.
+// the test table fails there too. The contract is the one section.go
+// declares, so it is tested beside the rest of section.go.
 //
 // What is particular to each section — the rules its Validate enforces,
 // and helpers such as Namespace and the With installers — is tested beside

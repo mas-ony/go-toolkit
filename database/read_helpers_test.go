@@ -49,20 +49,14 @@ type queryDB struct {
 	err  error
 }
 
-// queryConnector hands out connections to one queryDB, so that sql.OpenDB
-// can use the fake without registering a driver name.
-type queryConnector struct {
-	sqltest.ConnectorBase
-	db *queryDB
-}
-
-// queryConn implements driver.QueryerContext and driver.ExecerContext,
-// which is what lets database/sql skip Prepare entirely and hand the
-// statement over in one call, so sqltest's refusing Prepare is never
-// reached. A conn with only Prepare would work too, at the cost of a Stmt
-// type whose sole job is to carry the query text to the same place. No
-// helper here starts a transaction, so the Begin is sqltest's refusing
-// one as well.
+// queryConn is a connection onto one queryDB, which sqltest.Open opens
+// without a driver name being registered. It implements
+// driver.QueryerContext and driver.ExecerContext, which is what lets
+// database/sql skip Prepare entirely and hand the statement over in one
+// call, so sqltest's refusing Prepare is never reached. A conn with only
+// Prepare would work too, at the cost of a Stmt type whose sole job is to
+// carry the query text to the same place. No helper here starts a
+// transaction, so the Begin is sqltest's refusing one as well.
 type queryConn struct {
 	sqltest.ConnBase
 	db *queryDB
@@ -92,14 +86,15 @@ var (
 
 // open returns a *sqlx.DB backed by this fake, bound as driverName.
 //
-// driverName never reaches a registry: sqltest.Open hands sql.OpenDB the
+// driverName never reaches a registry: sqltest.Open hands sql.OpenDB a
 // connector directly, so no mysql or sqlserver driver is involved and the
 // name's only job is to pick the placeholder style through sqlx.BindType.
 // That is exactly the coupling buildDSN's doc comment describes, which is
 // why the tests below run under both names.
 func (q *queryDB) open(t *testing.T, driverName string) *sqlx.DB {
 	t.Helper()
-	return sqltest.Open(t, &queryConnector{db: q}, driverName)
+	return sqltest.Open(t,
+		func() driver.Conn { return &queryConn{db: q} }, driverName)
 }
 
 // QueryContext records the query as the driver received it and answers
@@ -138,11 +133,6 @@ func (c *queryConn) ExecContext(
 		return nil, err
 	}
 	return driver.RowsAffected(1), nil
-}
-
-// Connect opens a connection onto the shared queryDB.
-func (c *queryConnector) Connect(context.Context) (driver.Conn, error) {
-	return &queryConn{db: c.db}, nil
 }
 
 // SelectClause resolves a request the way activeCols does, emits each

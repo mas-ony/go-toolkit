@@ -87,40 +87,18 @@ var dateLayouts = []string{
 
 // bulan maps the Indonesian month names a written date may carry, in
 // lower case, to the months they name: the full names, their usual
-// abbreviations, and the older spellings Pebruari and Nopember. The
-// three months the two languages name alike, April, September and
-// November, are left to time.Parse with their abbreviations, and are
-// not listed.
+// abbreviations, and the older spellings Pebruari and Nopember. The full
+// names are datetime.MonthName's, the names a date is written out with,
+// so every date written that way reads back; see indonesianMonths. April,
+// September and November, which the two languages spell alike, map to
+// the English names they already are, and their abbreviations are left
+// to time.Parse.
 //
 // The two languages can share one table because they never disagree: no
 // spelling here names one month in Indonesian and another in English.
 // That is what lets Date read either without being told which language
 // a workbook is in, and read a workbook that mixes them.
-var bulan = map[string]time.Month{
-	"januari":  time.January,
-	"jan":      time.January,
-	"februari": time.February,
-	"feb":      time.February,
-	"pebruari": time.February,
-	"peb":      time.February,
-	"maret":    time.March,
-	"mar":      time.March,
-	"mei":      time.May,
-	"juni":     time.June,
-	"jun":      time.June,
-	"juli":     time.July,
-	"jul":      time.July,
-	"agustus":  time.August,
-	"agu":      time.August,
-	"agt":      time.August,
-	"ags":      time.August,
-	"oktober":  time.October,
-	"okt":      time.October,
-	"nopember": time.November,
-	"nop":      time.November,
-	"desember": time.December,
-	"des":      time.December,
-}
+var bulan = indonesianMonths()
 
 // scientific matches a number written in scientific notation, 1.5E7,
 // and nothing around it.
@@ -171,6 +149,32 @@ func notANumber(cell string) error {
 // small for what it is read into. cell is quoted as notANumber quotes it.
 func outOfRange(cell string) error {
 	return fmt.Errorf("%q is out of range", cell)
+}
+
+// indonesianMonths builds bulan: every full name datetime.MonthName
+// gives, beside the abbreviations and the older spellings, which a date
+// read back may carry and one written out never does.
+func indonesianMonths() map[string]time.Month {
+	months := map[string]time.Month{
+		"jan":      time.January,
+		"feb":      time.February,
+		"pebruari": time.February,
+		"peb":      time.February,
+		"mar":      time.March,
+		"jun":      time.June,
+		"jul":      time.July,
+		"agu":      time.August,
+		"agt":      time.August,
+		"ags":      time.August,
+		"okt":      time.October,
+		"nopember": time.November,
+		"nop":      time.November,
+		"des":      time.December,
+	}
+	for m := time.January; m <= time.December; m++ {
+		months[strings.ToLower(datetime.MonthName(m))] = m
+	}
+	return months
 }
 
 // englishMonth returns a date written out with an Indonesian month

@@ -6,22 +6,23 @@ import (
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/gofiber/fiber/v3/middleware/requestid"
+	"github.com/mas-ony/go-toolkit/internal/logfield"
 	"github.com/mas-ony/go-toolkit/response"
 	"github.com/rs/zerolog"
 )
 
 // requestFields adds what identifies the request to e: its id under field,
-// the key the access log carries it under, and its method and path. Every
-// line logged here is written through it, so each one can be joined to the
-// request's access log line by the same three fields.
+// the key the access log carries it under, and its method and path under
+// the keys logfield gives every line about a request. Every line logged
+// here is written through it, so each one can be joined to the request's
+// access log line by the same three fields.
 func requestFields(
 	e *zerolog.Event,
 	c fiber.Ctx,
 	field string,
 ) *zerolog.Event {
-	return e.Str(field, requestid.FromContext(c)).
-		Str("method", c.Method()).
-		Str("path", c.Path())
+	return logfield.Request(e.Str(field, requestid.FromContext(c)),
+		c.Method(), c.Path())
 }
 
 // ErrorHandler returns the handler that renders every error escaping a
@@ -47,7 +48,7 @@ func ErrorHandler(
 	log zerolog.Logger,
 	requestIDField string,
 ) fiber.ErrorHandler {
-	l := log.With().Str("handler", "error").Logger()
+	l := logfield.Handler(log, "error")
 
 	return func(c fiber.Ctx, err error) error {
 		if errors.Is(err, fiber.ErrRequestEntityTooLarge) {
@@ -68,9 +69,10 @@ func ErrorHandler(
 }
 
 // StackTraceHandler returns the recover middleware's StackTraceHandler: a
-// recovered panic is logged at error level, with its value and the stack,
-// through the application's logger rather than the middleware's default,
-// which writes to stderr in a format of its own.
+// recovered panic is logged at error level, with its value and the stack
+// under the keys logfield gives every recovered panic, through the
+// application's logger rather than the middleware's default, which writes
+// to stderr in a format of its own.
 //
 // The middleware calls it only under fiber.recover.enable_stack_trace.
 // With the key off a recovered panic logs nothing here; the client still
@@ -79,12 +81,11 @@ func StackTraceHandler(
 	log zerolog.Logger,
 	requestIDField string,
 ) func(fiber.Ctx, any) {
-	l := log.With().Str("handler", "panic").Logger()
+	l := logfield.Handler(log, "panic")
 
 	return func(c fiber.Ctx, e any) {
-		requestFields(l.Error().Interface("panic", e), c, requestIDField).
-			Bytes("stack", debug.Stack()).
-			Msg("recovered panic")
+		panicked := logfield.Panic(l.Error(), e, debug.Stack())
+		requestFields(panicked, c, requestIDField).Msg("recovered panic")
 	}
 }
 

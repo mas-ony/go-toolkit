@@ -98,6 +98,25 @@ func TestFiberRequestMethodsAcceptTheCommaForm(t *testing.T) {
 	}
 }
 
+// AppName names the build: the app section's name and version, as
+// NewAppConfig reads them, then the link-time stamp when there is one.
+// Not parallel, because it sets buildTime, which every NewFiberConfig
+// reads.
+func TestFiberAppNameNamesTheBuild(t *testing.T) {
+	v := viper.New()
+	v.Set("app.name", "svc")
+	v.Set("app.version", "1.2.0")
+	if got := NewFiberConfig(v).AppName; got != "svc 1.2.0" {
+		t.Errorf("AppName = %q, want %q", got, "svc 1.2.0")
+	}
+
+	testutil.Set(t, &buildTime, "20260102030405")
+	want := "svc 1.2.0.20260102030405"
+	if got := NewFiberConfig(v).AppName; got != want {
+		t.Errorf("AppName with a build stamp = %q, want %q", got, want)
+	}
+}
+
 // An empty method list is Fiber's full default, so the log line says so
 // in words rather than printing [], which reads as no methods at all.
 func TestFiberStringNamesTheDefaultMethods(t *testing.T) {

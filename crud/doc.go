@@ -46,13 +46,13 @@
 // from the base as well; a repository whose statement differs declares a
 // method of the same name, which shadows the promoted one.
 //
-// # Errors are returned, never logged
+// # Errors are returned, not logged
 //
-// BaseRepo logs nothing. Every error it returns names the table and the
-// method, as "<table>.<Method>: <cause>", and wraps the cause, so
-// errors.Is and errors.As still reach the driver's error and the database
-// package's sentinels. Wrap gives a hand-written repository method the
-// same form.
+// BaseRepo logs nothing of its own accord. Every error it returns names
+// the table and the method, as "<table>.<Method>: <cause>", and wraps the
+// cause, so errors.Is and errors.As still reach the driver's error, the
+// database package's sentinels and ErrNilModel. Wrap gives a hand-written
+// repository method the same form.
 //
 // The one exception is sql.ErrNoRows, which Update, Patch and Delete
 // return as database/sql spells it when no row matched, so a caller may
@@ -65,6 +65,14 @@
 // failure once, where it answers 500. A caller that swallows an error,
 // such as an access check that reads a failed lookup as "no", has to log
 // it there, because nothing below it will.
+//
+// A service that wants every database failure on record where it
+// happened as well, a swallowed one included, hands NewBaseRepo
+// LogErrors, or OnError for a hook of its own. The hook sits in Wrap,
+// which every error but sql.ErrNoRows passes through, a hand-written
+// method's included, so no method escapes it and a repository needs no
+// method of its own to be covered. Its line is a second one: the line
+// that says what the failure meant is still the caller's to write.
 //
 // BaseService logs one Info line per row it writes, under the "entity"
 // key: "created" and "deleted" with the id, "updated" without. It logs no

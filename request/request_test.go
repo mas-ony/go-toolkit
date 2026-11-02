@@ -4,9 +4,10 @@ package request
 // values under test are the ones a handler receives: ID, QueryID and Date
 // and the one 400 they return, the junk-skipping in IDs, the paging
 // defaults and ceiling, Sort and Cols, the answers of each pointer helper,
-// and the cloning of every string that leaves the package. Buffer reuse
-// across requests needs a real listener and is in
-// request_integration_test.go.
+// DateBound and the 400 it gives where DatePtr reads nil, the
+// first-failure rule of Bounds, and the cloning of every string that
+// leaves the package. Buffer reuse across requests needs a real listener
+// and is in request_integration_test.go.
 
 import (
 	"errors"
@@ -340,6 +341,67 @@ func TestDatePtr(t *testing.T) {
 		})
 }
 
+// DateBound accepts what DatePtr accepts, reads an absent or blank
+// parameter as no bound, and answers anything else with the 400 naming
+// the parameter.
+func TestDateBound(t *testing.T) {
+	probe(t, "/items?a=2026-01-02&b=%202024-02-29%20&c=2026-1-2"+
+		"&d=2026-02-30&e=2026-01-02T00:00:00&f=garbage&g=&h=%20",
+		func(c fiber.Ctx) {
+			want := map[string]string{"a": "2026-01-02", "b": "2024-02-29"}
+			for key, day := range want {
+				got, err := DateBound(c, key)
+				if got == nil || *got != day || err != nil {
+					t.Errorf("%s = %v, %v, want %s", key, got, err, day)
+				}
+			}
+			for _, key := range []string{"g", "h", "absent"} {
+				if got, err := DateBound(c, key); got != nil || err != nil {
+					t.Errorf("%s = %v, %v, want no bound", key, got, err)
+				}
+			}
+			for _, key := range []string{"c", "d", "e", "f"} {
+				got, err := DateBound(c, key)
+				code, msg := badRequest(err)
+				if got != nil || code != fiber.StatusBadRequest ||
+					msg != "invalid "+key {
+					t.Errorf("%s = %v, %v, want the 400", key, got, err)
+				}
+			}
+		})
+}
+
+// Bounds hands back every bound until one fails, then nil for the rest,
+// and Err is the 400 of the first failure.
+func TestBounds(t *testing.T) {
+	probe(t, "/items?from=2026-01-02&to=x&until=y&since=2026-03-04",
+		func(c fiber.Ctx) {
+			b := NewBounds(c)
+			from := b.Date("from")
+			blank := b.Date("absent")
+			to := b.Date("to")
+			until := b.Date("until")
+			since := b.Date("since")
+			if from == nil || *from != "2026-01-02" || blank != nil {
+				t.Errorf("before the failure: %v, %v", from, blank)
+			}
+			if to != nil || until != nil || since != nil {
+				t.Errorf("after the failure: %v, %v, %v", to, until, since)
+			}
+			if code, msg := badRequest(b.Err()); code != 400 ||
+				msg != "invalid to" {
+				t.Errorf("Err = %v, want the 400 for to", b.Err())
+			}
+		})
+
+	probe(t, "/items?from=2026-01-02", func(c fiber.Ctx) {
+		b := NewBounds(c)
+		if b.Date("from") == nil || b.Date("to") != nil || b.Err() != nil {
+			t.Errorf("clean read: Err = %v", b.Err())
+		}
+	})
+}
+
 // BoolPtr reads true, 1 and yes, and false, 0 and no, in any case; every
 // other spelling, and an absent parameter, is nil.
 func TestBoolPtr(t *testing.T) {
@@ -392,6 +454,11 @@ func TestQueryValuesAreCloned(t *testing.T) {
 			unsafe.StringData(*got) ==
 				unsafe.StringData(c.Query("from")) {
 			t.Error("DatePtr kept the request buffer")
+		}
+		if got, err := DateBound(c, "from"); err != nil || got == nil ||
+			unsafe.StringData(*got) ==
+				unsafe.StringData(c.Query("from")) {
+			t.Error("DateBound kept the request buffer")
 		}
 	})
 }

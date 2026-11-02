@@ -1,7 +1,7 @@
 package crud
 
-// Tests for batch.go, against the fake driver of repo_test.go, behind a
-// connector whose transactions count their commits and rollbacks.
+// Tests for batch.go, against the fake driver of repo_test.go, over
+// connections whose transactions count their commits and rollbacks.
 
 import (
 	"context"
@@ -31,19 +31,11 @@ type entryRepository struct {
 	BaseRepo[entry, int, entryRepo]
 }
 
-// txCounts counts what the transactions of a countingConnector end in.
+// txCounts counts what the transactions of a countingConn end in.
 type txCounts struct{ commits, rollbacks int }
 
 // countingTx counts its Commit and Rollback into n.
 type countingTx struct{ n *txCounts }
-
-// countingConnector opens fakeConns onto db whose transactions count
-// into n.
-type countingConnector struct {
-	sqltest.ConnectorBase
-	db *fakeDB
-	n  *txCounts
-}
 
 // countingConn is a fakeConn whose Begin starts a countingTx.
 type countingConn struct {
@@ -75,7 +67,9 @@ func openCounting(
 ) *sqlx.DB {
 	t.Helper()
 	selectGrammar(t, driverName)
-	return sqltest.Open(t, countingConnector{db: f, n: n}, driverName)
+	return sqltest.Open(t, func() driver.Conn {
+		return countingConn{fakeConn{db: f}, n}
+	}, driverName)
 }
 
 // newEntryRepo returns an entryRepository over db.
@@ -99,11 +93,6 @@ func (tx countingTx) Commit() error {
 func (tx countingTx) Rollback() error {
 	tx.n.rollbacks++
 	return nil
-}
-
-// Connect opens a countingConn onto the shared fakeDB.
-func (c countingConnector) Connect(context.Context) (driver.Conn, error) {
-	return countingConn{fakeConn{db: c.db}, c.n}, nil
 }
 
 // Begin starts a transaction that counts how it ends.

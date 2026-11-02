@@ -4,19 +4,22 @@ package testutil
 // test ends, whether it was set to a new value or only snapshotted; a
 // panic arrives as a value; a call that should panic and returns is
 // reported by its name; a recording of one entry hands it over and any
-// other count fails; a file lands where it was asked to, with its
-// directories; a pattern lists the package's own files and fails naming
-// itself when it is malformed or lists none; a source file parses with
-// its comments, and one that does not parse fails naming its path; a mode
-// set for a test comes back when it ends; the filesystem probe leaves
-// nothing behind; the root check skips exactly when it should; a buffer
-// written from many goroutines keeps every write, and a copy of it keeps
-// what it held; and the fake token passes config's check of a real one.
+// other count fails; a logger's output decodes line by line, and a line
+// that is not JSON fails quoting itself; a file lands where it was asked
+// to, with its directories; a pattern lists the package's own files and
+// fails naming itself when it is malformed or lists none; a source file
+// parses with its comments, and one that does not parse fails naming its
+// path; a mode set for a test comes back when it ends; the filesystem
+// probe leaves nothing behind; the root check skips exactly when it
+// should; a buffer written from many goroutines keeps every write, and a
+// copy of it keeps what it held; and the fake token passes config's check
+// of a real one.
 
 import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"slices"
 	"strconv"
@@ -124,6 +127,31 @@ func TestOnly(t *testing.T) {
 		if f.msg != want {
 			t.Errorf("Only failed with %q, want %q", f.msg, want)
 		}
+	}
+}
+
+// LogLines decodes each line as one object, in order, past blank lines
+// and the final newline, and fails quoting the first line that is not
+// JSON. Nothing written is no lines at all.
+func TestLogLines(t *testing.T) {
+	t.Parallel()
+	got := LogLines(t, []byte("{\"a\":1}\n\n  \n{\"b\":\"x\"}\n"))
+	want := []map[string]any{{"a": float64(1)}, {"b": "x"}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("LogLines = %v, want %v", got, want)
+	}
+	if got := LogLines(t, nil); got != nil {
+		t.Errorf("LogLines of nothing = %v, want nil", got)
+	}
+
+	f := &fatal{TB: t}
+	if got := CapturePanic(func() {
+		LogLines(f, []byte("{\"a\":1}\nnot json\n"))
+	}); got != f {
+		t.Fatalf("a line that is not JSON did not fail: %v", got)
+	}
+	if want := `log line is not JSON: "not json\n"`; f.msg != want {
+		t.Errorf("LogLines failed with %q, want %q", f.msg, want)
 	}
 }
 

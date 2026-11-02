@@ -1,0 +1,24 @@
+// Package logfield holds the fields more than one package of the toolkit
+// writes on the same kind of log line: the name of the handler that
+// wrote it, which rest gives every handler's logger and server its error
+// and panic handlers'; the method and the path on a line about a
+// request, which rest writes for a handler's failures and server for an
+// error or a panic that escapes a route; and the value and the stack on
+// a line about a recovered panic, which server writes for a route and
+// notify for a notification.
+//
+// Each field is written in one place so the lines read alike wherever
+// they come from: a search for the lines of one path, or for every
+// recovered panic, finds all of them under one key. Two copies of a key
+// agree only until one of them is edited, and nothing reports the moment
+// they stop.
+//
+// The package imports zerolog alone. A line about a request is handed
+// the method and the path rather than the fiber.Ctx they are read from,
+// so notify, which serves no request, links no web framework to log a
+// panic.
+//
+// The package is internal because none of it is a contract with a
+// service. It is the toolkit agreeing with itself, and its API moves
+// whenever a caller needs it to.
+package logfield

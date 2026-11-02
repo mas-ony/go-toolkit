@@ -36,8 +36,10 @@ go get github.com/mas-ony/go-toolkit
 | `httpclient` | JSON client with retries and typed errors          |
 | `importer`   | Drives a spreadsheet import, a file or an upload   |
 | `logger`     | zerolog configured per environment                 |
+| `notify`     | Runs a best-effort notification, sync or detached  |
 | `request`    | Fiber route and query parameter helpers            |
 | `response`   | The JSON envelope every handler returns            |
+| `rest`       | Fiber handlers over a `crud.Service`               |
 | `server`     | Error, panic and rate-limit handlers for Fiber     |
 | `telegram`   | Sends text or documents as a Telegram bot          |
 | `whatsapp`   | Pairs a device and sends text or documents         |
@@ -68,6 +70,10 @@ so the packages that apply it cannot drift apart:
 - `internal/bytesize`: how a limit counted in bytes is named in a
   message, which `fileutil` names its upload cap by and `xlsx` its unzip
   cap.
+- `internal/logfield`: the key a handler's lines carry its name under,
+  and the keys a log line about a request carries its method and path
+  under, which `rest` and `server` both log by, and the keys a recovered
+  panic is logged under, which `server` and `notify` share.
 
 A service cannot import any of them; they are how the packages above
 agree with each other.
@@ -287,6 +293,20 @@ The services differ when switched off: a nil email or telegram `*Service`
 answers every send with `ErrNotConfigured`, while a nil WhatsApp one
 panics, so WhatsApp sends sit behind
 `notif.Enabled(config.ChannelWhatsApp)`.
+
+`notify.Run` sends under a channel's `async`: on the request's goroutine
+or a detached one, on a context that keeps the request's values but not
+its cancellation, under a deadline of its own, with a panic in the send
+logged rather than fatal.
+
+```go
+notify.Run(ctx, log, "surat_masuk", cfg.WhatsApp.Async, time.Minute,
+    func(ctx context.Context) {
+        if err := wa.SendTextContext(ctx, phone, msg); err != nil {
+            log.Error().Err(err).Msg("whatsapp notification failed")
+        }
+    })
+```
 
 ## Database
 
@@ -518,9 +538,13 @@ writes itself, with the same builders. `Begin` turns the shared read
 option into a lookup by key or a search, and `Fetch` runs the statement
 as a lookup, a page that is counted first, or a plain list.
 
-Nothing in `crud` logs a failure. Every error a repository returns names
-its table and method, as `m_unit.Update: <cause>`, except the
-`sql.ErrNoRows` of a write that matched no row, which comes back as is.
+Nothing in `crud` logs a failure of its own accord. Every error a
+repository returns names its table and method, as
+`m_unit.Update: <cause>`, except the `sql.ErrNoRows` of a write that
+matched no row, which comes back as is. A service that wants every
+database failure logged where it happened as well hands `NewBaseRepo`
+`crud.LogErrors(log)`, or `crud.OnError` for a hook of its own; the hook
+sits in `Wrap`, so a hand-written method is covered too.
 On MySQL that count is the rows matched only under `ClientFoundRows`,
 which `database.New` sets; a pool opened any other way must set it too.
 Column names a statement writes are quoted when they are reserved on
@@ -543,11 +567,14 @@ sort := request.Sort(c)                 // ?sort=t.code:desc,t.id
 name := request.StringPtr(c, "name")    // nil when absent or empty
 year := request.IntPtr(c, "year")       // nil unless a positive int
 from := request.DatePtr(c, "from")      // nil unless a 2026-01-02 date
+to, err := request.DateBound(c, "to")   // as DatePtr, 400 when malformed
 paid := request.BoolPtr(c, "paid")      // nil unless true/false/yes/no/1/0
 ```
 
-`ID`, `QueryID` and `Date` are the three that can fail, each with a
-`*fiber.Error` carrying 400 that the caller returns unchanged. The rest
+`ID`, `QueryID`, `Date` and `DateBound` are the four that can fail,
+each with a `*fiber.Error` carrying 400 that the caller returns
+unchanged; `Bounds` reads several `DateBound`s and keeps the first
+failure, for a filter that checks once. The rest
 correct bad input rather than reject it: a junk id is skipped, an
 unknown column is dropped by the repository's allowlist, a date bound in
 any other shape is no bound at all, and a `limit` outside `1..MaxLimit`
@@ -622,6 +649,33 @@ Every line either handler logs carries the request id under `field`, the
 key the access log uses, with the method and the path, so it can be
 joined to the request's access log line. That needs `requestid` outside
 every route, in the order shown under [Config](#config).
+
+### rest
+
+The HTTP side of `crud`. `Table` serves GET on the collection and
+DELETE `/:id`; `CRUD` adds POST, GET `/:id` and PUT `/:id` over a
+`crud.Service`. A handler embeds one and keeps only its own body, filter
+and access rule.
+
+```go
+type UnitHandler struct {
+    *rest.CRUD[Unit, *Unit, UnitReadOption]
+}
+
+func NewUnitHandler(log zerolog.Logger, svc UnitService) *UnitHandler {
+    h := &UnitHandler{}
+    h.CRUD = rest.NewCRUD(rest.NewBase(log, "unit", "unit"),
+        svc, h.filter, h.decode)
+    return h
+}
+```
+
+Every failure is returned as a `*fiber.Error` for `server.ErrorHandler`
+to render. A service's `sql.ErrNoRows` answers 404, and any other error a
+500 whose message names what failed while the cause is logged here, once.
+`Guard`, which `RequireOwner` builds, runs before PUT and DELETE touch the
+row, and before PUT reads its body. `BatchRows` and `CreateBatch` serve a
+`POST /batch` whose rows share one parent.
 
 ### httpclient
 
@@ -975,6 +1029,10 @@ serialise identically and both write SQL NULL.
 Input without an offset — `datetime-local`, a bare date, the SQL
 timestamp — resolves in `time.Local`, which is why the process zone has
 to match the driver's; see [Database](#database).
+
+`MonthName` and `DayName` give the Indonesian names for writing a date
+out: `DayName(t.Weekday()) + ", 2 " + MonthName(t.Month())` reads
+`Senin, 2 Februari`.
 
 ### whatsapp
 

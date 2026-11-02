@@ -280,8 +280,8 @@ func TestUnmarshalJSONRejectsGarbage(t *testing.T) {
 }
 
 // TestParseTolerantOfSurroundingNoise pins the two documented laxities in
-// parse's trimming, both of which exist so Scan can reuse UnmarshalJSON by
-// wrapping a bare driver value in quotes.
+// parse's trimming, both of which exist so one routine reads a quoted JSON
+// token and bare text alike.
 //
 // Repeated quotes: strings.Trim removes every leading and trailing quote, not
 // one pair, so genuinely malformed JSON is accepted. Recorded as a deliberate
@@ -593,11 +593,11 @@ func TestScanTimeTimeIsStoredVerbatim(t *testing.T) {
 	}
 }
 
-// TestScanDoesNotWriteIntoTheDriversBuffer is the test for the allocation
-// decision inside the []byte case.
+// TestScanDoesNotWriteIntoTheDriversBuffer holds the []byte case to
+// reading its source and nothing more.
 //
 // Drivers are entitled to hand back a scan buffer they will refill for the
-// next row. Appending a quote into that slice writes past len into shared
+// next row. Appending anything into that slice writes past len into shared
 // backing memory whenever cap exceeds len — corrupting the NEXT row's bytes,
 // which surfaces as an unparseable date on an unrelated record and is close
 // to impossible to trace back here.
@@ -629,8 +629,8 @@ func TestScanDoesNotWriteIntoTheDriversBuffer(t *testing.T) {
 		if b != sentinel {
 			t.Fatalf(
 				"Scan wrote 0x%02X into the driver's spare capacity at "+
-					"offset %d — the quoted slice must be freshly allocated, "+
-					"not appended into the source", b, i)
+					"offset %d — the source is read, never appended to",
+				b, i)
 		}
 	}
 	if string(src) != before {

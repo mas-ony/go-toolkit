@@ -23,9 +23,9 @@ import (
 	"github.com/mas-ony/go-toolkit/internal/testutil/sqltest"
 )
 
-// fakeDB is the shared state behind the connector, connections and
-// transactions below. Every field is guarded by mu because database/sql calls
-// Rollback from its own awaitDone goroutine, concurrently with the test.
+// fakeDB is the shared state behind the connections and transactions
+// below. Every field is guarded by mu because database/sql calls Rollback
+// from its own awaitDone goroutine, concurrently with the test.
 type fakeDB struct {
 	mu   sync.Mutex
 	opts []driver.TxOptions
@@ -41,14 +41,6 @@ type fakeDB struct {
 	// rolledBack carries one token per driver-level rollback, so a test can
 	// wait for the asynchronous one instead of sleeping.
 	rolledBack chan struct{}
-}
-
-// fakeConnector hands out connections to one fakeDB, so that sql.OpenDB can
-// use the fake without registering a driver name. Its Driver is
-// sqltest's, as is the Driver of queryConnector in read_helpers_test.go.
-type fakeConnector struct {
-	sqltest.ConnectorBase
-	db *fakeDB
 }
 
 // fakeConn implements driver.ConnBeginTx as well as driver.Conn. That is the
@@ -119,7 +111,16 @@ func assertConnectionsReturned(t *testing.T, db *sqlx.DB) {
 // both fakes in this package's tests are opened.
 func (f *fakeDB) open(t *testing.T) *sqlx.DB {
 	t.Helper()
-	return sqltest.Open(t, &fakeConnector{db: f}, "fake")
+	return sqltest.Open(t, f.connect, "fake")
+}
+
+// connect counts the connection, which is what the nesting tests read,
+// and opens it onto f.
+func (f *fakeDB) connect() driver.Conn {
+	f.mu.Lock()
+	f.connects++
+	f.mu.Unlock()
+	return &fakeConn{db: f}
 }
 
 // snapshot copies the fake's state under its lock, so a test can read it
@@ -194,15 +195,6 @@ func (c *fakeConn) BeginTx(
 	}
 	f.begins++
 	return &fakeTx{db: f}, nil
-}
-
-// Connect counts the connection, which is what the nesting tests read, and
-// opens it onto the shared fakeDB.
-func (c *fakeConnector) Connect(context.Context) (driver.Conn, error) {
-	c.db.mu.Lock()
-	c.db.connects++
-	c.db.mu.Unlock()
-	return &fakeConn{db: c.db}, nil
 }
 
 // Commit counts the call and returns the injected commit failure, if any.

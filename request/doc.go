@@ -18,10 +18,10 @@
 //
 // # Bad input is not an error
 //
-// Every helper but ID, QueryID and Date corrects or ignores what it cannot
-// use — an unknown sort column, a non-numeric entry in an id list, a page
-// size above the ceiling, a date bound in the wrong shape — and the
-// request goes on.
+// Every helper but ID, QueryID, Date and DateBound corrects or ignores
+// what it cannot use — an unknown sort column, a non-numeric entry in an
+// id list, a page size above the ceiling, a DatePtr bound in the wrong
+// shape — and the request goes on.
 //
 // Only a parameter that names the row to act on is worth a 400, because
 // nothing can stand in for it. A filter that cannot be parsed has an
@@ -34,11 +34,17 @@
 // That is the trade the rule makes, in exchange for a partly-wrong request
 // still answering.
 //
+// DateBound, with Bounds over it, is the one filter that refuses that
+// trade. Not filtering stands in badly for the bound of a period: the
+// list that comes back covers a period nobody asked for, and a report or
+// an export built from it looks right. So a handler chooses per bound:
+// DatePtr where a wider list is harmless, DateBound where it is not.
+//
 // # Nothing here writes a response
 //
-// ID, QueryID and Date return a *fiber.Error, the caller returns it
-// unchanged, and the application's error handler renders one body from
-// it.
+// ID, QueryID, Date and DateBound return a *fiber.Error, as Bounds.Err
+// does, the caller returns it unchanged, and the application's error
+// handler renders one body from it.
 //
 // Writing the response here instead does not work, and the way it fails is
 // quiet. Fiber's JSON returns nil whenever encoding succeeds, so
@@ -55,9 +61,10 @@
 // captured by a goroutine, cached, or queued for a retry — would otherwise
 // read whatever the next request put there.
 //
-// So Cols, Sort, StringPtr, Date and DatePtr clone. IDs and IntPtr do not
-// need to: they return integers, which are copies already. BoolPtr returns
-// a pointer to a fresh local.
+// So Cols, Sort, StringPtr, Date and DatePtr clone, and DateBound and
+// Bounds return what StringPtr cloned. IDs and IntPtr do not need to:
+// they return integers, which are copies already. BoolPtr returns a
+// pointer to a fresh local.
 //
 // This is the rule most likely to be broken by a helper added later, and
 // the one whose breakage is least visible in a test: a single-request test
@@ -67,14 +74,14 @@
 //
 // # Dates travel as text
 //
-// Date and DatePtr hand back "2026-01-02" as a string rather than as a
-// time.Time, because a repository binds the value as text and the engine
-// compares it as it stands. A time.Time would carry a time of day and a
-// zone, and each driver would pick its own way to send them. The layout
-// is time.DateOnly and nothing looser for the same reason: a looser parse
-// would pass on a spelling that MySQL compares only with a warning and
-// SQL Server refuses to convert at all, failing the whole statement with a
-// 500 for what was a malformed request.
+// Date, DatePtr and DateBound hand back "2026-01-02" as a string rather
+// than as a time.Time, because a repository binds the value as text and
+// the engine compares it as it stands. A time.Time would carry a time of
+// day and a zone, and each driver would pick its own way to send them.
+// The layout is time.DateOnly and nothing looser for the same reason: a
+// looser parse would pass on a spelling that MySQL compares only with a
+// warning and SQL Server refuses to convert at all, failing the whole
+// statement with a 500 for what was a malformed request.
 //
 // The check is of shape, not of range or of meaning. SQL Server's datetime
 // and smalldatetime refuse a day before 1753 and 1900 respectively when a
@@ -113,8 +120,9 @@
 // built by a real router, rather than a hand-made one, so the values under
 // test are the values a handler would actually receive: the defaults and
 // the ceiling, the junk-skipping in IDs, the three-way distinction in
-// BoolPtr, the shapes Date and DatePtr accept, and the 400 shape from ID,
-// QueryID and Date.
+// BoolPtr, the shapes Date, DatePtr and DateBound accept, the 400 shape
+// from ID, QueryID, Date and DateBound, and the first-failure rule of
+// Bounds.
 //
 // request_integration_test.go covers the buffer-reuse rule, which a
 // single-request test cannot reach by construction. It fires requests in

@@ -13,15 +13,21 @@ package crud
 // TableSpec, reserved names quoted and plain ones bare; the three Fetch
 // modes and the refusal of a prefixed page; sql.ErrNoRows for a write
 // that matched nothing and the "<table>.<Method>" form of every other
-// error; the With* copies; and the panics of a TableSpec that describes
-// its key inconsistently.
+// error; the OnError hook and LogErrors, which see every failure Wrap
+// reports, those of a scoped copy and of a hand-written method included,
+// and never sql.ErrNoRows; the With* copies; and the panics of a
+// TableSpec that describes its key inconsistently.
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"database/sql/driver"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -30,6 +36,7 @@ import (
 	"github.com/mas-ony/go-toolkit/database"
 	"github.com/mas-ony/go-toolkit/internal/testutil"
 	"github.com/mas-ony/go-toolkit/internal/testutil/sqltest"
+	"github.com/rs/zerolog"
 )
 
 // fakeDB answers every statement from canned results and keeps it in its
@@ -54,17 +61,11 @@ type fakeDB struct {
 	err error
 }
 
-// fakeConnector hands out connections to one fakeDB, so that sql.OpenDB
-// can use the fake without registering a driver name. Its Driver is
-// sqltest's.
-type fakeConnector struct {
-	sqltest.ConnectorBase
-	db *fakeDB
-}
-
-// fakeConn implements QueryerContext and ExecerContext, which lets
-// database/sql hand each statement over in one call, so Prepare is never
-// reached. The Prepare and Close it never uses are sqltest's.
+// fakeConn is a connection onto one fakeDB, which sqltest.Open opens
+// without a driver name being registered. It implements QueryerContext
+// and ExecerContext, which lets database/sql hand each statement over in
+// one call, so Prepare is never reached. The Prepare and Close it never
+// uses are sqltest's.
 type fakeConn struct {
 	sqltest.ConnBase
 	db *fakeDB
@@ -126,6 +127,9 @@ type ranked struct {
 	Rank *int    `db:"rank"`
 	User *string `db:"user"`
 }
+
+// seen is one call of an OnError hook.
+type seen struct{ table, method, err string }
 
 // errFake is the failure a fakeDB with err set answers with.
 var errFake = errors.New("fake: connection reset")
@@ -217,6 +221,17 @@ func newRankedRepo(db *sqlx.DB) BaseRepo[ranked, int, any] {
 		func(b BaseRepo[ranked, int, any]) any { return b })
 }
 
+// hooked returns an itemRepository over f whose OnError hook appends to
+// got.
+func hooked(t *testing.T, f *fakeDB, got *[]seen) *itemRepository {
+	t.Helper()
+	hook := OnError(func(table, method string, err error) {
+		*got = append(*got, seen{table, method, err.Error()})
+	})
+	db := f.open(t, "mysql")
+	return &itemRepository{NewBaseRepo(db, &itemSpec, wrapItem, hook)}
+}
+
 // selectGrammar selects the grammar driverName stands for. Both ways a
 // test here opens a database start with it: open on a fakeDB, and the
 // open in repo_integration_test.go that connects to a server.
@@ -274,12 +289,8 @@ func wantStatements(t *testing.T, f *fakeDB, want ...sqltest.Statement) {
 func (f *fakeDB) open(t *testing.T, driverName string) *sqlx.DB {
 	t.Helper()
 	selectGrammar(t, driverName)
-	return sqltest.Open(t, fakeConnector{db: f}, driverName)
-}
-
-// Connect opens a connection onto the shared fakeDB.
-func (c fakeConnector) Connect(context.Context) (driver.Conn, error) {
-	return fakeConn{db: c.db}, nil
+	return sqltest.Open(t,
+		func() driver.Conn { return fakeConn{db: f} }, driverName)
 }
 
 // Begin starts a transaction that does nothing.
@@ -846,6 +857,98 @@ func TestErrorsNameTheTableAndMethod(t *testing.T) {
 	if err := r.Update(ctx, nil); err == nil ||
 		err.Error() != "item.Update: nil model" {
 		t.Errorf("Update(nil) = %v", err)
+	}
+}
+
+// Every method that runs a statement, Wrap called by hand, and a scoped
+// copy report their failure to the hook, under the table and method the
+// error names.
+func TestOnErrorSeesEveryFailure(t *testing.T) {
+	var got []seen
+	f := &fakeDB{err: errFake}
+	r := hooked(t, f, &got)
+	ctx := context.Background()
+
+	_, _ = r.Create(ctx, &item{Code: new("A"), Title: new("a")})
+	_, _ = r.Read(ctx, itemReadOption{})
+	_ = r.Update(ctx, &item{ID: new(1)})
+	_ = r.Patch(ctx, 1, map[string]any{"title": "x"})
+	_ = r.Delete(ctx, 1)
+	_, _ = r.Count(ctx)
+	_, _ = r.Max(ctx, "code")
+	_ = r.Wrap("Custom", errFake)
+	_ = r.WithNamespace("arsip").(*itemRepository).Delete(ctx, 1)
+
+	tx, err := f.open(t, "mysql").Beginx()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	_ = r.WithTx(tx).Delete(ctx, 1)
+
+	cause := errFake.Error()
+	var want []seen
+	for _, m := range []string{"Create", "Read", "Update", "Patch",
+		"Delete", "Count", "Max", "Custom", "Delete", "Delete"} {
+		want = append(want, seen{"item", m, "item." + m + ": " + cause})
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("hook saw\n%v\nwant\n%v", got, want)
+	}
+}
+
+// A write that matched no row answers sql.ErrNoRows, which is not a
+// failure, so the hook does not see it, wrapped or not; a nil model is
+// one, and errors.Is finds ErrNilModel in it.
+func TestOnErrorSkipsNoRows(t *testing.T) {
+	var got []seen
+	f := &fakeDB{}
+	r := hooked(t, f, &got)
+	ctx := context.Background()
+
+	if err := r.Delete(ctx, 1); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("Delete of a missing row = %v", err)
+	}
+	_ = r.Wrap("Delete", sql.ErrNoRows)
+	_ = r.Wrap("Lookup", fmt.Errorf("by code: %w", sql.ErrNoRows))
+	if len(got) != 0 {
+		t.Errorf("hook saw %v", got)
+	}
+
+	_, err := r.Create(ctx, nil)
+	if !errors.Is(err, ErrNilModel) {
+		t.Errorf("Create(nil) = %v, want ErrNilModel", err)
+	}
+	if len(got) != 1 || got[0].method != "Create" {
+		t.Errorf("hook saw %v, want the nil model", got)
+	}
+}
+
+// LogErrors writes one error line per failure, with the table, the
+// method and the error, and nothing for a repository built without it.
+func TestLogErrors(t *testing.T) {
+	var buf bytes.Buffer
+	f := &fakeDB{err: errFake}
+	db := f.open(t, "mysql")
+	r := &itemRepository{NewBaseRepo(db, &itemSpec, wrapItem,
+		LogErrors(zerolog.New(&buf)))}
+
+	_ = r.Delete(context.Background(), 1)
+	var line map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &line); err != nil {
+		t.Fatalf("log = %q: %v", buf.Bytes(), err)
+	}
+	msg, _ := line["error"].(string)
+	if line["level"] != "error" || line["message"] != "db error" ||
+		line["table"] != "item" || line["method"] != "Delete" ||
+		!strings.Contains(msg, errFake.Error()) {
+		t.Errorf("log = %v", line)
+	}
+
+	buf.Reset()
+	_ = newItemRepo(db).Delete(context.Background(), 1)
+	if buf.Len() != 0 {
+		t.Errorf("a repository without the option logged %s", buf.Bytes())
 	}
 }
 
