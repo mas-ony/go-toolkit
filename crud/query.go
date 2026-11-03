@@ -48,12 +48,11 @@ type ListOption struct {
 // ReadOption is the read option of a repository whose key has the Go
 // type K. Each repository's own option embeds it and adds its
 // table-specific filters, which apply only when neither ID nor Search is
-// set. An alias that fixes K keeps the embedded field's name short:
-//
-//	type ReadOption = crud.ReadOption[int]
+// set. Go names the embedded field ReadOption, without its type
+// argument, so the option reaches Begin as opt.ReadOption:
 //
 //	type UnitReadOption struct {
-//		ReadOption
+//		crud.ReadOption[int]
 //		JenisID *int
 //	}
 type ReadOption[K comparable] struct {
