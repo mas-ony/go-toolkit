@@ -61,6 +61,13 @@ func readFixture(t *testing.T, db *sqlx.DB) (parent, child string) {
 	return parent, child
 }
 
+// hasChild is the select-list column that flags a parent row of the read
+// fixture, aliased t, with whether child holds a row for it.
+func hasChild(child string) string {
+	return ExistsFlag("SELECT 1 FROM "+child+" c WHERE c.parent_id = t.id",
+		"has_child")
+}
+
 // GetOne scans a row that exists, reports a missing one as (false, nil),
 // and binds through a transaction as well as through a pool.
 func TestIntegrationGetOne(t *testing.T) {
@@ -160,9 +167,7 @@ func TestIntegrationExistsFlagAndAsText(t *testing.T) {
 	forEachEngine(t, func(t *testing.T, db *sqlx.DB) {
 		ctx := context.Background()
 		parent, child := readFixture(t, db)
-		flag := ExistsFlag(
-			"SELECT 1 FROM "+child+" c WHERE c.parent_id = t.id",
-			"has_child")
+		flag := hasChild(child)
 		query := "SELECT t.id, t.code, t.amount, " + flag +
 			"\nFROM " + parent + " t" +
 			"\nWHERE " + LikePredicate(AsText("t.amount"), "search") +
@@ -201,6 +206,72 @@ func TestIntegrationGroupClause(t *testing.T) {
 		want := []codeCount{{"alpha", 2}, {"beta", 1}}
 		if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
 			t.Errorf("groups = %+v, want %+v", got, want)
+		}
+	})
+}
+
+// An extra column rides along the SELECT list SelectClause builds, and
+// through the derived table CountQuery wraps it in, on both engines.
+func TestIntegrationSelectClauseExtra(t *testing.T) {
+	forEachEngine(t, func(t *testing.T, db *sqlx.DB) {
+		ctx := context.Background()
+		parent, child := readFixture(t, db)
+		flag := hasChild(child)
+		query := "SELECT " + SelectClause([]string{"code"},
+			itAllowedCols, itDefaultCols, "id", flag) +
+			"\nFROM " + parent + " t"
+
+		total, err := CountQuery(ctx, db, query, map[string]any{})
+		if err != nil {
+			t.Fatalf("%v\n%s", err, query)
+		}
+		if total != 3 {
+			t.Errorf("total = %d, want 3", total)
+		}
+
+		var rows []readRow
+		err = SelectList(ctx, db, query+"\nORDER BY t.id",
+			map[string]any{}, &rows)
+		if err != nil {
+			t.Fatalf("%v\n%s", err, query)
+		}
+		if len(rows) != 3 || rows[0].HasChild == nil ||
+			*rows[0].HasChild || rows[1].HasChild == nil ||
+			!*rows[1].HasChild {
+			t.Errorf("rows = %+v, want row 2 alone flagged", rows)
+		}
+	})
+}
+
+// InList binds a list on both engines, and the (NULL) of an empty list
+// parses and matches no row, under IN and NOT IN alike.
+func TestIntegrationInList(t *testing.T) {
+	forEachEngine(t, func(t *testing.T, db *sqlx.DB) {
+		ctx := context.Background()
+		parent, _ := readFixture(t, db)
+		count := func(op string, ids []int) int {
+			t.Helper()
+			args := map[string]any{}
+			query := "SELECT t.id FROM " + parent + " t" +
+				"\nWHERE t.id " + op + " " + InList(args, "id", ids)
+			n, err := CountQuery(ctx, db, query, args)
+			if err != nil {
+				t.Fatalf("%v\n%s", err, query)
+			}
+			return n
+		}
+
+		if n := count("IN", []int{1, 3}); n != 2 {
+			t.Errorf("IN (1, 3) counted %d rows, want 2", n)
+		}
+		if n := count("NOT IN", []int{1, 3}); n != 1 {
+			t.Errorf("NOT IN (1, 3) counted %d rows, want 1", n)
+		}
+		if n := count("IN", nil); n != 0 {
+			t.Errorf("IN of no values counted %d rows, want 0", n)
+		}
+		if n := count("NOT IN", nil); n != 0 {
+			t.Errorf("NOT IN of no values counted %d rows, want 0", n)
 		}
 	})
 }

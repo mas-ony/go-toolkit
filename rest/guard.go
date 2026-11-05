@@ -36,7 +36,7 @@ func RequireOwner[T any](
 		if admit != nil && admit(c) {
 			return nil
 		}
-		row, err := fetch(c, b, id, read)
+		row, err := Fetch(c, b, id, read)
 		if err != nil {
 			return err
 		}

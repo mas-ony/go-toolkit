@@ -21,9 +21,11 @@
 //		return h
 //	}
 //
-// Base, List, BatchRows, CreateBatch and RequireOwner are what an
+// Base, Fetch, List, BatchRows, CreateBatch and RequireOwner are what an
 // endpoint of a handler's own is written with, so it answers as the
-// promoted ones do.
+// promoted ones do. Fetch takes a key of any type, so an endpoint of a
+// table keyed by a date or a code reads its row as GetByID reads one by
+// id.
 //
 // # Errors are returned, never written
 //
@@ -62,8 +64,9 @@
 // server.ErrorHandler installed, over a fake service, so each status and
 // message asserted is what a client receives: the 201, 200 and 404
 // paths, the 400s of Bind and Required, the 500 that keeps its cause in
-// the log, RequireOwner's 403 and 404 and its log line, the order of
-// guard and decode, and the envelope checks of BatchRows. Each source
+// the log, Fetch's answers over a key that is not an int, RequireOwner's
+// 403 and 404 and its log line, the order of guard and decode, and the
+// envelope checks of BatchRows. Each source
 // file's tests sit in the test file named for it, over the fake service
 // and the app base_test.go declares.
 package rest

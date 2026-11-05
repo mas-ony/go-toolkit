@@ -1,11 +1,10 @@
 package crud
 
-// Tests for batch.go, against the fake driver of repo_test.go, over
-// connections whose transactions count their commits and rollbacks.
+// Tests for batch.go, against the fake driver of repo_test.go, which
+// counts how the transactions begun on it end.
 
 import (
 	"context"
-	"database/sql/driver"
 	"errors"
 	"testing"
 
@@ -31,18 +30,6 @@ type entryRepository struct {
 	BaseRepo[entry, int, entryRepo]
 }
 
-// txCounts counts what the transactions of a countingConn end in.
-type txCounts struct{ commits, rollbacks int }
-
-// countingTx counts its Commit and Rollback into n.
-type countingTx struct{ n *txCounts }
-
-// countingConn is a fakeConn whose Begin starts a countingTx.
-type countingConn struct {
-	fakeConn
-	n *txCounts
-}
-
 var entrySpec = TableSpec[entry, int]{
 	Name:        "entry",
 	Alias:       "e",
@@ -57,21 +44,6 @@ var entrySpec = TableSpec[entry, int]{
 // embeds Scoped and declares Create is a Batch.
 var _ Batch[entry, entryRepo] = entryRepo(nil)
 
-// openCounting selects the grammar driverName stands for and returns a
-// *sqlx.DB over f whose transactions count into n.
-func openCounting(
-	t *testing.T,
-	f *fakeDB,
-	n *txCounts,
-	driverName string,
-) *sqlx.DB {
-	t.Helper()
-	selectGrammar(t, driverName)
-	return sqltest.Open(t, func() driver.Conn {
-		return countingConn{fakeConn{db: f}, n}
-	}, driverName)
-}
-
 // newEntryRepo returns an entryRepository over db.
 func newEntryRepo(db *sqlx.DB) entryRepo {
 	return &entryRepository{NewBaseRepo(db, &entrySpec,
@@ -83,30 +55,12 @@ func newEntryRepo(db *sqlx.DB) entryRepo {
 // SetID stores the key CreateAll writes back.
 func (e *entry) SetID(id int) { e.ID = &id }
 
-// Commit counts a commit.
-func (tx countingTx) Commit() error {
-	tx.n.commits++
-	return nil
-}
-
-// Rollback counts a rollback.
-func (tx countingTx) Rollback() error {
-	tx.n.rollbacks++
-	return nil
-}
-
-// Begin starts a transaction that counts how it ends.
-func (c countingConn) Begin() (driver.Tx, error) {
-	return countingTx{c.n}, nil
-}
-
 // Every item is inserted inside one transaction, which commits, and gets
 // its generated key back.
 func TestCreateAllCommitsOneTransaction(t *testing.T) {
 	grammars(t, func(t *testing.T, name string) {
 		f := &fakeDB{lastID: 7}
-		var n txCounts
-		db := openCounting(t, f, &n, name)
+		db := f.open(t, name)
 
 		items := []entry{{Code: new("a")}, {Code: new("b")}}
 		created, err := CreateAll(context.Background(), db,
@@ -122,9 +76,9 @@ func TestCreateAllCommitsOneTransaction(t *testing.T) {
 				t.Errorf("items[%d].ID = %v, want 7", i, e.ID)
 			}
 		}
-		if n.commits != 1 || n.rollbacks != 0 {
+		if commits, rollbacks := f.ended(); commits != 1 || rollbacks != 0 {
 			t.Errorf("commits, rollbacks = %d, %d; want 1, 0",
-				n.commits, n.rollbacks)
+				commits, rollbacks)
 		}
 		insert := pick(name,
 			"INSERT INTO entry (\ncode)\nVALUES (\n?)",
@@ -144,8 +98,7 @@ func TestCreateAllCommitsOneTransaction(t *testing.T) {
 func TestCreateAllRollsBackOnError(t *testing.T) {
 	grammars(t, func(t *testing.T, name string) {
 		f := &fakeDB{err: errFake}
-		var n txCounts
-		db := openCounting(t, f, &n, name)
+		db := f.open(t, name)
 
 		created, err := CreateAll(context.Background(), db,
 			newEntryRepo(db), []entry{{Code: new("a")}})
@@ -156,9 +109,9 @@ func TestCreateAllRollsBackOnError(t *testing.T) {
 		if created != nil {
 			t.Errorf("created = %v, want nil", created)
 		}
-		if n.commits != 0 || n.rollbacks != 1 {
+		if commits, rollbacks := f.ended(); commits != 0 || rollbacks != 1 {
 			t.Errorf("commits, rollbacks = %d, %d; want 0, 1",
-				n.commits, n.rollbacks)
+				commits, rollbacks)
 		}
 	})
 }
@@ -167,8 +120,7 @@ func TestCreateAllRollsBackOnError(t *testing.T) {
 // rows rather than an error.
 func TestCreateAllEmpty(t *testing.T) {
 	f := &fakeDB{}
-	var n txCounts
-	db := openCounting(t, f, &n, "mysql")
+	db := f.open(t, "mysql")
 
 	created, err := CreateAll(context.Background(), db, newEntryRepo(db),
 		[]entry(nil))
@@ -176,8 +128,8 @@ func TestCreateAllEmpty(t *testing.T) {
 		t.Fatalf("CreateAll(nil) = %v, %v; want no rows, nil",
 			created, err)
 	}
-	if n.commits != 1 {
-		t.Errorf("commits = %d, want 1", n.commits)
+	if commits, _ := f.ended(); commits != 1 {
+		t.Errorf("commits = %d, want 1", commits)
 	}
 	wantStatements(t, f)
 }

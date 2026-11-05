@@ -19,6 +19,7 @@ import (
 	"database/sql"
 	"errors"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/jmoiron/sqlx"
@@ -87,6 +88,18 @@ func scanNamed(
 		return err
 	}
 	return scan(ctx, ext, dest, bound, boundArgs...)
+}
+
+// insertInto is the INSERT of one row that Insert sends and the SQL Server
+// half of InsertReturningID wraps: table, cols and vals as Insert takes
+// them, and output, a clause that has to stand between the column list
+// and the VALUES, or "" for none.
+//
+//	INSERT INTO table (cols)output
+//	VALUES (vals)
+func insertInto(table, cols, output, vals string) string {
+	return "INSERT INTO " + table + " (" + cols + ")" + output +
+		"\nVALUES (" + vals + ")"
 }
 
 // NeedsJoin reports whether the requested columns include any that a JOIN
@@ -158,6 +171,35 @@ func AsText(col string) string {
 // to bool.
 func ExistsFlag(subquery, alias string) string {
 	return "CASE WHEN EXISTS (" + subquery + ") THEN 1 ELSE 0 END AS " + alias
+}
+
+// InList returns the parenthesised list an IN predicate compares with,
+// one placeholder per value of vs, and stores each value in args under
+// the name its placeholder binds: param_0, param_1 and so on. sqlx.Named
+// does not expand a slice, so a list cannot be bound as one parameter:
+//
+//	"t.unit_id IN " + InList(args, "unit", []int{3, 4})
+//	// "t.unit_id IN (:unit_0, :unit_1)", 3 and 4 bound in args
+//
+// param is the bind name without its leading colon, written in code. Keep
+// vs bounded: each value is one bind parameter, and SQL Server caps a
+// statement at about 2100 of them.
+//
+// An empty vs renders "(NULL)", which parses on both engines and which no
+// value equals, so the predicate matches no row. NOT IN (NULL) matches no
+// row either, so a caller that reads an empty list another way, as "no
+// filter" or as "every row", acts on it before calling.
+func InList[V any](args map[string]any, param string, vs []V) string {
+	if len(vs) == 0 {
+		return "(NULL)"
+	}
+	ph := make([]string, len(vs))
+	for i, v := range vs {
+		key := param + "_" + strconv.Itoa(i)
+		ph[i] = ":" + key
+		args[key] = v
+	}
+	return "(" + strings.Join(ph, ", ") + ")"
 }
 
 // GetOne runs a named single-row query and scans the row into dest. A
@@ -266,32 +308,44 @@ func SelectList(
 // because a derived table rejects a duplicate column name and CountQuery
 // builds one.
 //
+// extra are expressions the list carries after the requested columns,
+// whatever cols asks for, such as a flag ExistsFlag renders. Each is
+// emitted once as well, and each is written in code, as allowed is.
+//
 // The separator indents continuation lines under the "SELECT " that the
 // caller writes in front of the result.
 //
-// Every expression comes from allowed and none from cols, so nothing a
-// client sends reaches the query text. SelectClause panics when cols,
-// defaults and pk between them resolve to no column at all, which takes a
-// disagreement between three arguments that are all written in code.
+// Every expression comes from allowed or extra and none from cols, so
+// nothing a client sends reaches the query text. SelectClause panics when
+// cols, defaults and pk between them resolve to no column at all, extra
+// aside, which takes a disagreement between three arguments that are all
+// written in code.
 func SelectClause(
 	cols []string,
 	allowed map[string]string,
 	defaults []string,
 	pk string,
+	extra ...string,
 ) string {
 	var exprs []string
-	for _, name := range activeCols(cols, defaults, allowed) {
-		expr, ok := allowed[name]
-		if !ok || slices.Contains(exprs, expr) {
-			continue
+	add := func(expr string) {
+		if !slices.Contains(exprs, expr) {
+			exprs = append(exprs, expr)
 		}
-		exprs = append(exprs, expr)
+	}
+	for _, name := range activeCols(cols, defaults, allowed) {
+		if expr, ok := allowed[name]; ok {
+			add(expr)
+		}
 	}
 	if pkExpr, ok := allowed[pk]; ok && !slices.Contains(exprs, pkExpr) {
 		exprs = append([]string{pkExpr}, exprs...)
 	}
 	if len(exprs) == 0 {
 		panic("SelectClause: cols, defaults and pk resolve to no column")
+	}
+	for _, expr := range extra {
+		add(expr)
 	}
 	return strings.Join(exprs, ",\n       ")
 }
@@ -388,15 +442,15 @@ func (f SortField) Direction() string {
 //
 // It is here rather than beside InsertReturningID because both engines
 // spell it alike. It is also the statement InsertReturningID sends on
-// MySQL before it reads the key, so a row is written one way whichever of
-// the two a repository calls.
+// MySQL before it reads the key, and, through insertInto, the one its SQL
+// Server form adds an OUTPUT clause to, so a row is written one way
+// whichever of the two a repository calls.
 func Insert(
 	ctx context.Context,
 	ext sqlx.ExtContext,
 	table, cols, vals string,
 	arg any,
 ) (sql.Result, error) {
-	query := "INSERT INTO " + table + " (" + cols + ")" +
-		"\nVALUES (" + vals + ")"
+	query := insertInto(table, cols, "", vals)
 	return sqlx.NamedExecContext(ctx, ext, query, arg)
 }

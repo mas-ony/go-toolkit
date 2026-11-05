@@ -37,6 +37,7 @@ go get github.com/mas-ony/go-toolkit
 | `importer`   | Drives a spreadsheet import, a file or an upload   |
 | `logger`     | zerolog configured per environment                 |
 | `notify`     | Runs a best-effort notification, sync or detached  |
+| `ptr`        | Reads an optional value, nil as its zero value     |
 | `request`    | Fiber route and query parameter helpers            |
 | `response`   | The JSON envelope every handler returns            |
 | `rest`       | Fiber handlers over a `crud.Service`               |
@@ -72,8 +73,12 @@ so the packages that apply it cannot drift apart:
   cap.
 - `internal/logfield`: the key a handler's lines carry its name under,
   and the keys a log line about a request carries its method and path
-  under, which `rest` and `server` both log by, and the keys a recovered
-  panic is logged under, which `server` and `notify` share.
+  under, which `rest` and `server` both log by, the keys a recovered
+  panic is logged under, which `server` and `notify` share, the key a
+  line about a table's rows carries their entity under, which `crud` and
+  `notify` share, and the keys a line about a delivered notification
+  carries its recipient, its file and its message id under, which
+  `email`, `telegram` and `whatsapp` share.
 
 A service cannot import any of them; they are how the packages above
 agree with each other.
@@ -84,8 +89,9 @@ under `internal/testutil`, so the copies cannot differ. `testutil` itself
 needs only the standard library; beneath it, `sqltest` fakes a
 `database/sql` driver, `dbtest` runs a suite against each real server
 whose DSN is set, `xlsxtest` builds workbooks with excelize, and
-`fibertest` serves an app on a loopback port. They are split by what
-they link, so a test binary carries only what its helpers need.
+`fibertest` sends an app a request in process or serves it on a
+loopback port. They are split by what they link, so a test binary
+carries only what its helpers need.
 
 ## Config
 
@@ -501,7 +507,9 @@ row would fail the same way.
 table. A `TableSpec` describes the table, `BaseRepo` derives its
 `INSERT`, `UPDATE`, `DELETE` and `SELECT` from that description, and
 `BaseService` implements the `Service` contract over any repository
-whose key the database generates.
+whose key the database generates. `BaseServiceOf` implements
+`ServiceOf`, the same contract for a key of any type, such as a date or
+a code the row carries.
 
 ```go
 var unitSpec = crud.TableSpec[Unit, int]{
@@ -537,6 +545,13 @@ The repository embeds `BaseRepo` by value and is handed `Create`,
 writes itself, with the same builders. `Begin` turns the shared read
 option into a lookup by key or a search, and `Fetch` runs the statement
 as a lookup, a page that is counted first, or a plain list.
+
+`BeginJoined` adds joins and extra SELECT expressions written in code,
+such as a flag `database.ExistsFlag` renders, and `AndIn` binds a list
+through `database.InList`. A column the client may leave for the server
+to fill, such as the date of a row, goes in `Stamps`: `Create` and
+`Update` write it as the bound value or, when that is NULL, the
+server's clock.
 
 Nothing in `crud` logs a failure of its own accord. Every error a
 repository returns names its table and method, as
@@ -673,6 +688,8 @@ func NewUnitHandler(log zerolog.Logger, svc UnitService) *UnitHandler {
 Every failure is returned as a `*fiber.Error` for `server.ErrorHandler`
 to render. A service's `sql.ErrNoRows` answers 404, and any other error a
 500 whose message names what failed while the cause is logged here, once.
+`Fetch` reads one row for an endpoint of a handler's own, by an id or by
+a key of any other type, and refuses a missing one as GET `/:id` does.
 `Guard`, which `RequireOwner` builds, runs before PUT and DELETE touch the
 row, and before PUT reads its body. `BatchRows` and `CreateBatch` serve a
 `POST /batch` whose rows share one parent.
@@ -1218,7 +1235,8 @@ racing — the ones a unit test would have to assume rather than assert.
   `errors.Is`, so a message can be reworded without breaking anyone.
 - **Pointers for optional values.** A `nil` is "absent"; a zero is a
   value somebody chose. Cell coercion and query parameters both rely on
-  the distinction.
+  the distinction, and `ptr.Value` reads one back, nil as the zero
+  value of its type.
 - **Startup state is set once, at startup.** The SQL grammar and table
   prefix, the paging defaults, the upload limits and allowlist, the
   workbook size cap, and the import registry are process-wide. Most are

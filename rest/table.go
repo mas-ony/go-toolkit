@@ -27,6 +27,11 @@ type Table[T, O any] struct {
 	filter func(c fiber.Ctx, lo crud.ListOption) (O, error)
 }
 
+// idParam is the route parameter /:id names a row by. Delete and CRUD's
+// Put read it through guarded, and CRUD's GetByID reads it directly, so
+// every endpoint that addresses one row reads the same parameter.
+const idParam = "id"
+
 // NewTable returns a Table over the service methods read and remove.
 // filter builds the read option of GET from the query string, around the
 // page and limit already parsed into lo, and returns the error to answer
@@ -46,7 +51,7 @@ func NewTable[T, O any](
 // Put open with it, so both hold the Guard to one order, before the row
 // is touched and before a body is read.
 func (h *Table[T, O]) guarded(c fiber.Ctx) (int, error) {
-	id, err := request.ID(c, "id")
+	id, err := request.ID(c, idParam)
 	if err != nil {
 		return 0, err
 	}

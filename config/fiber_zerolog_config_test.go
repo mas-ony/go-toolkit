@@ -18,6 +18,7 @@ import (
 	fiberzerolog "github.com/gofiber/contrib/v3/zerolog"
 	"github.com/gofiber/fiber/v3"
 	"github.com/gofiber/fiber/v3/middleware/requestid"
+	"github.com/mas-ony/go-toolkit/internal/testutil/fibertest"
 	"github.com/rs/zerolog"
 	"github.com/spf13/viper"
 )
@@ -153,12 +154,7 @@ func TestZerologRequestIDFieldMatchesTheMiddleware(t *testing.T) {
 			return c.SendStatus(fiber.StatusNoContent)
 		})
 
-		resp, err := app.Test(httptest.NewRequest(fiber.MethodGet, "/",
-			nil))
-		if err != nil {
-			t.Fatal(err)
-		}
-		_ = resp.Body.Close()
+		fibertest.Send(t, app, httptest.NewRequest(fiber.MethodGet, "/", nil))
 
 		var line map[string]any
 		if err := json.Unmarshal(buf.Bytes(), &line); err != nil {

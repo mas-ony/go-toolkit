@@ -2,9 +2,9 @@ package rest
 
 // Tests for base.go, and the fixture every test file of this package
 // shares: a fakeService, a CRUD over it whose caller is the user the
-// X-User header names, and an app serving that CRUD under /r with
-// server.ErrorHandler installed, so every status and message a test
-// asserts is what a client receives.
+// X-User header names, and an app serving that CRUD under /r, and a read
+// by name through Fetch under /n, with server.ErrorHandler installed, so
+// every status and message a test asserts is what a client receives.
 
 import (
 	"bytes"
@@ -21,6 +21,7 @@ import (
 	"github.com/gofiber/fiber/v3"
 	"github.com/mas-ony/go-toolkit/crud"
 	"github.com/mas-ony/go-toolkit/internal/testutil"
+	"github.com/mas-ony/go-toolkit/internal/testutil/fibertest"
 	"github.com/mas-ony/go-toolkit/request"
 	"github.com/mas-ony/go-toolkit/server"
 	"github.com/rs/zerolog"
@@ -77,6 +78,51 @@ type result struct {
 
 var _ crud.Service[row, rowOption] = (*fakeService)(nil)
 
+// send sends one request to app as the user named, "" for none, with
+// body as written, and decodes the envelope it gets back.
+func send(
+	t *testing.T,
+	app *fiber.App,
+	user, method, path, body string,
+) result {
+	t.Helper()
+	var r io.Reader
+	if body != "" {
+		r = strings.NewReader(body)
+	}
+	req := httptest.NewRequest(method, path, r)
+	if body != "" {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	if user != "" {
+		req.Header.Set("X-User", user)
+	}
+	status, raw := fibertest.Send(t, app, req)
+	res := result{status: status, raw: string(raw)}
+	if err := json.Unmarshal(raw, &res); err != nil {
+		t.Fatalf("%s %s: %v: %s", method, path, err, raw)
+	}
+	return res
+}
+
+// expect fails t unless res carries status and msg.
+func expect(t *testing.T, res result, status int, msg string) {
+	t.Helper()
+	if res.status != status || res.Message != msg {
+		t.Errorf("got %d %q, want %d %q (%s)",
+			res.status, res.Message, status, msg, res.raw)
+	}
+}
+
+// serveRow returns a fakeService holding row 7, which user 4 owns, and an
+// app serving a CRUD over it that logs nowhere.
+func serveRow() (*fakeService, *fiber.App) {
+	svc := &fakeService{rows: map[int]*row{
+		7: {ID: new(7), Owner: new(4), Name: new("seven")},
+	}}
+	return svc, newApp(newHandler(zerolog.Nop(), svc), svc)
+}
+
 // newHandler returns a CRUD over svc whose caller is the user the X-User
 // header names. Its filter reads ?name=, and its decode requires a name
 // and takes the owner on POST only.
@@ -111,10 +157,19 @@ func newHandler(
 }
 
 // newApp returns an app that renders errors with server.ErrorHandler and
-// serves h under /r, with POST /r/batch over svc.
+// serves h under /r, with POST /r/batch over svc, and GET /n/:name, a
+// row read by its name through Fetch, as a table keyed by a natural key
+// reads one.
 func newApp(h *CRUD[row, *row, rowOption], svc *fakeService) *fiber.App {
 	app := fiber.New(fiber.Config{
 		ErrorHandler: server.ErrorHandler(zerolog.Nop(), "request_id"),
+	})
+	app.Get("/n/:name", func(c fiber.Ctx) error {
+		r, err := Fetch(c, h.Base, c.Params("name"), svc.ReadByName)
+		if err != nil {
+			return err
+		}
+		return OK(c, r)
 	})
 	app.Post("/r/batch", func(c fiber.Ctx) error {
 		var req rowBatch
@@ -136,59 +191,6 @@ func newApp(h *CRUD[row, *row, rowOption], svc *fakeService) *fiber.App {
 	app.Put("/r/:id", h.Put)
 	app.Delete("/r/:id", h.Delete)
 	return app
-}
-
-// send sends one request to app as the user named, "" for none, with
-// body as written, and decodes the envelope it gets back.
-func send(
-	t *testing.T,
-	app *fiber.App,
-	user, method, path, body string,
-) result {
-	t.Helper()
-	var r io.Reader
-	if body != "" {
-		r = strings.NewReader(body)
-	}
-	req := httptest.NewRequest(method, path, r)
-	if body != "" {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	if user != "" {
-		req.Header.Set("X-User", user)
-	}
-	resp, err := app.Test(req)
-	if err != nil {
-		t.Fatalf("%s %s: %v", method, path, err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-	raw, err := io.ReadAll(resp.Body)
-	if err != nil {
-		t.Fatal(err)
-	}
-	res := result{status: resp.StatusCode, raw: string(raw)}
-	if err := json.Unmarshal(raw, &res); err != nil {
-		t.Fatalf("%s %s: %v: %s", method, path, err, raw)
-	}
-	return res
-}
-
-// expect fails t unless res carries status and msg.
-func expect(t *testing.T, res result, status int, msg string) {
-	t.Helper()
-	if res.status != status || res.Message != msg {
-		t.Errorf("got %d %q, want %d %q (%s)",
-			res.status, res.Message, status, msg, res.raw)
-	}
-}
-
-// serveRow returns a fakeService holding row 7, which user 4 owns, and an
-// app serving a CRUD over it that logs nowhere.
-func serveRow() (*fakeService, *fiber.App) {
-	svc := &fakeService{rows: map[int]*row{
-		7: {ID: new(7), Owner: new(4), Name: new("seven")},
-	}}
-	return svc, newApp(newHandler(zerolog.Nop(), svc), svc)
 }
 
 // called reports whether the method name ran.
@@ -246,6 +248,24 @@ func (f *fakeService) ReadByID(_ context.Context, id int) (*row, error) {
 	return f.rows[id], nil
 }
 
+// ReadByName returns the row named name, or nil, and fails as ReadByID
+// does.
+func (f *fakeService) ReadByName(
+	_ context.Context,
+	name string,
+) (*row, error) {
+	f.calls = append(f.calls, "ReadByName")
+	if f.readByIDErr != nil {
+		return nil, f.readByIDErr
+	}
+	for _, r := range f.rows {
+		if r.Name != nil && *r.Name == name {
+			return r, nil
+		}
+	}
+	return nil, nil
+}
+
 func (f *fakeService) Update(_ context.Context, r *row) error {
 	f.calls = append(f.calls, "Update")
 	f.written = r
@@ -269,6 +289,25 @@ func TestBindAndRequired(t *testing.T) {
 		400, "invalid request body")
 	expect(t, send(t, app, "4", "POST", "/r", `{"owner":4}`),
 		400, "name is required")
+}
+
+// Fetch answers a read by a key that is not an int as GetByID answers
+// one by id: the row, 404 with the Missing message when there is none,
+// and a 500 that names what failed when the read fails.
+func TestFetch(t *testing.T) {
+	svc, app := serveRow()
+
+	res := send(t, app, "4", "GET", "/n/seven", "")
+	expect(t, res, 200, "ok")
+	if !strings.Contains(string(res.Data), `"id":7`) {
+		t.Errorf("GET /n/seven: %s", res.raw)
+	}
+	expect(t, send(t, app, "4", "GET", "/n/eight", ""),
+		404, "row not found")
+
+	svc.readByIDErr = errors.New("down")
+	expect(t, send(t, app, "4", "GET", "/n/seven", ""),
+		500, "failed to fetch row")
 }
 
 // A 500 is logged once at error level with its cause, and a refusal at

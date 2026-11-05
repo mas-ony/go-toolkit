@@ -10,13 +10,14 @@ package crud
 // grammars, under the driver name that picks its placeholder style.
 //
 // What the file promises: the statements BaseRepo derives from a
-// TableSpec, reserved names quoted and plain ones bare; the three Fetch
-// modes and the refusal of a prefixed page; sql.ErrNoRows for a write
-// that matched nothing and the "<table>.<Method>" form of every other
-// error; the OnError hook and LogErrors, which see every failure Wrap
-// reports, those of a scoped copy and of a hand-written method included,
-// and never sql.ErrNoRows; the With* copies; and the panics of a
-// TableSpec that describes its key inconsistently.
+// TableSpec, reserved names quoted and plain ones bare, and stamps
+// written after the bound columns; the three Fetch modes and the refusal
+// of a prefixed page; sql.ErrNoRows for a write that matched nothing and
+// the "<table>.<Method>" form of every other error; the OnError hook and
+// LogErrors, which see every failure Wrap reports, those of a scoped copy
+// and of a hand-written method included, and never sql.ErrNoRows; the
+// With* copies; and the panics of a TableSpec that describes its key or
+// its stamps inconsistently.
 
 import (
 	"bytes"
@@ -59,6 +60,10 @@ type fakeDB struct {
 	noCount bool
 	// err fails every statement.
 	err error
+
+	// commits and rollbacks count how the transactions begun on the fake
+	// ended; see ended.
+	commits, rollbacks int
 }
 
 // fakeConn is a connection onto one fakeDB, which sqltest.Open opens
@@ -71,9 +76,9 @@ type fakeConn struct {
 	db *fakeDB
 }
 
-// fakeTx commits and rolls back nothing; the statements inside it reach
-// the same fakeDB as any other.
-type fakeTx struct{}
+// fakeTx is a transaction on one fakeDB. The statements inside it reach
+// the fakeDB as any other does, and the fakeDB counts how it ends.
+type fakeTx struct{ db *fakeDB }
 
 // fakeResult is what every Exec returns.
 type fakeResult struct {
@@ -118,6 +123,14 @@ type itemRepository struct {
 type holiday struct {
 	Code *string `db:"code"`
 	Note *string `db:"note"`
+}
+
+// stamped is a row of a table with a generated key whose logged column
+// every write stamps.
+type stamped struct {
+	ID     *int    `db:"id"`
+	Body   *string `db:"body"`
+	Logged *string `db:"logged"`
 }
 
 // ranked is a row of a table whose name, key and columns are all reserved
@@ -172,6 +185,21 @@ var holidaySpec = TableSpec[holiday, string]{
 	DefaultSort: "h.code",
 }
 
+var stampedSpec = TableSpec[stamped, int]{
+	Name:  "stamped",
+	Alias: "s",
+	Key:   "id",
+	Cols: map[string]string{
+		"id":     "s.id",
+		"body":   "s.body",
+		"logged": "s.logged",
+	},
+	DefaultCols: []string{"id", "body", "logged"},
+	Writable:    []string{"body"},
+	Stamps:      []string{"logged"},
+	DefaultSort: "s.id",
+}
+
 // The interface checks a service relies on: the promoted methods and a
 // Read of the repository's own make up itemRepo, and a repository keyed
 // by an int is a Repository for the service layer.
@@ -185,6 +213,15 @@ func wrapItem(b BaseRepo[item, int, itemRepo]) itemRepo {
 	return &itemRepository{b}
 }
 
+// bareRepo returns a BaseRepo over spec that embeds into no repository
+// of its own, for a table whose tests need only the promoted methods.
+func bareRepo[T any, K comparable](
+	db *sqlx.DB,
+	spec *TableSpec[T, K],
+) BaseRepo[T, K, any] {
+	return NewBaseRepo(db, spec, func(b BaseRepo[T, K, any]) any { return b })
+}
+
 // newItemRepo returns an itemRepository over db.
 func newItemRepo(db *sqlx.DB) *itemRepository {
 	return &itemRepository{NewBaseRepo(db, &itemSpec, wrapItem)}
@@ -192,8 +229,7 @@ func newItemRepo(db *sqlx.DB) *itemRepository {
 
 // newHolidayRepo returns a bare BaseRepo over holidaySpec.
 func newHolidayRepo(db *sqlx.DB) BaseRepo[holiday, string, any] {
-	return NewBaseRepo(db, &holidaySpec,
-		func(b BaseRepo[holiday, string, any]) any { return b })
+	return bareRepo(db, &holidaySpec)
 }
 
 // rankedSpec describes the table named order, keyed by key, which writes
@@ -217,8 +253,7 @@ func rankedSpec() *TableSpec[ranked, int] {
 
 // newRankedRepo returns a bare BaseRepo over rankedSpec.
 func newRankedRepo(db *sqlx.DB) BaseRepo[ranked, int, any] {
-	return NewBaseRepo(db, rankedSpec(),
-		func(b BaseRepo[ranked, int, any]) any { return b })
+	return bareRepo(db, rankedSpec())
 }
 
 // hooked returns an itemRepository over f whose OnError hook appends to
@@ -293,8 +328,16 @@ func (f *fakeDB) open(t *testing.T, driverName string) *sqlx.DB {
 		func() driver.Conn { return fakeConn{db: f} }, driverName)
 }
 
-// Begin starts a transaction that does nothing.
-func (fakeConn) Begin() (driver.Tx, error) { return fakeTx{}, nil }
+// ended reports how many of the transactions begun on f committed and
+// how many rolled back.
+func (f *fakeDB) ended() (commits, rollbacks int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.commits, f.rollbacks
+}
+
+// Begin starts a transaction whose end the fakeDB counts.
+func (c fakeConn) Begin() (driver.Tx, error) { return fakeTx{c.db}, nil }
 
 // QueryContext records the query and answers it.
 func (c fakeConn) QueryContext(
@@ -344,11 +387,21 @@ func (c fakeConn) ExecContext(
 	}, nil
 }
 
-// Commit does nothing.
-func (fakeTx) Commit() error { return nil }
+// Commit counts a commit.
+func (tx fakeTx) Commit() error {
+	tx.db.mu.Lock()
+	defer tx.db.mu.Unlock()
+	tx.db.commits++
+	return nil
+}
 
-// Rollback does nothing.
-func (fakeTx) Rollback() error { return nil }
+// Rollback counts a rollback.
+func (tx fakeTx) Rollback() error {
+	tx.db.mu.Lock()
+	defer tx.db.mu.Unlock()
+	tx.db.rollbacks++
+	return nil
+}
 
 // LastInsertId reports the canned key.
 func (r fakeResult) LastInsertId() (int64, error) { return r.lastID, nil }
@@ -486,6 +539,47 @@ func TestUpdateBindsANaturalKeyAfterTheColumns(t *testing.T) {
 		if n := len(f.Statements()); n != 1 {
 			t.Errorf("a model without its key sent a statement")
 		}
+	})
+}
+
+// Create and Update write a stamp after the columns they bind, as the
+// value bound from the model or, when that is NULL, the server's clock in
+// the grammar's own spelling.
+func TestStampsFollowTheWrittenColumns(t *testing.T) {
+	grammars(t, func(t *testing.T, name string) {
+		f := &fakeDB{lastID: 5, affected: 1}
+		r := bareRepo(f.open(t, name), &stampedSpec)
+		ctx := context.Background()
+
+		if _, err := r.Create(ctx, &stamped{Body: new("b")}); err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		err := r.Update(ctx, &stamped{ID: new(5), Body: new("c"),
+			Logged: new("2026-08-17 10:00:00")})
+		if err != nil {
+			t.Fatalf("Update: %v", err)
+		}
+		wantStatements(t, f,
+			sqltest.Statement{
+				Query: pick(name,
+					"INSERT INTO stamped (\nbody,\nlogged)"+
+						"\nVALUES (\n?,\nCOALESCE(?, NOW()))",
+					"DECLARE @Inserted TABLE (id BIGINT);"+
+						"\nINSERT INTO stamped (\nbody,\nlogged)"+
+						"\nOUTPUT INSERTED.id INTO @Inserted (id)"+
+						"\nVALUES (\n@p1,\nCOALESCE(@p2, SYSDATETIME()));"+
+						"\nSELECT id FROM @Inserted;"),
+				Args: []any{"b", nil},
+			},
+			sqltest.Statement{
+				Query: pick(name,
+					"UPDATE stamped\nSET body = ?,"+
+						"\n    logged = COALESCE(?, NOW())\nWHERE id = ?",
+					"UPDATE stamped\nSET body = @p1,"+
+						"\n    logged = COALESCE(@p2, SYSDATETIME())"+
+						"\nWHERE id = @p3"),
+				Args: []any{"c", "2026-08-17 10:00:00", int64(5)},
+			})
 	})
 }
 
@@ -1039,6 +1133,27 @@ func TestJoins(t *testing.T) {
 	}
 }
 
+// BeginJoined puts its joins after the table and its extra columns after
+// the requested ones, and turns ID into a lookup as Begin does.
+func TestBeginJoinedAddsJoinsAndExtra(t *testing.T) {
+	f := &fakeDB{}
+	r := newItemRepo(f.open(t, "mysql"))
+	join := r.LeftJoin(true, "unit", "u", "u.id = i.unit_id")
+	flag := database.ExistsFlag(
+		"SELECT 1 FROM tag g WHERE g.item_id = i.id", "tagged")
+
+	q, filter := r.BeginJoined(ReadOption[int]{
+		ListOption: ListOption{Cols: []string{"code"}},
+		ID:         new(7),
+	}, join, flag)
+	if filter || !q.single {
+		t.Errorf("a lookup by ID: filter %t, single %t", filter, q.single)
+	}
+	wantQuery(t, q, "SELECT "+sqltest.Selected("i.id", "i.code", flag)+
+		"\nFROM item AS i"+join+
+		"\nWHERE (1=1)\n  AND (i.id = :id)", map[string]any{"id": 7})
+}
+
 // A spec that describes its key inconsistently stops the program at
 // construction; a consistent one, generated or natural, does not.
 func TestNewBaseRepoChecksTheKey(t *testing.T) {
@@ -1074,4 +1189,23 @@ func TestNewBaseRepoChecksTheKey(t *testing.T) {
 	NewBaseRepo(nil, &TableSpec[holiday, int]{
 		Name: "h", Key: "id", Writable: []string{"note"},
 	}, embedInt)
+}
+
+// A stamp that is also the key or a column written from the model stops
+// the program at construction, since a statement would write it twice; a
+// stamp of its own does not.
+func TestNewBaseRepoChecksTheStamps(t *testing.T) {
+	for name, spec := range map[string]TableSpec[stamped, int]{
+		"the key": {Name: "s", Key: "id", Stamps: []string{"id"}},
+		"a Writable column": {Name: "s", Key: "id",
+			Writable: []string{"logged"}, Stamps: []string{"logged"}},
+		"an Updatable column": {Name: "s", Key: "id",
+			Writable: []string{"body"}, Updatable: []string{"logged"},
+			Stamps: []string{"logged"}},
+	} {
+		testutil.MustPanic(t, "a stamp that is "+name, func() {
+			bareRepo(nil, &spec)
+		})
+	}
+	bareRepo(nil, &stampedSpec)
 }

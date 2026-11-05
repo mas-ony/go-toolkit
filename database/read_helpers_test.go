@@ -13,6 +13,7 @@ import (
 	"context"
 	"database/sql/driver"
 	"errors"
+	"maps"
 	"strings"
 	"sync"
 	"testing"
@@ -166,12 +167,45 @@ func TestSelectClause(t *testing.T) {
 	}
 }
 
+// extra follows the requested columns whatever they are, each expression
+// once, and leaves the key first.
+func TestSelectClauseAppendsExtra(t *testing.T) {
+	flag := "CASE WHEN EXISTS (SELECT 1) THEN 1 ELSE 0 END AS f"
+	cases := []struct {
+		name  string
+		cols  []string
+		extra []string
+		want  string
+	}{
+		{"after a subset", []string{"code"}, []string{flag},
+			sqltest.Selected("t.id", "t.code", flag)},
+		{"after the defaults", nil, []string{flag},
+			sqltest.Selected("t.id", "t.code", "t.title",
+				"u.name AS unit_name", flag)},
+		{"a repeated extra appears once", []string{"code"},
+			[]string{flag, flag}, sqltest.Selected("t.id", "t.code", flag)},
+		{"an extra already selected appears once", []string{"code"},
+			[]string{"t.code"}, sqltest.Selected("t.id", "t.code")},
+	}
+	for _, c := range cases {
+		got := SelectClause(c.cols, testAllowedCols, testDefaultCols, "id",
+			c.extra...)
+		if got != c.want {
+			t.Errorf("%s:\n got %q\nwant %q", c.name, got, c.want)
+		}
+	}
+}
+
 // The panic can only follow from arguments that disagree, all of them
-// written in code, so it is the loud end of a misconfiguration.
+// written in code, so it is the loud end of a misconfiguration. An extra
+// column does not stand in for the ones that are missing.
 func TestSelectClausePanicsWhenNothingResolves(t *testing.T) {
 	allowed := map[string]string{"code": "t.code"}
 	testutil.MustPanic(t, "SelectClause with unknown defaults and pk", func() {
 		SelectClause([]string{"bogus"}, allowed, []string{"missing"}, "gone")
+	})
+	testutil.MustPanic(t, "SelectClause with nothing but extra", func() {
+		SelectClause(nil, allowed, []string{"missing"}, "gone", "t.flag")
 	})
 }
 
@@ -355,6 +389,29 @@ func TestAsText(t *testing.T) {
 	if got, want := AsText("t.amount"),
 		"CAST(t.amount AS CHAR(20))"; got != want {
 		t.Errorf("AsText = %q, want %q", got, want)
+	}
+}
+
+// InList lists one placeholder per value, in order, and binds each value
+// under its placeholder's name beside what args already held. An empty
+// list renders the one that no value equals, and binds nothing.
+func TestInList(t *testing.T) {
+	args := map[string]any{"other": 1}
+	if got, want := InList(args, "unit", []int{3, 4}),
+		"(:unit_0, :unit_1)"; got != want {
+		t.Errorf("InList = %q, want %q", got, want)
+	}
+	want := map[string]any{"other": 1, "unit_0": 3, "unit_1": 4}
+	if !maps.Equal(args, want) {
+		t.Errorf("args = %v, want %v", args, want)
+	}
+
+	empty := map[string]any{}
+	if got := InList(empty, "unit", []int(nil)); got != "(NULL)" {
+		t.Errorf("InList of no values = %q, want (NULL)", got)
+	}
+	if len(empty) != 0 {
+		t.Errorf("an empty list bound %v", empty)
 	}
 }
 

@@ -9,7 +9,9 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/mas-ony/go-toolkit/internal/logfield"
 	"github.com/mdp/qrterminal/v3"
+
 	// SQLite driver for whatsmeow's credential store. Blank import: the
 	// package is never referenced by name, only for the side effect of its
 	// init() registering the "sqlite3" driver name. Pure Go — SQLite built
@@ -486,7 +488,7 @@ func (s *Service) SendTextContext(
 		return fmt.Errorf("whatsapp: send to %s: %w", jid.User, err)
 	}
 
-	s.log.Info().Str("to", jid.User).Msg("whatsapp: message sent")
+	s.log.Info().Str(logfield.To, jid.User).Msg("whatsapp: message sent")
 	return nil
 }
 
@@ -594,8 +596,8 @@ func (s *Service) SendDocumentContext(
 	}
 
 	s.log.Info().
-		Str("to", jid.User).
-		Str("file", filename).
+		Str(logfield.To, jid.User).
+		Str(logfield.File, filename).
 		Msg("whatsapp: document sent")
 	return nil
 }

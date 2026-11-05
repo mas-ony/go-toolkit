@@ -51,11 +51,11 @@ func (h *CRUD[T, PT, O]) Post(c fiber.Ctx) error {
 
 // GetByID handles GET /:id: the row, or 404 with the Missing message.
 func (h *CRUD[T, PT, O]) GetByID(c fiber.Ctx) error {
-	id, err := request.ID(c, "id")
+	id, err := request.ID(c, idParam)
 	if err != nil {
 		return err
 	}
-	row, err := fetch(c, h.Base, id, h.svc.ReadByID)
+	row, err := Fetch(c, h.Base, id, h.svc.ReadByID)
 	if err != nil {
 		return err
 	}

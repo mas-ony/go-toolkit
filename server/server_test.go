@@ -46,23 +46,15 @@ func newApp(w io.Writer) *fiber.App {
 func send(t *testing.T, app *fiber.App, method, path, body string) (
 	int, map[string]any) {
 	t.Helper()
-	resp, err := app.Test(httptest.NewRequest(method, path,
+	status, raw := fibertest.Send(t, app, httptest.NewRequest(method, path,
 		strings.NewReader(body)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	raw, err := io.ReadAll(resp.Body)
-	if err != nil {
-		t.Fatal(err)
-	}
 	var env map[string]any
 	if len(raw) > 0 {
 		if err := json.Unmarshal(raw, &env); err != nil {
 			t.Fatalf("%s %s: body is not JSON: %q", method, path, raw)
 		}
 	}
-	return resp.StatusCode, env
+	return status, env
 }
 
 // A *fiber.Error keeps its status and message and logs nothing.

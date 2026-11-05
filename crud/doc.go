@@ -15,9 +15,10 @@
 // table.go describes a table. repo.go and query.go are the repository
 // layer: BaseRepo with the statements it derives from a TableSpec, and the
 // Query a repository's own Read assembles and Fetch runs. service.go is
-// the service layer: BaseService, which implements Service over any
-// Repository, and Unpack, FirstOf and CreateEach, the three steps a
-// hand-written service method repeats.
+// the service layer: BaseServiceOf, which implements ServiceOf over any
+// RepositoryOf, BaseService, which is BaseServiceOf for a key the
+// database generates, and Unpack, FirstOf and CreateEach, the three steps
+// a hand-written service method repeats.
 //
 // # The repository shape
 //
@@ -74,9 +75,10 @@
 // method of its own to be covered. Its line is a second one: the line
 // that says what the failure meant is still the caller's to write.
 //
-// BaseService logs one Info line per row it writes, under the "entity"
-// key: "created" and "deleted" with the id, "updated" without. It logs no
-// failure, for the same reason.
+// BaseService and BaseServiceOf log one Info line per row they write,
+// under the "entity" key: "created" and "deleted" with the key under
+// "id", whatever its type, "updated" without. They log no failure, for
+// the same reason.
 //
 // # Missing rows
 //
@@ -98,7 +100,8 @@
 // reaches a statement by one route:
 //
 //	table name         TableSpec.Name, through database.Qualify
-//	written columns    TableSpec.Key, Writable, Updatable and Patchable
+//	written columns    TableSpec.Key, Writable, Updatable, Stamps and
+//	                   Patchable
 //	SELECT list        TableSpec.Cols, through database.SelectClause
 //	ORDER BY           TableSpec.SortCols, through database.SortClause
 //	search columns     TableSpec.SearchCols, as database.LikePredicate
@@ -128,10 +131,12 @@
 //
 // # The service layer
 //
-// Service is the contract of a table keyed by an int the database
-// generates, and BaseService implements it over any Repository. A table
-// with nothing extra declares its service as an alias of Service and
-// returns a BaseService:
+// ServiceOf is the contract of a table whose key has the Go type K, and
+// BaseServiceOf implements it over any RepositoryOf. Service and
+// Repository are the two for a table keyed by an int the database
+// generates, and BaseService implements Service, setting that key on the
+// row Create inserted. A table with nothing extra declares its service as
+// an alias of Service and returns a BaseService:
 //
 //	type UnitService = crud.Service[Unit, UnitReadOption]
 //
@@ -142,9 +147,21 @@
 //		return crud.NewBaseService[Unit]("unit", log, repo, unitByID)
 //	}
 //
-// A service with more embeds *BaseService and adds methods, or shadows
-// the ones that differ. A table with a natural key writes its service by
-// hand, while BaseRepo serves its repository all the same.
+// A table with a natural key, whose rows carry their key before they are
+// inserted, does the same with ServiceOf and NewBaseServiceOf:
+//
+//	type HolidayService = crud.ServiceOf[Holiday, string, HolidayOption]
+//
+//	func NewHolidayService(
+//		log zerolog.Logger,
+//		repo HolidayRepository,
+//	) HolidayService {
+//		return crud.NewBaseServiceOf[Holiday]("holiday", log, repo,
+//			holidayByDate)
+//	}
+//
+// A service with more embeds *BaseService or *BaseServiceOf and adds
+// methods, or shadows the ones that differ.
 //
 // # What the tests hold in place
 //
@@ -159,8 +176,9 @@
 //	go test -tags integration -run Integration ./crud
 //
 // What only it can show is that each engine accepts the statements as
-// written, a reserved column name included, and that RequireOneRow counts
-// the rows an UPDATE matched under ClientFoundRows and the rows it changed
-// without it. Its tables are created and dropped by the tests, so the
-// DSNs must point at a scratch database.
+// written, a reserved column name included, that a stamp left NULL takes
+// the server's clock, and that RequireOneRow counts the rows an UPDATE
+// matched under ClientFoundRows and the rows it changed without it. Its
+// tables are created and dropped by the tests, so the DSNs must point at
+// a scratch database.
 package crud

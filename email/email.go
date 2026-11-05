@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/mas-ony/go-toolkit/config"
+	"github.com/mas-ony/go-toolkit/internal/logfield"
 	"github.com/mas-ony/go-toolkit/internal/strlist"
 	"github.com/mas-ony/go-toolkit/internal/upstream"
 	"github.com/rs/zerolog"
@@ -55,10 +56,12 @@ type Service struct {
 	log      zerolog.Logger
 }
 
-// helloName is the name this client gives in EHLO, the one net/smtp gives
-// when told nothing. A submission relay ignores it for a client that logs
-// in. A relay that insists on a fully qualified name refuses it, and the
-// error names EHLO as the step that failed.
+// helloName is the name this client gives for its own host: in EHLO,
+// where it is the one net/smtp gives when told nothing, and as the domain
+// of a Message-ID when the sender's address names none. A submission
+// relay ignores it in EHLO for a client that logs in. A relay that
+// insists on a fully qualified name refuses it, and the error names EHLO
+// as the step that failed.
 const helloName = "localhost"
 
 // errNoStartTLS ends a starttls send to a server that does not offer the
@@ -89,11 +92,11 @@ var ErrInvalidAddress = errors.New("email: invalid address")
 // the message reached the relay, and sending it again fails the same way.
 var ErrTooLarge = errors.New("email: message exceeds the relay's size limit")
 
-// messageID returns a new Message-ID under the sender's domain. The
-// random part is rand.Text, 128 bits, which is what keeps it unique
-// without any state here.
+// messageID returns a new Message-ID under the sender's domain, or under
+// helloName when from has none. The random part is rand.Text, 128 bits,
+// which is what keeps it unique without any state here.
 func messageID(from string) string {
-	domain := "localhost"
+	domain := helloName
 	if at := strings.LastIndexByte(from, '@'); at >= 0 &&
 		at < len(from)-1 {
 		domain = from[at+1:]
@@ -314,8 +317,8 @@ func (s *Service) Send(ctx context.Context, m Message) error {
 	}
 
 	s.log.Info().
-		Strs("to", env.rcpts).
-		Str("message_id", id).
+		Strs(logfield.To, env.rcpts).
+		Str(logfield.MessageID, id).
 		Msg("email: message sent")
 	return nil
 }

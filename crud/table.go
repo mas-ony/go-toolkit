@@ -52,6 +52,14 @@ type TableSpec[T any, K comparable] struct {
 	// Writable, e.g. to leave a write-once foreign key alone. Nil means
 	// Writable.
 	Updatable []string
+	// Stamps are the columns Create and Update write after the Writable
+	// or Updatable ones as COALESCE(:name, <now>): the value bound from
+	// the model, or the server's clock, database.NowExpr, when that is
+	// NULL, for a date a client may leave for the server to fill. Each
+	// name is also the db tag its value is bound from. None may be the
+	// key or be listed in Writable or Updatable, which would write it
+	// twice.
+	Stamps []string
 	// Patchable is the allowlist of columns Patch may write on their
 	// own, without the rest of the row, such as a password that has an
 	// endpoint of its own. Column names reach the SET clause as text,
@@ -90,23 +98,52 @@ func columns(names []string) []string {
 	return out
 }
 
-// check panics unless the key is described consistently: KeyOf is set
-// exactly when Writable lists the key, a generated key is an int, and
-// Patchable leaves the key out, since Patch binds the key under its
-// column name beside the patched columns. A mismatch is a wiring mistake,
-// so it stops the program when the repository is constructed rather than
-// failing its first write.
+// values returns what a write sets each of names and then each of stamps
+// to: the named parameter of the column's own name, and for a stamp that
+// parameter or, when it is NULL, the server's clock. Create and Update
+// both take their values from here, so a stamp is written alike by the
+// two, and the grammar is consulted only when there is a stamp.
+func values(names, stamps []string) []string {
+	out := make([]string, 0, len(names)+len(stamps))
+	for _, name := range names {
+		out = append(out, ":"+name)
+	}
+	for _, name := range stamps {
+		out = append(out,
+			"COALESCE(:"+name+", "+database.NowExpr()+")")
+	}
+	return out
+}
+
+// check panics unless the key and the written columns are described
+// consistently: KeyOf is set exactly when Writable lists the key, a
+// generated key is an int, Patchable leaves the key out, since Patch
+// binds the key under its column name beside the patched columns, and
+// Stamps names neither the key nor a column Writable or Updatable lists,
+// which a statement would then write twice. A mismatch is a wiring
+// mistake, so it stops the program when the repository is constructed
+// rather than failing its first write.
+//
+// Every panic names the table the same way, through fail, so a mistake
+// is reported as "crud: <Name>: <what is wrong>" whichever rule it broke.
 func (s *TableSpec[T, K]) check() {
+	fail := func(why string) { panic("crud: " + s.Name + ": " + why) }
 	natural := slices.Contains(s.Writable, s.Key)
 	if natural != (s.KeyOf != nil) {
-		panic("crud: " + s.Name + ": KeyOf must be set " +
-			"exactly when Writable lists the key " + s.Key)
+		fail("KeyOf must be set exactly when Writable lists the key " +
+			s.Key)
 	}
 	if _, isInt := any(*new(K)).(int); !natural && !isInt {
-		panic("crud: " + s.Name + ": generated key " + s.Key +
-			" needs K int")
+		fail("generated key " + s.Key + " needs K int")
 	}
 	if slices.Contains(s.Patchable, s.Key) {
-		panic("crud: " + s.Name + ": Patchable lists the key " + s.Key)
+		fail("Patchable lists the key " + s.Key)
+	}
+	for _, c := range s.Stamps {
+		if c == s.Key || slices.Contains(s.Writable, c) ||
+			slices.Contains(s.Updatable, c) {
+			fail("stamp " + c +
+				" is the key or a column Writable or Updatable lists")
+		}
 	}
 }

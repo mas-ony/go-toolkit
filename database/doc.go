@@ -176,6 +176,7 @@
 // has a named boundary that limits it to something chosen in code:
 //
 //	column names in SELECT     SelectClause, through its allowed map
+//	extra SELECT expressions   SelectClause's extra, from literals
 //	column names in ORDER BY   SortClause, through its allowlist
 //	column names in GROUP BY   GroupClause, through its allowlist
 //	namespace and table names  Qualify, from literals in each repository
@@ -185,10 +186,12 @@
 //	CTE names                  RecursiveCTE, from literals
 //	subqueries and aliases     ExistsFlag, from literals
 //	columns cast to text       AsText, from literals
+//	IN-list bind names         InList, from literals
 //
 // Everything else — every filter value, every LIKE pattern, every page
-// offset — is a bound parameter. A helper that concatenates needs the same
-// shape: an allowlist, or text written in code.
+// offset, every value of an IN list — is a bound parameter. A helper that
+// concatenates needs the same shape: an allowlist, or text written in
+// code.
 //
 // The allowlists are the service's, not this package's. A helper given an
 // empty or wrong allowlist drops every column and falls back, so a typo in

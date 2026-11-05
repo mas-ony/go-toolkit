@@ -16,6 +16,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/mas-ony/go-toolkit/config"
+	"github.com/mas-ony/go-toolkit/internal/logfield"
 	"github.com/mas-ony/go-toolkit/internal/upstream"
 	"github.com/rs/zerolog"
 )
@@ -384,8 +385,8 @@ func (s *Service) SendText(ctx context.Context, chatID, text string) error {
 	}
 
 	s.log.Info().
-		Str("to", chat).
-		Int64("message_id", id).
+		Str(logfield.To, chat).
+		Int64(logfield.MessageID, id).
 		Msg("telegram: message sent")
 	return nil
 }
@@ -440,9 +441,9 @@ func (s *Service) SendDocument(
 	}
 
 	s.log.Info().
-		Str("to", chat).
-		Str("file", name).
-		Int64("message_id", id).
+		Str(logfield.To, chat).
+		Str(logfield.File, name).
+		Int64(logfield.MessageID, id).
 		Msg("telegram: document sent")
 	return nil
 }

@@ -1,8 +1,8 @@
 package logfield
 
 // Tests for logfield.go: each helper writes its fields under the keys the
-// lines of rest, server and notify are read by, and leaves the rest of
-// the line to its caller.
+// lines of rest, server, notify and crud are read by, and leaves the rest
+// of the line to its caller.
 
 import (
 	"bytes"
@@ -70,6 +70,19 @@ func TestPanic(t *testing.T) {
 	})
 	if got["panic"] != "boom" || got["stack"] != trace ||
 		got["handler"] != "row" || got["level"] != "error" {
+		t.Errorf("line = %v", got)
+	}
+}
+
+// The name is written under entity, beside what the caller put on the
+// line before and after it.
+func TestEntity(t *testing.T) {
+	t.Parallel()
+	got := written(t, func(e *zerolog.Event) *zerolog.Event {
+		return Entity(e, "surat_masuk").Int("id", 7)
+	})
+	if got["entity"] != "surat_masuk" || got["id"] != float64(7) ||
+		got["handler"] != "row" || got["message"] != "logged" {
 		t.Errorf("line = %v", got)
 	}
 }

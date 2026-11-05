@@ -18,8 +18,9 @@ package crud
 //
 // What these tests are FOR is what repo_test.go can only assume: that
 // each engine accepts the statements BaseRepo writes, with a table and
-// columns that have to be quoted, and that a write reports the rows it
-// matched. MySQL reports the rows it changed unless the connection sets
+// columns that have to be quoted, that a stamp left NULL takes the
+// server's clock, and that a write reports the rows it matched. MySQL
+// reports the rows it changed unless the connection sets
 // ClientFoundRows, so every connection here sets it, as database.New
 // does, except the one that shows what it is for.
 //
@@ -450,6 +451,63 @@ func TestIntegrationNaturalKey(t *testing.T) {
 		}
 		if err := r.Delete(ctx, code); err != sql.ErrNoRows {
 			t.Errorf("second Delete = %v, want sql.ErrNoRows", err)
+		}
+	})
+}
+
+// A stamp left NULL is filled from the server's clock, which the NOT NULL
+// column holds Create and Update to, and a stamp the model carries is
+// written as given, on each engine.
+func TestIntegrationStamps(t *testing.T) {
+	dbtest.Each(t, func(t *testing.T, e dbtest.Engine, dsn string) {
+		ctx := context.Background()
+		db := open(t, e, dsn, true)
+		name := scratch(t, db, "stamped", pick(e.Driver,
+			"CREATE TABLE %s (id INT AUTO_INCREMENT PRIMARY KEY,"+
+				" body VARCHAR(50) NULL, logged DATETIME NOT NULL)",
+			"CREATE TABLE %s (id INT IDENTITY(1,1) PRIMARY KEY,"+
+				" body NVARCHAR(50) NULL, logged DATETIME2(0) NOT NULL)",
+		))
+		spec := stampedSpec
+		spec.Name = name
+		r := bareRepo(db, &spec)
+		logged := func(id int) string {
+			t.Helper()
+			q, _ := r.Begin(ReadOption[int]{ID: &id})
+			got, err := FirstOf(r.Fetch(ctx, q, ListOption{}))
+			if err != nil || got == nil || got.Logged == nil {
+				t.Fatalf("read back %+v, %v", got, err)
+			}
+			return *got.Logged
+		}
+
+		clock, err := r.Create(ctx, &stamped{Body: new("clock")})
+		if err != nil {
+			t.Fatalf("Create without a stamp: %v", err)
+		}
+		given, err := r.Create(ctx, &stamped{Body: new("given"),
+			Logged: new("2001-02-03 04:05:06")})
+		if err != nil {
+			t.Fatalf("Create with a stamp: %v", err)
+		}
+		if got := logged(given); !strings.HasPrefix(got, "2001-02-03") {
+			t.Errorf("given stamp read back as %q", got)
+		}
+
+		err = r.Update(ctx, &stamped{ID: &given, Body: new("again")})
+		if err != nil {
+			t.Fatalf("Update without a stamp: %v", err)
+		}
+		if got := logged(given); strings.HasPrefix(got, "2001-02-03") {
+			t.Errorf("Update without a stamp kept %q", got)
+		}
+		err = r.Update(ctx, &stamped{ID: &clock, Body: new("clock"),
+			Logged: new("2002-03-04 05:06:07")})
+		if err != nil {
+			t.Fatalf("Update with a stamp: %v", err)
+		}
+		if got := logged(clock); !strings.HasPrefix(got, "2002-03-04") {
+			t.Errorf("updated stamp read back as %q", got)
 		}
 	})
 }

@@ -3,6 +3,7 @@ package crud
 import (
 	"context"
 
+	"github.com/mas-ony/go-toolkit/internal/logfield"
 	"github.com/rs/zerolog"
 )
 
@@ -14,58 +15,108 @@ type Keyed[T any] interface {
 	SetID(id int)
 }
 
-// Repository is the part of a repository BaseService needs. A repository
-// built on a BaseRepo keyed by an int satisfies it with the promoted
-// Create, Update and Delete and a Read of its own, whose option type is
-// O.
-type Repository[T, O any] interface {
-	// Create inserts e and returns the key the database generated.
-	Create(ctx context.Context, e *T) (int, error)
+// RepositoryOf is the part of a repository BaseServiceOf needs, for a
+// table whose key has the Go type K. A repository built on a BaseRepo
+// satisfies it with the promoted Create, Update and Delete and a Read of
+// its own, whose option type is O.
+type RepositoryOf[T any, K comparable, O any] interface {
+	// Create inserts e and returns its key: the one the database
+	// generated, or the natural key e carries.
+	Create(ctx context.Context, e *T) (K, error)
 	// Read fetches the rows opt selects.
 	Read(ctx context.Context, opt O) (ReadResult[T], error)
 	// Update writes the row e describes and returns sql.ErrNoRows when
 	// no row matched.
 	Update(ctx context.Context, e *T) error
-	// Delete removes the row whose key is id and returns sql.ErrNoRows
+	// Delete removes the row whose key is key and returns sql.ErrNoRows
 	// when no row matched.
-	Delete(ctx context.Context, id int) error
+	Delete(ctx context.Context, key K) error
 }
 
-// Service is the service contract of a table keyed by an int the database
-// generates. A service with nothing extra declares itself as an alias of
-// it; one with extra methods embeds it in its own interface.
-type Service[T, O any] interface {
-	// Create inserts a new row and returns it with the generated id.
+// Repository is the RepositoryOf a table keyed by an int the database
+// generates, the part of a repository BaseService needs. A repository
+// built on a BaseRepo keyed by an int satisfies it.
+type Repository[T, O any] = RepositoryOf[T, int, O]
+
+// ServiceOf is the service contract of a table whose key has the Go type
+// K. A service with nothing extra declares itself as an alias of it; one
+// with extra methods embeds it in its own interface.
+type ServiceOf[T any, K comparable, O any] interface {
+	// Create inserts a new row and returns it, with its key set when the
+	// database generated one.
 	Create(ctx context.Context, e *T) (*T, error)
 	// Read fetches rows according to opt and returns them with the
 	// total: across all pages when paginating, len(items) otherwise.
 	Read(ctx context.Context, opt O) ([]T, int, error)
-	// ReadByID returns a single row or nil if not found.
-	ReadByID(ctx context.Context, id int) (*T, error)
+	// ReadByID returns the row whose key is key, or nil if there is
+	// none.
+	ReadByID(ctx context.Context, key K) (*T, error)
 	// Update persists changes to all mutable fields of the row and
 	// returns sql.ErrNoRows when no row matched.
 	Update(ctx context.Context, e *T) error
-	// Delete removes the row identified by id and returns sql.ErrNoRows
+	// Delete removes the row whose key is key and returns sql.ErrNoRows
 	// when no row matched.
-	Delete(ctx context.Context, id int) error
+	Delete(ctx context.Context, key K) error
 }
 
-// BaseService implements Service over a Repository. A service with extra
-// behaviour embeds *BaseService and adds methods, or declares one of the
-// same name, which shadows the promoted one; the fields are exported for
-// those methods to use.
+// Service is the ServiceOf a table keyed by an int the database
+// generates, which BaseService implements.
+type Service[T, O any] = ServiceOf[T, int, O]
+
+// BaseServiceOf implements ServiceOf over a RepositoryOf. A service with
+// extra behaviour embeds *BaseServiceOf and adds methods, or declares one
+// of the same name, which shadows the promoted one; the fields are
+// exported for those methods to use.
 //
-// T is the model, PT its pointer type, which takes the generated id, and
-// O the repository's read option.
-type BaseService[T any, PT Keyed[T], O any] struct {
+// T is the model, K the Go type of its key and O the repository's read
+// option.
+type BaseServiceOf[T any, K comparable, O any] struct {
 	// Entity names the table's rows in the log, under the "entity" key.
 	Entity string
 	// Log receives one Info line per row written.
 	Log zerolog.Logger
 	// Repo is the persistence layer for the table.
-	Repo Repository[T, O]
-	// byID builds the read option of a single-row lookup.
-	byID func(id int) O
+	Repo RepositoryOf[T, K, O]
+	// byKey builds the read option of a single-row lookup.
+	byKey func(key K) O
+	// setKey sets the key Create returned on the row it inserted, and is
+	// nil when the row carried its key already.
+	setKey func(e *T, key K)
+}
+
+// BaseService implements Service over a Repository: it is the
+// BaseServiceOf of a table keyed by an int the database generates, whose
+// Create sets that key on the row it inserted. A service with extra
+// behaviour embeds *BaseService and adds methods, or declares one of the
+// same name, which shadows the promoted one; Entity, Log and Repo are
+// promoted for those methods to use.
+//
+// T is the model, PT its pointer type, which takes the generated id, and
+// O the repository's read option.
+type BaseService[T any, PT Keyed[T], O any] struct {
+	*BaseServiceOf[T, int, O]
+}
+
+// NewBaseServiceOf returns a BaseServiceOf over repo whose rows the log
+// calls entity, for a table whose rows carry their key before they are
+// inserted, such as a natural key. byKey builds the read option of a
+// lookup by key, which ReadByID runs. Only T needs to be given
+// explicitly; K and O are inferred from byKey.
+//
+// A key the database generates goes through NewBaseService instead,
+// which sets the key Create returns on the row.
+func NewBaseServiceOf[T any, K comparable, O any](
+	entity string,
+	log zerolog.Logger,
+	repo RepositoryOf[T, K, O],
+	byKey func(key K) O,
+) *BaseServiceOf[T, K, O] {
+	return &BaseServiceOf[T, K, O]{
+		Entity: entity,
+		Log:    log,
+		Repo:   repo,
+		byKey:  byKey,
+	}
 }
 
 // NewBaseService returns a BaseService over repo whose rows the log calls
@@ -78,12 +129,9 @@ func NewBaseService[T any, PT Keyed[T], O any](
 	repo Repository[T, O],
 	byID func(id int) O,
 ) *BaseService[T, PT, O] {
-	return &BaseService[T, PT, O]{
-		Entity: entity,
-		Log:    log,
-		Repo:   repo,
-		byID:   byID,
-	}
+	s := NewBaseServiceOf(entity, log, repo, byID)
+	s.setKey = func(e *T, id int) { PT(e).SetID(id) }
+	return &BaseService[T, PT, O]{s}
 }
 
 // Unpack spreads a repository read into the (items, total, err) triple
@@ -132,50 +180,66 @@ func CreateEach[T any, PT Keyed[T]](
 	return created, nil
 }
 
-// Create inserts a new row and returns it with the generated id.
-func (s *BaseService[T, PT, O]) Create(
+// logged writes msg at info level for one write to the table: the rows'
+// entity under the key logfield gives it, then key, the key of the row
+// written, under "id" when the write has one to name. Create, Update and
+// Delete all log through it, so the three lines differ only in msg and
+// in whether they name the row.
+func (s *BaseServiceOf[T, K, O]) logged(msg string, key *K) {
+	e := logfield.Entity(s.Log.Info(), s.Entity)
+	if key != nil {
+		e = e.Interface("id", *key)
+	}
+	e.Msg(msg)
+}
+
+// Create inserts a new row and returns it, with the key the database
+// generated set on it when there is one.
+func (s *BaseServiceOf[T, K, O]) Create(
 	ctx context.Context,
 	e *T,
 ) (*T, error) {
-	id, err := s.Repo.Create(ctx, e)
+	key, err := s.Repo.Create(ctx, e)
 	if err != nil {
 		return nil, err
 	}
-	PT(e).SetID(id)
-	s.Log.Info().Str("entity", s.Entity).Int("id", id).Msg("created")
+	if s.setKey != nil {
+		s.setKey(e, key)
+	}
+	s.logged("created", &key)
 	return e, nil
 }
 
 // Read fetches rows according to opt.
-func (s *BaseService[T, PT, O]) Read(
+func (s *BaseServiceOf[T, K, O]) Read(
 	ctx context.Context,
 	opt O,
 ) ([]T, int, error) {
 	return Unpack(s.Repo.Read(ctx, opt))
 }
 
-// ReadByID returns a single row or nil if not found.
-func (s *BaseService[T, PT, O]) ReadByID(
+// ReadByID returns the row whose key is key, or nil if there is none.
+func (s *BaseServiceOf[T, K, O]) ReadByID(
 	ctx context.Context,
-	id int,
+	key K,
 ) (*T, error) {
-	return FirstOf(s.Repo.Read(ctx, s.byID(id)))
+	return FirstOf(s.Repo.Read(ctx, s.byKey(key)))
 }
 
 // Update persists changes to all mutable fields of the row.
-func (s *BaseService[T, PT, O]) Update(ctx context.Context, e *T) error {
+func (s *BaseServiceOf[T, K, O]) Update(ctx context.Context, e *T) error {
 	if err := s.Repo.Update(ctx, e); err != nil {
 		return err
 	}
-	s.Log.Info().Str("entity", s.Entity).Msg("updated")
+	s.logged("updated", nil)
 	return nil
 }
 
-// Delete removes the row identified by id.
-func (s *BaseService[T, PT, O]) Delete(ctx context.Context, id int) error {
-	if err := s.Repo.Delete(ctx, id); err != nil {
+// Delete removes the row whose key is key.
+func (s *BaseServiceOf[T, K, O]) Delete(ctx context.Context, key K) error {
+	if err := s.Repo.Delete(ctx, key); err != nil {
 		return err
 	}
-	s.Log.Info().Str("entity", s.Entity).Int("id", id).Msg("deleted")
+	s.logged("deleted", &key)
 	return nil
 }

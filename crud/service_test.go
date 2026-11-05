@@ -2,7 +2,8 @@ package crud
 
 // Tests for service.go: BaseService over a fake repository, which shows
 // what it hands on and what it logs, and once over a real BaseRepo, which
-// shows the two layers fit; then Unpack, FirstOf and CreateEach.
+// shows the two layers fit; BaseServiceOf over a fake repository keyed by
+// a natural key; then Unpack, FirstOf and CreateEach.
 
 import (
 	"bytes"
@@ -23,6 +24,14 @@ type fakeRepo struct {
 	err   error
 	opts  []itemReadOption
 	calls []string
+}
+
+// fakeHolidays is a RepositoryOf over holiday, keyed by its code, that
+// returns the key a row carries, as BaseRepo does for a natural key, and
+// records the read options it is handed.
+type fakeHolidays struct {
+	read ReadResult[holiday]
+	opts []ReadOption[string]
 }
 
 // itemByID is the read option of a lookup by id.
@@ -67,6 +76,30 @@ func (r *fakeRepo) Update(context.Context, *item) error {
 func (r *fakeRepo) Delete(context.Context, int) error {
 	r.calls = append(r.calls, "Delete")
 	return r.err
+}
+
+// Create returns the code h carries.
+func (r *fakeHolidays) Create(_ context.Context, h *holiday) (string, error) {
+	return *h.Code, nil
+}
+
+// Read records the option and returns the canned read.
+func (r *fakeHolidays) Read(
+	_ context.Context,
+	opt ReadOption[string],
+) (ReadResult[holiday], error) {
+	r.opts = append(r.opts, opt)
+	return r.read, nil
+}
+
+// Update succeeds.
+func (r *fakeHolidays) Update(context.Context, *holiday) error {
+	return nil
+}
+
+// Delete succeeds.
+func (r *fakeHolidays) Delete(context.Context, string) error {
+	return nil
 }
 
 // A write that succeeds sets the generated id and logs one Info line
@@ -163,6 +196,52 @@ func TestBaseServiceOverBaseRepo(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), `"id":11`) {
 		t.Errorf("log does not carry the key: %s", buf.String())
+	}
+}
+
+// BaseServiceOf serves a table keyed by a natural key: Create leaves the
+// row's key as the row carried it, ReadByID reads with the option byKey
+// builds, and the key is logged under "id" as an int key is.
+func TestBaseServiceOfWithANaturalKey(t *testing.T) {
+	ctx := context.Background()
+	var buf bytes.Buffer
+	repo := &fakeHolidays{read: ReadResult[holiday]{
+		Items: []holiday{{Code: new("2026-08-17")}},
+		Total: 1,
+	}}
+	byCode := func(code string) ReadOption[string] {
+		return ReadOption[string]{ID: &code}
+	}
+	var svc ServiceOf[holiday, string, ReadOption[string]]
+	svc = NewBaseServiceOf[holiday]("holiday", zerolog.New(&buf), repo,
+		byCode)
+
+	h := &holiday{Code: new("2026-08-17"), Note: new("merdeka")}
+	got, err := svc.Create(ctx, h)
+	if err != nil || got != h || *h.Code != "2026-08-17" {
+		t.Fatalf("Create = %+v, %v; want h as it was", got, err)
+	}
+	row, err := svc.ReadByID(ctx, "2026-08-17")
+	if err != nil || row == nil || *row.Code != "2026-08-17" {
+		t.Errorf("ReadByID = %+v, %v; want the first row", row, err)
+	}
+	if len(repo.opts) != 1 || repo.opts[0].ID == nil ||
+		*repo.opts[0].ID != "2026-08-17" {
+		t.Errorf("options handed on: %+v", repo.opts)
+	}
+	if err := svc.Update(ctx, h); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	if err := svc.Delete(ctx, "2026-08-17"); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	want := `{"level":"info","entity":"holiday","id":"2026-08-17",` +
+		`"message":"created"}
+{"level":"info","entity":"holiday","message":"updated"}
+{"level":"info","entity":"holiday","id":"2026-08-17","message":"deleted"}
+`
+	if buf.String() != want {
+		t.Errorf("log:\n%s\nwant:\n%s", buf.String(), want)
 	}
 }
 

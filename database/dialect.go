@@ -215,17 +215,18 @@ func insertMySQL(
 	return id, nil
 }
 
-// insertSQLServer is the SQL Server half of InsertReturningID.
+// insertSQLServer is the SQL Server half of InsertReturningID: the INSERT
+// insertInto builds for Insert, with an OUTPUT clause that copies the key
+// into a table variable, and a SELECT that returns it.
 func insertSQLServer(
 	ctx context.Context,
 	ext sqlx.ExtContext,
 	table, cols, vals, pk string,
 	arg any,
 ) (int64, error) {
-	query := "DECLARE @Inserted TABLE (id BIGINT);" +
-		"\nINSERT INTO " + table + " (" + cols + ")" +
-		"\nOUTPUT INSERTED." + pk + " INTO @Inserted (id)" +
-		"\nVALUES (" + vals + ");" +
+	output := "\nOUTPUT INSERTED." + pk + " INTO @Inserted (id)"
+	query := "DECLARE @Inserted TABLE (id BIGINT);\n" +
+		insertInto(table, cols, output, vals) + ";" +
 		"\nSELECT id FROM @Inserted;"
 	rows, err := sqlx.NamedQueryContext(ctx, ext, query, arg)
 	if err != nil {

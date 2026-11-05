@@ -11,7 +11,6 @@ package request
 
 import (
 	"errors"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -21,12 +20,12 @@ import (
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/mas-ony/go-toolkit/database"
+	"github.com/mas-ony/go-toolkit/internal/testutil/fibertest"
 )
 
 // probe sends one GET through an app whose three routes, /items,
-// /items/:id and /days/:day, all call fn with the request context, and
-// returns the response.
-func probe(t *testing.T, target string, fn func(c fiber.Ctx)) *http.Response {
+// /items/:id and /days/:day, all call fn with the request context.
+func probe(t *testing.T, target string, fn func(c fiber.Ctx)) {
 	t.Helper()
 	app := fiber.New()
 	route := func(c fiber.Ctx) error {
@@ -37,12 +36,7 @@ func probe(t *testing.T, target string, fn func(c fiber.Ctx)) *http.Response {
 	app.Get("/items/:id", route)
 	app.Get("/days/:day", route)
 
-	resp, err := app.Test(httptest.NewRequest(http.MethodGet, target, nil))
-	if err != nil {
-		t.Fatalf("%s: %v", target, err)
-	}
-	t.Cleanup(func() { _ = resp.Body.Close() })
-	return resp
+	fibertest.Send(t, app, httptest.NewRequest(http.MethodGet, target, nil))
 }
 
 // badRequest reports the code and message of a *fiber.Error, or (0, "") for
@@ -157,16 +151,11 @@ func TestIDRendersOneBadRequest(t *testing.T) {
 	app.Get("/items", route)
 	app.Get("/items/:id", route)
 
-	resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/items/abc",
-		nil))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-	body, _ := io.ReadAll(resp.Body)
+	status, body := fibertest.Send(t, app,
+		httptest.NewRequest(http.MethodGet, "/items/abc", nil))
 
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Errorf("status = %d, want 400", resp.StatusCode)
+	if status != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", status)
 	}
 	if !strings.Contains(string(body), "invalid id") {
 		t.Errorf("body = %s, want it to name the parameter", body)

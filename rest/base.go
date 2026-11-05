@@ -35,16 +35,30 @@ func logAt(e *zerolog.Event, c fiber.Ctx, msg string) {
 	logfield.Request(e, c.Method(), c.Path()).Msg(msg)
 }
 
-// fetch reads the row id names through read. A failure is answered
-// through Fail and a row that does not exist with NotFound, so GetByID
-// and the guard RequireOwner builds refuse an id in the same words.
-func fetch[T any](
+// NewBase returns the Base of the handler logged as name, whose rows are
+// called entity in its messages.
+func NewBase(log zerolog.Logger, name, entity string) Base {
+	return Base{
+		Log:     logfield.Handler(log, name),
+		Entity:  entity,
+		Missing: entity + " not found",
+	}
+}
+
+// Fetch reads the row key names through read, for an endpoint that
+// serves or checks one row. A failure is answered through Fail, as
+// "failed to fetch <Entity>", and a row that does not exist with
+// NotFound, so GetByID, the guard RequireOwner builds and an endpoint of
+// a handler's own refuse a key in the same words. key is whatever the
+// table is keyed by: an id from request.ID, or a natural key such as a
+// date.
+func Fetch[K, T any](
 	c fiber.Ctx,
 	b Base,
-	id int,
-	read func(ctx context.Context, id int) (*T, error),
+	key K,
+	read func(ctx context.Context, key K) (*T, error),
 ) (*T, error) {
-	row, err := read(c.Context(), id)
+	row, err := read(c.Context(), key)
 	if err != nil {
 		return nil, b.Fail(c, err, "fetch")
 	}
@@ -54,14 +68,33 @@ func fetch[T any](
 	return row, nil
 }
 
-// NewBase returns the Base of the handler logged as name, whose rows are
-// called entity in its messages.
-func NewBase(log zerolog.Logger, name, entity string) Base {
-	return Base{
-		Log:     logfield.Handler(log, name),
-		Entity:  entity,
-		Missing: entity + " not found",
+// BadRequest answers 400 with msg.
+func BadRequest(msg string) error {
+	return fiber.NewError(fiber.StatusBadRequest, msg)
+}
+
+// Required answers 400 "<name> is required" when v is nil or holds the
+// zero value of its type: an empty string, or an id of 0. cmp.Or answers
+// a body that fails several checks with the first in its list:
+//
+//	err := cmp.Or(rest.Required(req.Kode, "kode"),
+//		rest.Required(req.Nama, "nama"))
+func Required[V comparable](v *V, name string) error {
+	var zero V
+	if v == nil || *v == zero {
+		return BadRequest(name + " is required")
 	}
+	return nil
+}
+
+// Reply answers status with the success envelope.
+func Reply(c fiber.Ctx, status int, msg string, data any) error {
+	return c.Status(status).JSON(response.OK(msg, data))
+}
+
+// OK answers 200 "ok" with data.
+func OK(c fiber.Ctx, data any) error {
+	return Reply(c, fiber.StatusOK, "ok", data)
 }
 
 // created answers a create: its failure through Fail, or 201 "created"
@@ -121,33 +154,4 @@ func (b Base) Bind(c fiber.Ctx, req any) error {
 		return BadRequest("invalid request body")
 	}
 	return nil
-}
-
-// BadRequest answers 400 with msg.
-func BadRequest(msg string) error {
-	return fiber.NewError(fiber.StatusBadRequest, msg)
-}
-
-// Required answers 400 "<name> is required" when v is nil or holds the
-// zero value of its type: an empty string, or an id of 0. cmp.Or answers
-// a body that fails several checks with the first in its list:
-//
-//	err := cmp.Or(rest.Required(req.Kode, "kode"),
-//		rest.Required(req.Nama, "nama"))
-func Required[V comparable](v *V, name string) error {
-	var zero V
-	if v == nil || *v == zero {
-		return BadRequest(name + " is required")
-	}
-	return nil
-}
-
-// Reply answers status with the success envelope.
-func Reply(c fiber.Ctx, status int, msg string, data any) error {
-	return c.Status(status).JSON(response.OK(msg, data))
-}
-
-// OK answers 200 "ok" with data.
-func OK(c fiber.Ctx, data any) error {
-	return Reply(c, fiber.StatusOK, "ok", data)
 }

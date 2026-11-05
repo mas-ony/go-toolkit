@@ -24,9 +24,8 @@ import (
 // promoted onto it and satisfy its interface as long as the signatures
 // match. The statements cover a single-column key, generated or natural;
 // see TableSpec.Key. A repository whose statements a TableSpec cannot
-// describe, such as a composite key or a column set to
-// COALESCE(:x, NOW()), declares its own method of the same name, which
-// shadows the promoted one.
+// describe, such as one with a composite key, declares its own method of
+// the same name, which shadows the promoted one.
 //
 // The query builders are promoted as well, for the repository's own
 // Read: Begin or Select starts the statement, the And helpers filter it,
@@ -146,9 +145,11 @@ func RequireOneRow(res sql.Result) error {
 // embed puts a BaseRepo into the repository that embeds it, and is how
 // WithTx, WithNamespace and WithYear hand back R; the package
 // documentation shows one. opts are applied in order; see OnError and
-// LogErrors. NewBaseRepo panics when spec describes its key
-// inconsistently: KeyOf must be set exactly when Writable lists the key,
-// a generated key needs K int, and Patchable must leave the key out.
+// LogErrors. NewBaseRepo panics when spec describes its key or its
+// written columns inconsistently: KeyOf must be set exactly when Writable
+// lists the key, a generated key needs K int, Patchable must leave the
+// key out, and Stamps must leave out the key and every column Writable
+// and Updatable list.
 func NewBaseRepo[T any, K comparable, R any](
 	db *sqlx.DB,
 	spec *TableSpec[T, K],
@@ -181,12 +182,17 @@ func (b BaseRepo[T, K, R]) joinAs(kind, table, alias, on string) string {
 }
 
 // updateQuery is the UPDATE that Update and Patch send: each of cols set
-// from the named parameter of its own name, on the row whose key equals
-// where, which is a named parameter or a ? the caller binds.
-func (b BaseRepo[T, K, R]) updateQuery(cols []string, where string) string {
-	sets := make([]string, len(cols))
-	for i, c := range cols {
-		sets[i] = column(c) + " = :" + c
+// from the named parameter of its own name, then each of stamps as
+// TableSpec.Stamps describes, on the row whose key equals where, which is
+// a named parameter or a ? the caller binds.
+func (b BaseRepo[T, K, R]) updateQuery(
+	cols, stamps []string,
+	where string,
+) string {
+	names, vals := columns(slices.Concat(cols, stamps)), values(cols, stamps)
+	sets := make([]string, len(names))
+	for i, name := range names {
+		sets[i] = name + " = " + vals[i]
 	}
 	return "UPDATE " + b.Table() +
 		"\nSET " + strings.Join(sets, ",\n    ") +
@@ -275,16 +281,20 @@ func (b BaseRepo[T, K, R]) Select(cols []string) *Query {
 	return b.SelectJoined(cols, "")
 }
 
-// SelectJoined is Select with joins appended after the FROM table. Build
-// joins with LeftJoin, emitting each only when Needs or SortsOn says
-// something references its alias, and with InnerJoin for the ones that
-// must always apply.
+// SelectJoined is Select with joins appended after the FROM table, and
+// with extra appended to the SELECT list by database.SelectClause:
+// expressions written in code that every row carries, such as a flag
+// database.ExistsFlag renders. Build joins with LeftJoin, emitting each
+// only when Needs or SortsOn says something references its alias, and
+// with InnerJoin for the ones that must always apply.
 func (b BaseRepo[T, K, R]) SelectJoined(
 	cols []string,
 	joins string,
+	extra ...string,
 ) *Query {
 	s := b.spec
-	list := database.SelectClause(cols, s.Cols, s.DefaultCols, s.Key)
+	list := database.SelectClause(cols, s.Cols, s.DefaultCols, s.Key,
+		extra...)
 	return NewSelect(list, b.Table()+" AS "+s.Alias+joins)
 }
 
@@ -295,13 +305,15 @@ func (b BaseRepo[T, K, R]) Needs(cols []string, names ...string) bool {
 	return database.NeedsJoin(cols, s.Cols, s.DefaultCols, names)
 }
 
-// BeginJoined is Begin with joins appended after the FROM table.
+// BeginJoined is Begin with joins and extra added as SelectJoined adds
+// them.
 func (b BaseRepo[T, K, R]) BeginJoined(
 	opt ReadOption[K],
 	joins string,
+	extra ...string,
 ) (*Query, bool) {
 	s := b.spec
-	q := b.SelectJoined(opt.Cols, joins)
+	q := b.SelectJoined(opt.Cols, joins, extra...)
 
 	switch {
 	case opt.ID != nil:
@@ -428,7 +440,8 @@ func (b BaseRepo[T, K, R]) Fetch(
 }
 
 // Create inserts m and returns the new row's key. The columns written are
-// spec.Writable, bound as :name placeholders from the model's db tags.
+// spec.Writable, bound as :name placeholders from the model's db tags,
+// then spec.Stamps, as TableSpec.Stamps describes.
 //
 // A generated key comes back through InsertReturningID. A natural key is
 // read with KeyOf before anything is sent, so a model that carries none
@@ -440,9 +453,9 @@ func (b BaseRepo[T, K, R]) Create(ctx context.Context, m *T) (K, error) {
 		return zero, b.Wrap("Create", ErrNilModel)
 	}
 
-	w := b.spec.Writable
-	cols := "\n" + strings.Join(columns(w), ",\n")
-	vals := "\n:" + strings.Join(w, ",\n:")
+	w, st := b.spec.Writable, b.spec.Stamps
+	cols := "\n" + strings.Join(columns(slices.Concat(w, st)), ",\n")
+	vals := "\n" + strings.Join(values(w, st), ",\n")
 
 	if b.spec.KeyOf == nil {
 		id, err := database.InsertReturningID(
@@ -467,8 +480,8 @@ func (b BaseRepo[T, K, R]) Create(ctx context.Context, m *T) (K, error) {
 }
 
 // Update writes every column in spec.Updatable (or spec.Writable when
-// that is nil) for the row whose key matches m's, and returns
-// sql.ErrNoRows when no row matched.
+// that is nil), then spec.Stamps as Create writes them, for the row whose
+// key matches m's, and returns sql.ErrNoRows when no row matched.
 //
 // A generated key is bound from the model like the columns. A natural key
 // is bound as KeyOf returns it, through a ? that sqlx.Named passes over
@@ -494,7 +507,8 @@ func (b BaseRepo[T, K, R]) Update(ctx context.Context, m *T) error {
 		where, keyArg = "?", []any{key}
 	}
 
-	bound, args, err := sqlx.Named(b.updateQuery(w, where), m)
+	query := b.updateQuery(w, b.spec.Stamps, where)
+	bound, args, err := sqlx.Named(query, m)
 	if err != nil {
 		return b.Wrap("Update", err)
 	}
@@ -535,7 +549,7 @@ func (b BaseRepo[T, K, R]) Patch(
 	}
 	args[b.spec.Key] = key
 
-	query := b.updateQuery(cols, ":"+b.spec.Key)
+	query := b.updateQuery(cols, nil, ":"+b.spec.Key)
 	res, err := sqlx.NamedExecContext(ctx, b.Ext(), query, args)
 	if err != nil {
 		return b.Wrap("Patch", err)

@@ -1,17 +1,40 @@
 package fibertest
 
-// Tests for fibertest.go: a served application answers on the URL Serve
-// returns, and nothing reached its handlers before the test's own request.
+// Tests for fibertest.go: Send hands back what the application answered
+// in process, and a served application answers on the URL Serve returns,
+// with nothing reaching its handlers before the test's own request.
 
 import (
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync/atomic"
 	"testing"
 
 	"github.com/gofiber/fiber/v3"
 )
+
+// The status and the whole body come back, for a request with a body of
+// its own as well as one without.
+func TestSend(t *testing.T) {
+	t.Parallel()
+	app := fiber.New()
+	app.Post("/echo", func(c fiber.Ctx) error {
+		return c.Status(fiber.StatusCreated).Send(c.Body())
+	})
+
+	status, body := Send(t, app, httptest.NewRequest(http.MethodPost,
+		"/echo", strings.NewReader("ping")))
+	if status != http.StatusCreated || string(body) != "ping" {
+		t.Errorf("POST /echo = %d %q", status, body)
+	}
+	status, body = Send(t, app,
+		httptest.NewRequest(http.MethodGet, "/missing", nil))
+	if status != http.StatusNotFound || len(body) == 0 {
+		t.Errorf("GET /missing = %d %q", status, body)
+	}
+}
 
 // The first request the application sees is the test's, and it is answered
 // on the URL Serve handed back.

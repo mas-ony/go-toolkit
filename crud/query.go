@@ -1,7 +1,6 @@
 package crud
 
 import (
-	"fmt"
 	"strings"
 
 	"github.com/mas-ony/go-toolkit/database"
@@ -130,23 +129,14 @@ func AndLike(q *Query, col, param string, v *string) {
 	AndAnyLike(q, param, v, col)
 }
 
-// AndIn appends "col IN (...)" when vs is non-empty. sqlx.Named does not
-// expand slices, so each element is bound as param_0, param_1, ... An
-// empty slice is not a filter.
-//
-// Keep vs bounded: each element is one bind parameter, and SQL Server
-// caps a statement at about 2100 of them.
+// AndIn appends "col IN (...)" when vs is non-empty, its list built by
+// database.InList, which binds each element as param_0, param_1, ... and
+// says how many vs may hold. An empty slice is not a filter.
 func AndIn[V any](q *Query, col, param string, vs []V) {
 	if len(vs) == 0 {
 		return
 	}
-	ph := make([]string, len(vs))
-	for i, v := range vs {
-		key := fmt.Sprintf("%s_%d", param, i)
-		ph[i] = ":" + key
-		q.args[key] = v
-	}
-	q.And(col + " IN (" + strings.Join(ph, ", ") + ")")
+	q.And(col + " IN " + database.InList(q.args, param, vs))
 }
 
 // Prepend puts text ahead of the SELECT, for a clause that has to open

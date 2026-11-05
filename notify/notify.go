@@ -19,9 +19,9 @@ import (
 // released as soon as send returns. timeout must be positive: it is the
 // only bound an async send has.
 //
-// A panic in send is logged at error level, under entity, with its value
-// and the stack under the keys logfield gives every recovered panic, and
-// goes no further. That is what keeps async safe: recover works only on
+// A panic in send is logged at error level, with entity, the value it was
+// raised with and the stack under the keys logfield gives each of them,
+// and goes no further. That is what keeps async safe: recover works only on
 // the stack that panicked, so no middleware can catch a panic on the
 // goroutine Run starts, and an unrecovered one ends the process. In sync
 // mode it keeps a failed notification from turning a saved row into a
@@ -45,8 +45,8 @@ func Run(
 		defer cancel()
 		defer func() {
 			if r := recover(); r != nil {
-				logfield.Panic(log.Error(), r, debug.Stack()).
-					Str("entity", entity).
+				e := logfield.Panic(log.Error(), r, debug.Stack())
+				logfield.Entity(e, entity).
 					Msg("notification recovered from panic")
 			}
 		}()

@@ -2,6 +2,18 @@ package logfield
 
 import "github.com/rs/zerolog"
 
+// To, File and MessageID are the keys a line about a delivered
+// notification carries its recipient, the file it carried and the id the
+// channel gave it under, which email, telegram and whatsapp write on
+// every message and document they report sent. They are keys rather than
+// helpers because each channel writes them with a type of its own: one
+// chat or a list of addresses, an id that is text or a number.
+const (
+	To        = "to"
+	File      = "file"
+	MessageID = "message_id"
+)
+
 // Handler returns log with name added under the key every line a handler
 // writes carries the handler's name under, so the lines of rest's
 // handlers and of server's error and panic handlers are told apart by
@@ -23,4 +35,13 @@ func Request(e *zerolog.Event, method, path string) *zerolog.Event {
 // that recovered rather than at this one.
 func Panic(e *zerolog.Event, recovered any, stack []byte) *zerolog.Event {
 	return e.Interface("panic", recovered).Bytes("stack", stack)
+}
+
+// Entity adds entity, the name a service gives the rows of one table, to
+// e under the key every line about those rows carries it under, and
+// returns e. crud writes it on the line a service logs for each row it
+// writes, and notify on the panic of a notification about one, so a
+// search for one table's rows finds both.
+func Entity(e *zerolog.Event, entity string) *zerolog.Event {
+	return e.Str("entity", entity)
 }
