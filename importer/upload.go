@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/mas-ony/go-toolkit/datetime"
+	"github.com/mas-ony/go-toolkit/ptr"
 	"github.com/mas-ony/go-toolkit/xlsx"
 	"github.com/shopspring/decimal"
 )
@@ -337,10 +338,7 @@ func (r *Row) Probe() *Row {
 // Peek returns the text of a cell as Text reads it, or "" for an empty
 // one, and notes nothing on the row.
 func (r *Row) Peek(caption string) string {
-	if text := r.Probe().Text(caption); text != nil {
-		return *text
-	}
-	return ""
+	return ptr.Value(r.Probe().Text(caption))
 }
 
 // PeekAbove is Peek of the nearest row above r whose cell under caption

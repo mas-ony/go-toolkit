@@ -66,7 +66,7 @@
 // paths, the 400s of Bind and Required, the 500 that keeps its cause in
 // the log, Fetch's answers over a key that is not an int, RequireOwner's
 // 403 and 404 and its log line, the order of guard and decode, and the
-// envelope checks of BatchRows. Each source
-// file's tests sit in the test file named for it, over the fake service
-// and the app base_test.go declares.
+// envelope checks of BatchRows. Each source file's tests sit in the test
+// file named for it, over the fake service and the app base_test.go
+// declares.
 package rest

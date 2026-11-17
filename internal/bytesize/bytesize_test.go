@@ -35,3 +35,29 @@ func TestLabelStaysTruthful(t *testing.T) {
 		}
 	}
 }
+
+// Bytes never reaches for a larger unit, which is all that separates it
+// from Label: a limit whose reader has to see the unit is given in bytes
+// at any size. A count no unit divides reads the same through either, so
+// the two cannot spell the unit differently.
+func TestBytesNamesTheUnitAtAnySize(t *testing.T) {
+	t.Parallel()
+
+	for _, c := range []struct {
+		n    int64
+		want string
+	}{
+		{100, "100 bytes"},
+		{1024, "1024 bytes"},
+		{20 << 20, "20971520 bytes"},
+		{0, "0 bytes"},
+		{-1, "-1 bytes"},
+	} {
+		if got := Bytes(c.n); got != c.want {
+			t.Errorf("Bytes(%d) = %q, want %q", c.n, got, c.want)
+		}
+	}
+	if got, want := Label(1023), Bytes(1023); got != want {
+		t.Errorf("Label(1023) = %q, want %q as Bytes gives it", got, want)
+	}
+}

@@ -548,9 +548,13 @@ func MaxFileLabel() string {
 // characters" for a limit counted in bytes is a promise the check does not
 // keep.
 //
+// The figure is given in bytes whatever its size, by bytesize.Bytes, the
+// form bytesize.Label gives a cap no unit divides, so both labels spell
+// the unit one way and a cap of 1024 reads "1024 bytes", not "1 KiB".
+//
 // A disabled cap misreads the same way MaxFileLabel's does.
 func MaxNameLabel() string {
-	return fmt.Sprintf("%d bytes", MaxNameLen)
+	return bytesize.Bytes(int64(MaxNameLen))
 }
 
 // SafeName reduces a supplied filename to a single path element that is safe

@@ -198,6 +198,8 @@ func (f *fakeService) called(name string) bool {
 	return slices.Contains(f.calls, name)
 }
 
+// Create gives r the id 100, as an insert would, and keeps it as the row
+// written.
 func (f *fakeService) Create(_ context.Context, r *row) (*row, error) {
 	f.calls = append(f.calls, "Create")
 	if f.createErr != nil {
@@ -208,6 +210,8 @@ func (f *fakeService) Create(_ context.Context, r *row) (*row, error) {
 	return r, nil
 }
 
+// CreateBatch keeps rows as the batch written and returns a pointer to
+// each, in order. It fails as Create does.
 func (f *fakeService) CreateBatch(
 	_ context.Context,
 	rows []row,
@@ -224,6 +228,8 @@ func (f *fakeService) CreateBatch(
 	return out, nil
 }
 
+// Read keeps opt as the option it was given and returns every row, in no
+// particular order, with their number as the total.
 func (f *fakeService) Read(
 	_ context.Context,
 	opt rowOption,
@@ -240,6 +246,7 @@ func (f *fakeService) Read(
 	return items, len(items), nil
 }
 
+// ReadByID returns the row kept under id, or nil when there is none.
 func (f *fakeService) ReadByID(_ context.Context, id int) (*row, error) {
 	f.calls = append(f.calls, "ReadByID")
 	if f.readByIDErr != nil {
@@ -266,12 +273,14 @@ func (f *fakeService) ReadByName(
 	return nil, nil
 }
 
+// Update keeps r as the row written, whether or not it then fails.
 func (f *fakeService) Update(_ context.Context, r *row) error {
 	f.calls = append(f.calls, "Update")
 	f.written = r
 	return f.updateErr
 }
 
+// Delete removes nothing: a test reads that it ran, not what is left.
 func (f *fakeService) Delete(_ context.Context, _ int) error {
 	f.calls = append(f.calls, "Delete")
 	return f.deleteErr

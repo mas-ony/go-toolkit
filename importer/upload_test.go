@@ -96,9 +96,15 @@ func openUpload(t *testing.T, workbook []byte, l UploadLayout) *Sheet {
 	return s
 }
 
-func (d *uploadDataset) Name() string         { return "uji" }
+// Name is the name an upload would pick the dataset by.
+func (d *uploadDataset) Name() string { return "uji" }
+
+// Layout is export, the layout every workbook here is written to.
 func (d *uploadDataset) Layout() UploadLayout { return export }
 
+// Import keeps the codes of rows as one record, and keeps nothing once
+// reading a code has failed its row, as the interface asks of a record
+// whose rows fail their checks.
 func (d *uploadDataset) Import(_ context.Context, rows []*Row) error {
 	var codes []string
 	for _, r := range rows {

@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/mas-ony/go-toolkit/internal/upstream"
+	"github.com/mas-ony/go-toolkit/ptr"
 )
 
 // loggedCredential is why a credential cannot sit in a URL key: every
@@ -49,11 +50,12 @@ const (
 
 // configured reports whether c holds any setting at all: it is not nil,
 // and not the zero value every key reads as when no source supplied one.
-// Each section's Configured method is this, so a section is judged absent
-// by one rule whichever package asks.
+// ptr.Value reads a nil c as that same zero value, so both cases are one
+// comparison. Each section's Configured method is this, so a section is
+// judged absent by one rule whichever package asks.
 func configured[T comparable](c *T) bool {
 	var zero T
-	return c != nil && *c != zero
+	return ptr.Value(c) != zero
 }
 
 // nilLabel is what a String prints for a nil receiver; typeName is the

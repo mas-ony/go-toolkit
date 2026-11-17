@@ -7,6 +7,7 @@ import (
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/mas-ony/go-toolkit/internal/logfield"
+	"github.com/mas-ony/go-toolkit/ptr"
 	"github.com/mas-ony/go-toolkit/response"
 	"github.com/rs/zerolog"
 )
@@ -74,14 +75,15 @@ func BadRequest(msg string) error {
 }
 
 // Required answers 400 "<name> is required" when v is nil or holds the
-// zero value of its type: an empty string, or an id of 0. cmp.Or answers
+// zero value of its type: an empty string, or an id of 0. It reads v
+// through ptr.Value, which reads nil as that zero value. cmp.Or answers
 // a body that fails several checks with the first in its list:
 //
 //	err := cmp.Or(rest.Required(req.Kode, "kode"),
 //		rest.Required(req.Nama, "nama"))
 func Required[V comparable](v *V, name string) error {
 	var zero V
-	if v == nil || *v == zero {
+	if ptr.Value(v) == zero {
 		return BadRequest(name + " is required")
 	}
 	return nil

@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/mas-ony/go-toolkit/ptr"
 	"github.com/xuri/excelize/v2"
 )
 
@@ -129,7 +130,8 @@ type File struct {
 var ErrClosed = errors.New("workbook is closed")
 
 // uses1904 reports whether the workbook counts dates from 1904 rather
-// than 1900.
+// than 1900. A workbook that cannot be asked, or that does not say, counts
+// from 1900.
 //
 // Asking the file is better than asking the operator. A workbook authored
 // in classic Mac Excel shifts every date by four years and a day when
@@ -140,10 +142,7 @@ var ErrClosed = errors.New("workbook is closed")
 // consumes Date1904.
 func uses1904(f *excelize.File) bool {
 	props, err := f.GetWorkbookProps()
-	if err != nil || props.Date1904 == nil {
-		return false
-	}
-	return *props.Date1904
+	return err == nil && ptr.Value(props.Date1904)
 }
 
 // normaliseCaption lowercases a caption and collapses runs of whitespace

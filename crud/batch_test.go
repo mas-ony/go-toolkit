@@ -30,6 +30,8 @@ type entryRepository struct {
 	BaseRepo[entry, int, entryRepo]
 }
 
+// entrySpec describes entry's table: a generated key and the one column
+// Create writes.
 var entrySpec = TableSpec[entry, int]{
 	Name:        "entry",
 	Alias:       "e",

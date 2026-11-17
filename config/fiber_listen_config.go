@@ -101,7 +101,7 @@ const maxUnixSocketFileMode = 0o777
 // that silently loses requests. That is the right way round for a guess.
 //
 // Pinning the dependency is what keeps it honest; go.mod holds fasthttp at
-// v1.77.0, where this is 5s. Re-read shutdownChildren on every bump.
+// v1.79.0, where this is 5s. Re-read shutdownChildren on every bump.
 const defaultPreforkShutdownGracePeriod = 5 * time.Second
 
 // validListenerNetworks is the allowlist checked by ListenConfig.Validate,

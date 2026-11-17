@@ -313,7 +313,7 @@ func Custom[T any](
 func (epoch1904) Date1904() bool { return true }
 
 // Columns renders the whole table as the layout contract, for
-// xlsx.VerifyHeaders and xlsx.DataRows.
+// xlsx.File.VerifyHeaders and xlsx.File.DataRows.
 //
 // Every field is included, Expect entries and all. That is what makes a
 // blank-row skip safe: DataRows tests the columns the caller declared an

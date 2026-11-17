@@ -17,7 +17,7 @@ go get github.com/mas-ony/go-toolkit
 
 ## Requirements
 
-- Go 1.27.3 or newer.
+- Go 1.27.4 or newer.
 - MySQL / MariaDB, or SQL Server / Azure SQL, for `database` and `crud`.
 - No cgo. The SQLite store behind `whatsapp` is pure Go, built from
   Wasm, so there is no gcc at build time.
@@ -61,16 +61,18 @@ so the packages that apply it cannot drift apart:
   port falls in, the words a key left unset and a section never built
   are refused in, and how a section left out is told from one filled in
   wrong.
-- `internal/strlist`: comma-separated lists, and the form a configured
-  word is read in.
+- `internal/strlist`: comma-separated lists, the form a configured word
+  is read in, and how a word is found in a list that keeps its own
+  spellings, which `config` holds SameSite to and `email` picks an AUTH
+  mechanism by.
 - `internal/dbdriver`: the driver names and encrypt modes `config`
   validates and `database` connects with.
 - `internal/basename`: the path elements that name no file, which
   `fileutil` folds onto its fallback name and `xlsx` refuses as a link
   target.
 - `internal/bytesize`: how a limit counted in bytes is named in a
-  message, which `fileutil` names its upload cap by and `xlsx` its unzip
-  cap.
+  message, which `fileutil` names its upload cap and the cap on a name's
+  length by and `xlsx` its unzip cap.
 - `internal/logfield`: the key a handler's lines carry its name under,
   and the keys a log line about a request carries its method and path
   under, which `rest` and `server` both log by, the keys a recovered

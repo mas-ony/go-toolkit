@@ -345,7 +345,7 @@ func NewZerologConfig(v *viper.Viper) *ZerologConfig {
 			// written to the structured log entry for every HTTP request. The
 			// order here determines the order of keys in the log output.
 			//
-			// Available field names (constants in contrib zerolog v1.1.7 —
+			// Available field names (constants in contrib zerolog v1.1.11 —
 			// unknown names are silently ignored, so a typo produces no field
 			// and no error):
 			//   error         — handler error message (only added when

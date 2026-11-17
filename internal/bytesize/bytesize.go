@@ -20,6 +20,18 @@ func Label(n int64) string {
 	case n >= 1<<10 && n%(1<<10) == 0:
 		return fmt.Sprintf("%d KiB", n>>10)
 	default:
-		return fmt.Sprintf("%d bytes", n)
+		return Bytes(n)
 	}
+}
+
+// Bytes renders a byte count in bytes whatever its size, "100 bytes" and
+// "1024 bytes" alike, where Label would print the second as "1 KiB". It
+// is the form Label gives a count no unit divides, so the unit is spelled
+// in one place.
+//
+// It is for a limit whose reader has to be told the unit, such as the
+// length of a file name, which a client may otherwise take for a count of
+// characters.
+func Bytes(n int64) string {
+	return fmt.Sprintf("%d bytes", n)
 }

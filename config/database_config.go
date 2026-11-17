@@ -93,10 +93,10 @@ type DatabaseConfig struct {
 	// Driver is the database driver name.
 	//
 	// Normalised to lowercase by NewDatabaseConfig, so config.yaml and the
-	// environment may spell it any way. A struct built by hand (db_test.go
-	// does this) skips that step, which is why every reader resolves it
-	// through dbdriver.Engine, which lowercases again rather than trusting
-	// the field.
+	// environment may spell it any way. A struct built by hand (database's
+	// db_test.go does this) skips that step, which is why every reader
+	// resolves it through dbdriver.Engine, which lowercases again rather
+	// than trusting the field.
 	//
 	// Allowed values: mysql | mssql | sqlserver
 	Driver string

@@ -48,8 +48,9 @@ const itLocation = "Asia/Jakarta"
 // itAppName is the application name every AppConfig here carries.
 const itAppName = "go-toolkit-it"
 
-// itPoolLimits are small enough that the open limit can be reached, and
-// reaching it is the only way to show the limit was applied at all.
+// itMaxOpen and itMaxIdle are small enough that the open limit can be
+// reached, and reaching it is the only way to show the limit was applied
+// at all.
 const (
 	itMaxOpen = 3
 	itMaxIdle = 2

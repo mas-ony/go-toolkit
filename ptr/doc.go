@@ -10,6 +10,12 @@
 //
 //	nama := cmp.Or(ptr.Value(u.Nama), "-")
 //
+// The toolkit reads its own optional values through Value too, so nil is
+// read as the zero value by one function wherever that is the rule:
+// config tells a section no source supplied by it, rest.Required a field
+// a body left out, importer's Row.Peek an empty cell, and xlsx a workbook
+// that does not say which epoch its dates count from.
+//
 // Taking the address of a value needs no helper: new(v) does that since
 // Go 1.26.
 //

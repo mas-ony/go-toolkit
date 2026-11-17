@@ -1801,6 +1801,12 @@ func TestLabelsTrackTheirLimits(t *testing.T) {
 	if got, want := MaxNameLabel(), "50 bytes"; got != want {
 		t.Errorf("MaxNameLabel: got %q, want %q", got, want)
 	}
+	// A name's cap stays in bytes at a size a unit divides, where the
+	// upload cap above would be named in that unit.
+	MaxNameLen = 1024
+	if got, want := MaxNameLabel(), "1024 bytes"; got != want {
+		t.Errorf("MaxNameLabel: got %q, want %q", got, want)
+	}
 }
 
 // TestMaxNameLabelNamesTheUnit is separate because the unit is the half that

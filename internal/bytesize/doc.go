@@ -9,6 +9,10 @@
 // of them is edited, and rounding to a fixed unit instead would name a
 // cap under one mebibyte as 0 MiB.
 //
+// Bytes is the plain form on its own, for a limit given in bytes at any
+// size. fileutil names the cap on a file name's length by it, through
+// MaxNameLabel, so that label spells its unit as the other two do.
+//
 // The package is internal because none of it is a contract with a
 // service. It is the toolkit agreeing with itself, and its API moves
 // whenever a caller needs it to.

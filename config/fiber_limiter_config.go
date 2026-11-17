@@ -155,8 +155,8 @@ import (
 // limiter.Config.Storage addresses restarts, replicas and prefork workers
 // alike, and it is Go code at the registration site rather than a key, since
 // fiber.Storage needs a DSN, a driver, and a Close() that something has to
-// own. IT IS NOT A FREE WIN, and
-// two properties should be settled before it is reached for:
+// own. IT IS NOT A FREE WIN, and two properties should be settled before it
+// is reached for:
 //
 //   - It makes the limiter FAIL CLOSED. On the memory path a store operation
 //     has exactly one error return and it is unreachable by construction (see
@@ -355,11 +355,11 @@ func NewLimiterConfig(v *viper.Viper) *LimiterConfig {
 			//
 			// Where it is replaced is narrower than the name suggests, and
 			// narrow enough that, with Storage nil as this package leaves
-			// it, the key does NOTHING. The flag
-			// reaches exactly one place: manager.logKey, called only while
-			// formatting the error strings manager.get and manager.set return
-			// when an operation fails. Four of its five call sites sit behind
-			// a non-nil Storage, and Storage is nil here.
+			// it, the key does NOTHING. The flag reaches exactly one place:
+			// manager.logKey, called only while formatting the error strings
+			// manager.get and manager.set return when an operation fails.
+			// Four of its five call sites sit behind a non-nil Storage, and
+			// Storage is nil here.
 			//
 			// The fifth is on the in-memory path — manager.get formats the key
 			// when the value it read back is not an *item — and it cannot fire

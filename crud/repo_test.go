@@ -147,6 +147,9 @@ type seen struct{ table, method, err string }
 // errFake is the failure a fakeDB with err set answers with.
 var errFake = errors.New("fake: connection reset")
 
+// itemSpec describes item's table as a service describes one: a generated
+// key, an Update that leaves code alone, a Patch allowed both columns,
+// and the columns a list searches and sorts by.
 var itemSpec = TableSpec[item, int]{
 	Name:  "item",
 	Alias: "i",
@@ -165,6 +168,9 @@ var itemSpec = TableSpec[item, int]{
 	DefaultSort: "i.id",
 }
 
+// holidaySpec describes holiday's table, keyed by the code a row carries:
+// KeyOf reads it, Create writes it with the note, and Update leaves it
+// alone.
 var holidaySpec = TableSpec[holiday, string]{
 	Name:  "holiday",
 	Alias: "h",
@@ -185,6 +191,9 @@ var holidaySpec = TableSpec[holiday, string]{
 	DefaultSort: "h.code",
 }
 
+// stampedSpec describes stamped's table, whose logged column is a stamp:
+// Create and Update write it as the value the row carries or, when it
+// carries none, the server's clock.
 var stampedSpec = TableSpec[stamped, int]{
 	Name:  "stamped",
 	Alias: "s",
